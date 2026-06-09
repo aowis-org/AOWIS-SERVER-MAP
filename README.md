@@ -1,4 +1,4 @@
-# AOWIS-Server-MAP
+# AOWIS-SERVER-MAP
 RESTful Caching Map Tile Server for **AOWIS-EPANET-GUI**
 
 **IMPORTANT:**
