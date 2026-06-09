@@ -1,0 +1,28 @@
+[Unit]
+Description=AOWIS EPANET Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/aowis-epanet-server
+User=aowis-server
+Group=aowis-server
+Restart=always
+RestartSec=3
+
+# Watchdog: the binary must call sd_notify("WATCHDOG=1") periodically
+WatchdogSec=30s
+NotifyAccess=all
+
+# Hardening (optional but recommended)
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+[Install]
+WantedBy=multi-user.target
