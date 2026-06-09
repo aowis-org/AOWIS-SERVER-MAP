@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(aowis-epanet-server LANGUAGES CXX)
+project(aowis-server-map LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -10,14 +10,14 @@ set(CMAKE_AUTORCC ON)
 
 find_package(Qt6 REQUIRED COMPONENTS Core Network HttpServer)
 
-qt_add_executable(aowis-epanet-server
+qt_add_executable(aowis-server-map
     src/main.cpp
     src/maptiles.h src/maptiles.cpp
     src/rest_client.h src/rest_client.cpp
     src/server.h src/server.cpp
 )
 
-target_link_libraries(aowis-epanet-server
+target_link_libraries(aowis-server-map
     PRIVATE
         Qt6::Core
         Qt6::Network
