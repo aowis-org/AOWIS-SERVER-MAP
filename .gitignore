@@ -1,3 +1,4 @@
+*.kate-swp
 # C++ objects and libs
 *.slo
 *.lo
