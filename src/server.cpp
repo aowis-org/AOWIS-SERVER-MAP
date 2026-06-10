@@ -25,7 +25,7 @@ void Server::setupRoutes()
     connect(this->maptiles, &MapTiles::tileReady, this, &Server::onTileReady);
     
     // GET /
-    this->http.route("/", QHttpServerRequest::Method::Get,
+    this->http.route("/status", QHttpServerRequest::Method::Get,
                     [](const QHttpServerRequest &)
                     {
                         QHttpServerResponse resp("Hello from Qt 6.11 HttpServer!",
@@ -34,7 +34,7 @@ void Server::setupRoutes()
                         return resp;
                     });
     // OPTIONS /
-    this->http.route("/", QHttpServerRequest::Method::Options,
+    this->http.route("/status", QHttpServerRequest::Method::Options,
                     [](const QHttpServerRequest &)
                     {
                         QHttpServerResponse resp(QHttpServerResponse::StatusCode::Ok);
@@ -42,7 +42,7 @@ void Server::setupRoutes()
                         return resp;
                     });
     // GET /maptiles
-    this->http.route("/maptiles/<arg>/<arg>/<arg>/<arg>.png",
+    this->http.route("/<arg>/<arg>/<arg>/<arg>.png",
                     [this](const QString &provider, int z, int x, int y, const QHttpServerRequest &request)
                      -> QFuture<QHttpServerResponse>
                     {
@@ -80,7 +80,7 @@ void Server::setupRoutes()
                         return future;
                     });
     // OPTIONS /maptiles
-    this->http.route("/maptiles", QHttpServerRequest::Method::Options,
+    this->http.route("/", QHttpServerRequest::Method::Options,
                     [](const QHttpServerRequest &)
                     {
                         return QHttpServerResponse(QHttpServerResponse::StatusCode::Ok);
