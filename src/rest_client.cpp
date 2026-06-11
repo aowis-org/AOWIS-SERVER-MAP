@@ -10,7 +10,7 @@ RESTClient::RESTClient(const QString &url_base, QObject *parent)
 void RESTClient::get(const QString &endpoint)
 {
     QNetworkRequest req((this->url_base + endpoint));
-    req.setRawHeader("User-Agent", "aowis-epanet-gui/1.0 (https://github.com/aowis-org/AOWIS-EPANET-GUI)");
+    req.setRawHeader("User-Agent", "aowis-server-map/1.0 (https://github.com/aowis-org/AOWIS-SERVER-MAP)");
     //req.setRawHeader("Accept-Language", "en-DK");
     //req.setRawHeader("Accept-Encoding", "gzip, deflate, br");
     req.setHeader(QNetworkRequest::ContentTypeHeader, "application/octet-stream");

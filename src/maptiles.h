@@ -23,13 +23,14 @@ public:
     QByteArray getTile(QString provider, int z, int x, int y, QString key);
 
 private:
-    QString path_osm;
+    QString fscache_base;
+    QString fscache_path;
     
     QMutex downloads_mutex;
     QSet<QString> downloads_active;
     
-    void getOpenStreetMapTile(QString tile_path, int z, int x, int y, QString key);
-    void saveOpenStreetMapTile(QString key, const QByteArray &data, QString tile_path);
+    void getMapTile(QString url, QString path, QString tile_path, int z, int x, int y, QString key);
+    void saveMapTile(const QByteArray &data, QString tile_path);
 
 signals:
     void tileReady(QString key, QByteArray data);

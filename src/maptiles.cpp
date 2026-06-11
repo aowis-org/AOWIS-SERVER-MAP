@@ -4,19 +4,36 @@ MapTiles::MapTiles(QObject *parent)
     : QObject{parent}
 {
     // init tile cache location
-    QString base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-    this->path_osm = base + "/maptiles/osm/";
-    
-    QDir dir;
-    if (!dir.mkpath(this->path_osm)) {
-        qWarning() << "Failed to create directory:" << this->path_osm;
-    }
+    this->fscache_base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
 }
 
 QByteArray MapTiles::getTile(QString provider, int z, int x, int y, QString key)
 {
+    QString path = QString("%1/%2/%3.png").arg(z).arg(x).arg(y);
+    QString url = "";
+    if (provider == "openstreetmap")
+    {
+        url = "https://tile.openstreetmap.org/";
+        this->fscache_path = this->fscache_base + "/maptiles/openstreetmap/";
+    }
+    else if (provider == "opentopomap")
+    {
+        url = "https://tile.opentopomap.org/";
+        this->fscache_path = this->fscache_base + "/maptiles/opentopomap/";
+    }
+    else if (provider == "arcgis")
+    {
+        path = QString("%1/%2/%3").arg(z).arg(y).arg(x);
+        url = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/";
+        this->fscache_path = this->fscache_base + "/maptiles/arcgis/";
+    }
+    QDir dir;
+    if (!dir.mkpath(this->fscache_path)) {
+        qWarning() << "Failed to create directory:" << this->fscache_path;
+    }
+    
     QString file_name = QString("%1/%2/%3.png").arg(z).arg(x).arg(y);    
-    QString tile_path = QDir(this->path_osm).filePath(file_name);
+    QString tile_path = QDir(this->fscache_path).filePath(file_name);
     
     qDebug() << tile_path;
     
@@ -30,7 +47,7 @@ QByteArray MapTiles::getTile(QString provider, int z, int x, int y, QString key)
         if (!file.open(QIODevice::ReadOnly))
         {
             // if for some reason the tile turns out to be not readable, download it again
-            getOpenStreetMapTile(tile_path, z, x, y, key);
+            getMapTile(url, path, tile_path, z, x, y, key);
             
             // return empty QByteArray to signal that download in progress
             return {};
@@ -44,14 +61,14 @@ QByteArray MapTiles::getTile(QString provider, int z, int x, int y, QString key)
         // File does NOT exist yet: Initiating Download
         qDebug() << "File does NOT exist:" << tile_path;
         
-        getOpenStreetMapTile(tile_path, z, x, y, key);
+        getMapTile(url, path, tile_path, z, x, y, key);
         
         // return empty QByteArray to signal that download in progress
         return {};
     }
 }
 
-void MapTiles::getOpenStreetMapTile(QString tile_path, int z, int x, int y, QString key)
+void MapTiles::getMapTile(QString url, QString path, QString tile_path, int z, int x, int y, QString key)
 {
     // check if this tile is already being downloaded and only proceede if not yet
     {
@@ -61,12 +78,12 @@ void MapTiles::getOpenStreetMapTile(QString tile_path, int z, int x, int y, QStr
         this->downloads_active.insert(key);
     }
     
-    RESTClient *rest = new RESTClient("https://tile.openstreetmap.org/", this);
+    RESTClient *rest = new RESTClient(url, this);
     connect(rest, &RESTClient::requestFinished, this, [this, rest, tile_path, z, x, y, key](const QByteArray &data) {
         
         emit tileReady(key, data);
         
-        saveOpenStreetMapTile(key, data, tile_path);
+        saveMapTile(data, tile_path);
         
         QMutexLocker locker(&this->downloads_mutex);
         this->downloads_active.remove(key);
@@ -81,11 +98,10 @@ void MapTiles::getOpenStreetMapTile(QString tile_path, int z, int x, int y, QStr
         
         rest->deleteLater();
     });
-    QString path = QString("%1/%2/%3.png").arg(z).arg(x).arg(y);
     rest->get(path);
 }
 
-void MapTiles::saveOpenStreetMapTile(QString key, const QByteArray &data, QString tile_path)
+void MapTiles::saveMapTile(const QByteArray &data, QString tile_path)
 {
     // create all dirs in path if not exist yet
     QFileInfo info(tile_path);
@@ -105,4 +121,3 @@ void MapTiles::saveOpenStreetMapTile(QString key, const QByteArray &data, QStrin
         qDebug() << "Failed to save tile: " << tile_path;
     }
 }
-
