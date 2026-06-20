@@ -16,6 +16,11 @@ QByteArray MapTiles::getTile(QString provider, int z, int x, int y, QString key)
         url = "https://tile.openstreetmap.org/";
         this->fscache_path = this->fscache_base + "/maptiles/openstreetmap/";
     }
+    else if (provider == "osmcyclo")
+    {
+        url = "https://a.tile-cyclosm.openstreetmap.fr/cyclosm/";
+        this->fscache_path = this->fscache_base + "/maptiles/osmcyclo/";
+    }
     else if (provider == "opentopomap")
     {
         url = "https://tile.opentopomap.org/";
