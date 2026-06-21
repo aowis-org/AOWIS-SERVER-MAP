@@ -9,7 +9,7 @@
 #include <QMutex>
 #include <QMutexLocker>
 
-#include "rest_client.h"
+#include "http_client_tilefetch.h"
 
 #include <QDebug>
 

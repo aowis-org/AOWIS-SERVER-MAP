@@ -1,13 +1,13 @@
-#include "rest_client.h"
+#include "http_client_tilefetch.h"
 
-RESTClient::RESTClient(const QString &url_base, QObject *parent)
+TileHttpClient::TileHttpClient(const QString &url_base, QObject *parent)
     : QObject{parent},
     url_base(url_base)
 {
     
 }
 
-void RESTClient::get(const QString &endpoint)
+void TileHttpClient::get(const QString &endpoint)
 {
     QNetworkRequest req((this->url_base + endpoint));
     req.setRawHeader("User-Agent", "aowis-server-map/1.0 (https://github.com/aowis-org/AOWIS-SERVER-MAP)");
@@ -22,7 +22,7 @@ void RESTClient::get(const QString &endpoint)
     });
 }
 
-void RESTClient::post(const QString &endpoint, const QJsonObject &payload)
+void TileHttpClient::post(const QString &endpoint, const QJsonObject &payload)
 {
     QNetworkRequest req((this->url_base + endpoint));
     req.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
@@ -35,7 +35,7 @@ void RESTClient::post(const QString &endpoint, const QJsonObject &payload)
     });
 }
 
-void RESTClient::handleReply(QNetworkReply *reply)
+void TileHttpClient::handleReply(QNetworkReply *reply)
 {
     if (reply->error() != QNetworkReply::NoError)
     {

@@ -83,8 +83,8 @@ void MapTiles::getMapTile(QString url, QString path, QString tile_path, int z, i
         this->downloads_active.insert(key);
     }
     
-    RESTClient *rest = new RESTClient(url, this);
-    connect(rest, &RESTClient::requestFinished, this, [this, rest, tile_path, z, x, y, key](const QByteArray &data) {
+    TileHttpClient *rest = new TileHttpClient(url, this);
+    connect(rest, &TileHttpClient::requestFinished, this, [this, rest, tile_path, z, x, y, key](const QByteArray &data) {
         
         emit tileReady(key, data);
         
@@ -95,7 +95,7 @@ void MapTiles::getMapTile(QString url, QString path, QString tile_path, int z, i
         
         rest->deleteLater();
     });
-    connect(rest, &RESTClient::requestError, this, [this, rest, key](const QString &err) {
+    connect(rest, &TileHttpClient::requestError, this, [this, rest, key](const QString &err) {
         qDebug() << "fail: " << err;
         
         QMutexLocker locker(&this->downloads_mutex);

@@ -1,5 +1,5 @@
-#ifndef REST_CLIENT_H
-#define REST_CLIENT_H
+#ifndef HTTP_CLIENT_TILEFETCH_H
+#define HTTP_CLIENT_TILEFETCH_H
 
 #include <QObject>
 
@@ -10,11 +10,11 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 
-class RESTClient : public QObject
+class TileHttpClient : public QObject
 {
     Q_OBJECT
 public:
-    explicit RESTClient(const QString &url_base, QObject *parent = nullptr);
+    explicit TileHttpClient(const QString &url_base, QObject *parent = nullptr);
     
     void get(const QString &endpoint);
     void post(const QString &endpoint, const QJsonObject &payload);
@@ -30,4 +30,4 @@ signals:
     void requestError(const QString &error);
 };
 
-#endif // REST_CLIENT_H
+#endif // HTTP_CLIENT_TILEFETCH_H
