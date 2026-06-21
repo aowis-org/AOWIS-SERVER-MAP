@@ -10,16 +10,6 @@ set(CMAKE_AUTORCC ON)
 
 find_package(Qt6 REQUIRED COMPONENTS Core Network HttpServer)
 
-qt_add_executable(aowis-server-map
-    src/main.cpp
-    src/maptiles.h src/maptiles.cpp
-    src/rest_client.h src/rest_client.cpp
-    src/server.h src/server.cpp
-)
+add_subdirectory(src/lib)
+add_subdirectory(src/server)
 
-target_link_libraries(aowis-server-map
-    PRIVATE
-        Qt6::Core
-        Qt6::Network
-        Qt6::HttpServer
-)
