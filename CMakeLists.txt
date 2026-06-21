@@ -8,8 +8,12 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
 
+option(AOWIS_SERVER_MAP_BUILD_SERVER "Build AOWIS map REST server executable" ON)
+
 find_package(Qt6 REQUIRED COMPONENTS Core Network HttpServer)
 
 add_subdirectory(src/lib)
-add_subdirectory(src/server)
 
+if(AOWIS_SERVER_MAP_BUILD_SERVER)
+    add_subdirectory(src/server)
+endif()
