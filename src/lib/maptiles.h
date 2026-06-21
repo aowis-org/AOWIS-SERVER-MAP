@@ -16,12 +16,12 @@
 class MapTiles : public QObject
 {
     Q_OBJECT
-
+    
 public:
     explicit MapTiles(QObject *parent = nullptr);
     
     QByteArray getTile(QString provider, int z, int x, int y, QString key);
-
+    
 private:
     QString fscache_base;
     QString fscache_path;
@@ -31,9 +31,10 @@ private:
     
     void getMapTile(QString url, QString path, QString tile_path, int z, int x, int y, QString key);
     void saveMapTile(const QByteArray &data, QString tile_path);
-
+    
 signals:
     void tileReady(QString key, QByteArray data);
+    void tileFailed(const QString &key);
 };
 
 #endif // MAPTILES_H
