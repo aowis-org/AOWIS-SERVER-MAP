@@ -1,5 +1,5 @@
 # AOWIS-SERVER-MAP
-RESTful Caching Map Tile Server for **AOWIS-EPANET-GUI**
+RESTful Caching Map Tile Server for [AOWIS-SERVER-GUI](https://github.com/aowis-org/AOWIS-SERVER-GUI)
 
 **IMPORTANT:**
 
