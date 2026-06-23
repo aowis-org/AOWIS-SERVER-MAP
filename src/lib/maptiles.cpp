@@ -7,6 +7,16 @@ MapTiles::MapTiles(QObject *parent)
     this->fscache_base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
 }
 
+QString MapTiles::domainRandomizer(QString url)
+{
+    static const QStringList subdomains = { "a", "b", "c" };
+    
+    const int index = QRandomGenerator::global()->bounded(subdomains.size());
+    const QString subdomain = subdomains.at(index);
+    
+    return url.arg(subdomain);
+}
+
 QByteArray MapTiles::getTile(QString provider, int z, int x, int y, QString key)
 {
     QString path = QString("%1/%2/%3.png").arg(z).arg(x).arg(y);
@@ -18,7 +28,9 @@ QByteArray MapTiles::getTile(QString provider, int z, int x, int y, QString key)
     }
     else if (provider == "osmcyclo")
     {
-        url = "https://a.tile-cyclosm.openstreetmap.fr/cyclosm/";
+        
+        url = "https://%1.tile-cyclosm.openstreetmap.fr/cyclosm/";
+        url = domainRandomizer(url);
         this->fscache_path = this->fscache_base + "/maptiles/osmcyclo/";
     }
     else if (provider == "opentopomap")
@@ -133,3 +145,5 @@ void MapTiles::saveMapTile(const QByteArray &data, QString tile_path)
         qDebug() << "Failed to save tile: " << tile_path;
     }
 }
+
+

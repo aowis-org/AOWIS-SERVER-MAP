@@ -9,6 +9,8 @@
 #include <QMutex>
 #include <QMutexLocker>
 
+#include <QRandomGenerator>
+
 #include "http_client_tilefetch.h"
 
 #include <QDebug>
@@ -31,6 +33,8 @@ private:
     
     void getMapTile(QString url, QString path, QString tile_path, int z, int x, int y, QString key);
     void saveMapTile(const QByteArray &data, QString tile_path);
+    
+    QString domainRandomizer(QString url);
     
 signals:
     void tileReady(QString key, QByteArray data);
