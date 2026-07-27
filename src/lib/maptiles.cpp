@@ -60,9 +60,6 @@ QByteArray MapTiles::getTile(QString provider, int z, int x, int y, QString key)
     QFileInfo info(tile_path);
     if (info.exists() && info.isFile())
     {
-        // File does exist already: returning it as QByteArray
-        qDebug() << "File exists:" << tile_path;
-        
         QFile file(tile_path);
         if (!file.open(QIODevice::ReadOnly))
         {
