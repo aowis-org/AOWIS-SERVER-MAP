@@ -55,8 +55,6 @@ QByteArray MapTiles::getTile(QString provider, int z, int x, int y, QString key)
     QString file_name = QString("%1/%2/%3.png").arg(z).arg(x).arg(y);    
     QString tile_path = QDir(this->fscache_path).filePath(file_name);
     
-    qDebug() << tile_path;
-    
     QFileInfo info(tile_path);
     if (info.exists() && info.isFile())
     {
@@ -74,10 +72,9 @@ QByteArray MapTiles::getTile(QString provider, int z, int x, int y, QString key)
         file.close();
         return data;
         
-    } else {
-        // File does NOT exist yet: Initiating Download
-        qDebug() << "File does NOT exist:" << tile_path;
-        
+    }
+    else
+    {
         getMapTile(url, path, tile_path, z, x, y, key);
         
         // return empty QByteArray to signal that download in progress
@@ -142,7 +139,7 @@ void MapTiles::saveMapTile(const QByteArray &data, QString tile_path)
         file.write(data);
         file.close();
     } else {
-        qDebug() << "Failed to save tile: " << tile_path;
+        qWarning() << "Failed to save tile: " << tile_path;
     }
 }
 
