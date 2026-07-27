@@ -47,7 +47,7 @@ void Server::setupRoutes()
                      -> QFuture<QHttpServerResponse>
                     {
                         // We should log this to the database with timestamp!
-                        qDebug() << request.headers();
+                        //qDebug() << request.headers();
                         
                         QString key = QString("%1_%2_%3_%4").arg(provider).arg(z).arg(x).arg(y);
                         
