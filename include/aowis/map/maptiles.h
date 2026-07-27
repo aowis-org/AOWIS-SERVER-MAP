@@ -11,8 +11,6 @@
 
 #include <QRandomGenerator>
 
-#include "http_client_tilefetch.h"
-
 #include <QDebug>
 
 class MapTiles : public QObject

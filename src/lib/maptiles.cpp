@@ -1,4 +1,7 @@
-#include "maptiles.h"
+#include <aowis/map/maptiles.h>
+
+#include "http_client_tilefetch.h"
+
 
 MapTiles::MapTiles(QObject *parent)
     : QObject{parent}

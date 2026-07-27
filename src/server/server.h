@@ -18,7 +18,8 @@
 
 #include <variant>
 
-#include "maptiles.h"
+#include <aowis/map/maptiles.h>
+
 
 // QHttpServer is move only.
 // Storing it in QList, QVector ... will always result in those things trying to copy during reallocation, which will break
