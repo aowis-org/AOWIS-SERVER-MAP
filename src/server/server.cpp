@@ -113,8 +113,6 @@ void Server::setupRoutes()
 
 void Server::onTileReady(QString key, QByteArray data)
 {
-    qDebug() << "Tile finished downloading:" << key;
-    
     QMutexLocker locker(&this->mutex_pending);
     
     auto it = this->connections_pending.find(key);
