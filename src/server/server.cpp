@@ -1,5 +1,7 @@
 #include "server.h"
 
+#include <QDebug>
+
 Server::Server(QCoreApplication *app, QObject *parent)
     : QObject{parent}
 {
@@ -12,7 +14,7 @@ Server::Server(QCoreApplication *app, QObject *parent)
 QHttpHeaders makeCorsHeaders() {
     QHttpHeaders h;
     h.append("Access-Control-Allow-Origin", "*");
-    h.append("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    h.append("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
     h.append("Access-Control-Allow-Headers", "Content-Type");
     return h;
 }
@@ -41,6 +43,37 @@ void Server::setupRoutes()
                         //resp.setHeaders(makeCorsHeaders());
                         return resp;
                     });
+    // DELETE /cache/provider/zoom/x-min/x-max/y-min/y-max
+    this->http.route("/cache/<arg>/<arg>/<arg>/<arg>/<arg>/<arg>", QHttpServerRequest::Method::Delete,
+                     [this](const QString &provider, int zoom, int tile_x_min, int tile_x_max,
+                            int tile_y_min, int tile_y_max)
+    {
+        const int deleted_count = this->maptiles->deleteTiles(
+            provider, zoom, tile_x_min, tile_x_max, tile_y_min, tile_y_max);
+        if (deleted_count == -1)
+        {
+            return QHttpServerResponse(
+                "Invalid tile cache deletion request",
+                QHttpServerResponse::StatusCode::BadRequest);
+        }
+        if (deleted_count < -1)
+        {
+            return QHttpServerResponse(
+                "Failed to delete one or more cached tiles",
+                QHttpServerResponse::StatusCode::InternalServerError);
+        }
+
+        return QHttpServerResponse(
+            QString::number(deleted_count),
+            QHttpServerResponse::StatusCode::Ok);
+    });
+
+    this->http.route("/cache/<arg>/<arg>/<arg>/<arg>/<arg>/<arg>", QHttpServerRequest::Method::Options,
+                     [](const QString &, int, int, int, int, int)
+    {
+        return QHttpServerResponse(QHttpServerResponse::StatusCode::Ok);
+    });
+
     // GET /maptiles
     this->http.route("/<arg>/<arg>/<arg>/<arg>.png",
                     [this](const QString &provider, int z, int x, int y, const QHttpServerRequest &request)

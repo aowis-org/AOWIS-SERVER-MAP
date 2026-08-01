@@ -2,145 +2,287 @@
 
 #include "http_client_tilefetch.h"
 
+#include <QDebug>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <QMutexLocker>
+#include <QRandomGenerator>
+#include <QStandardPaths>
+#include <QStringList>
+
+namespace
+{
+int positiveModulo(qint64 value, int divisor)
+{
+    const qint64 remainder = value % divisor;
+    return int(remainder < 0 ? remainder + divisor : remainder);
+}
+
+bool tileXInsideRange(int tile_x, int tile_count, int tile_x_min, int tile_x_max)
+{
+    const qint64 range_width = qint64(tile_x_max) - tile_x_min + 1;
+    if (range_width >= tile_count)
+        return true;
+
+    const int first_wrapped_x = positiveModulo(tile_x_min, tile_count);
+    const int offset = positiveModulo(qint64(tile_x) - first_wrapped_x, tile_count);
+    return offset < range_width;
+}
+
+bool parseCanonicalTileKey(const QString &key, QString *provider, int *zoom, int *x, int *y)
+{
+    const QStringList parts = key.split('/', Qt::KeepEmptyParts);
+    if (parts.size() != 4 || parts[0].isEmpty())
+        return false;
+
+    bool zoom_valid = false;
+    bool x_valid = false;
+    bool y_valid = false;
+    const int parsed_zoom = parts[1].toInt(&zoom_valid);
+    const int parsed_x = parts[2].toInt(&x_valid);
+    const int parsed_y = parts[3].toInt(&y_valid);
+    if (!zoom_valid || !x_valid || !y_valid)
+        return false;
+
+    *provider = parts[0];
+    *zoom = parsed_zoom;
+    *x = parsed_x;
+    *y = parsed_y;
+    return true;
+}
+}
 
 MapTiles::MapTiles(QObject *parent)
-    : QObject{parent}
+    : QObject(parent)
 {
-    // init tile cache location
     this->fscache_base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
 }
 
-QString MapTiles::domainRandomizer(QString url)
+QString MapTiles::domainRandomizer(const QString &url) const
 {
     static const QStringList subdomains = { "a", "b", "c" };
-    
+
     const int index = QRandomGenerator::global()->bounded(subdomains.size());
-    const QString subdomain = subdomains.at(index);
-    
-    return url.arg(subdomain);
+    return url.arg(subdomains.at(index));
+}
+
+QString MapTiles::providerCachePath(const QString &provider) const
+{
+    if (provider == "openstreetmap" || provider == "osmcyclo" ||
+        provider == "opentopomap" || provider == "arcgis")
+    {
+        return this->fscache_base + "/maptiles/" + provider + "/";
+    }
+
+    return QString();
+}
+
+QString MapTiles::providerUrl(const QString &provider) const
+{
+    if (provider == "openstreetmap")
+        return QStringLiteral("https://tile.openstreetmap.org/");
+    if (provider == "osmcyclo")
+        return domainRandomizer(QStringLiteral("https://%1.tile-cyclosm.openstreetmap.fr/cyclosm/"));
+    if (provider == "opentopomap")
+        return QStringLiteral("https://tile.opentopomap.org/");
+    if (provider == "arcgis")
+        return QStringLiteral("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/");
+
+    return QString();
+}
+
+QString MapTiles::providerTilePath(const QString &provider, int zoom, int x, int y) const
+{
+    if (provider == "arcgis")
+        return QString("%1/%2/%3").arg(zoom).arg(y).arg(x);
+
+    return QString("%1/%2/%3.png").arg(zoom).arg(x).arg(y);
+}
+
+QString MapTiles::canonicalTileKey(const QString &provider, int zoom, int x, int y) const
+{
+    return QString("%1/%2/%3/%4").arg(provider).arg(zoom).arg(x).arg(y);
 }
 
 QByteArray MapTiles::getTile(QString provider, int z, int x, int y, QString key)
 {
-    QString path = QString("%1/%2/%3.png").arg(z).arg(x).arg(y);
-    QString url = "";
-    if (provider == "openstreetmap")
+    const QString cache_path = providerCachePath(provider);
+    const QString url = providerUrl(provider);
+    if (cache_path.isEmpty() || url.isEmpty() || z < 0 || z > 30)
     {
-        url = "https://tile.openstreetmap.org/";
-        this->fscache_path = this->fscache_base + "/maptiles/openstreetmap/";
+        qWarning() << "Invalid map tile request:" << provider << z << x << y;
+        return {};
     }
-    else if (provider == "osmcyclo")
-    {
-        
-        url = "https://%1.tile-cyclosm.openstreetmap.fr/cyclosm/";
-        url = domainRandomizer(url);
-        this->fscache_path = this->fscache_base + "/maptiles/osmcyclo/";
-    }
-    else if (provider == "opentopomap")
-    {
-        url = "https://tile.opentopomap.org/";
-        this->fscache_path = this->fscache_base + "/maptiles/opentopomap/";
-    }
-    else if (provider == "arcgis")
-    {
-        path = QString("%1/%2/%3").arg(z).arg(y).arg(x);
-        url = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/";
-        this->fscache_path = this->fscache_base + "/maptiles/arcgis/";
-    }
+
+    const int tile_count = 1 << z;
+    const int wrapped_x = positiveModulo(x, tile_count);
+    if (y < 0 || y >= tile_count)
+        return {};
+
     QDir dir;
-    if (!dir.mkpath(this->fscache_path)) {
-        qWarning() << "Failed to create directory:" << this->fscache_path;
-    }
-    
-    QString file_name = QString("%1/%2/%3.png").arg(z).arg(x).arg(y);    
-    QString tile_path = QDir(this->fscache_path).filePath(file_name);
-    
-    QFileInfo info(tile_path);
+    if (!dir.mkpath(cache_path))
+        qWarning() << "Failed to create directory:" << cache_path;
+
+    const QString file_name = QString("%1/%2/%3.png").arg(z).arg(wrapped_x).arg(y);
+    const QString tile_path = QDir(cache_path).filePath(file_name);
+    const QString remote_path = providerTilePath(provider, z, wrapped_x, y);
+    const QString canonical_key = canonicalTileKey(provider, z, wrapped_x, y);
+
+    const QFileInfo info(tile_path);
     if (info.exists() && info.isFile())
     {
         QFile file(tile_path);
-        if (!file.open(QIODevice::ReadOnly))
-        {
-            // if for some reason the tile turns out to be not readable, download it again
-            getMapTile(url, path, tile_path, z, x, y, key);
-            
-            // return empty QByteArray to signal that download in progress
-            return {};
-        }
-        
-        QByteArray data = file.readAll();
-        file.close();
-        return data;
-        
+        if (file.open(QIODevice::ReadOnly))
+            return file.readAll();
     }
-    else
-    {
-        getMapTile(url, path, tile_path, z, x, y, key);
-        
-        // return empty QByteArray to signal that download in progress
-        return {};
-    }
+
+    getMapTile(url, remote_path, tile_path, canonical_key, key);
+    return {};
 }
 
-void MapTiles::getMapTile(QString url, QString path, QString tile_path, int z, int x, int y, QString key)
+int MapTiles::deleteTiles(const QString &provider, int zoom, int tile_x_min, int tile_x_max, int tile_y_min, int tile_y_max)
 {
-    // check if this tile is already being downloaded and only proceede if not yet
+    const QString cache_path = providerCachePath(provider);
+    if (cache_path.isEmpty() || zoom < 0 || zoom > 30 ||
+        tile_x_min > tile_x_max || tile_y_min > tile_y_max)
+    {
+        return -1;
+    }
+
+    const int tile_count = 1 << zoom;
+    const int bounded_y_min = qMax(0, tile_y_min);
+    const int bounded_y_max = qMin(tile_count - 1, tile_y_max);
+    if (bounded_y_min > bounded_y_max)
+        return 0;
+
     {
         QMutexLocker locker(&this->downloads_mutex);
-        if (this->downloads_active.contains(key))
-            return;
-        this->downloads_active.insert(key);
+        const QSet<QString> active_downloads = this->downloads_active;
+        for (const QString &active_key : active_downloads)
+        {
+            QString active_provider;
+            int active_zoom = 0;
+            int active_x = 0;
+            int active_y = 0;
+            if (!parseCanonicalTileKey(active_key, &active_provider, &active_zoom, &active_x, &active_y))
+                continue;
+
+            if (active_provider == provider && active_zoom == zoom &&
+                active_y >= bounded_y_min && active_y <= bounded_y_max &&
+                tileXInsideRange(active_x, tile_count, tile_x_min, tile_x_max))
+            {
+                this->downloads_invalidated.insert(active_key);
+            }
+        }
     }
-    
-    TileHttpClient *rest = new TileHttpClient(url, this);
-    connect(rest, &TileHttpClient::requestFinished, this, [this, rest, tile_path, key](const QByteArray &data)
+
+    QDir provider_dir(cache_path);
+    QDir zoom_dir(provider_dir.filePath(QString::number(zoom)));
+    if (!zoom_dir.exists())
+        return 0;
+
+    const QStringList x_directory_names = zoom_dir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+    int deleted_count = 0;
+
+    for (const QString &x_directory_name : x_directory_names)
     {
-        saveMapTile(data, tile_path);
-        
+        bool tile_x_valid = false;
+        const int tile_x = x_directory_name.toInt(&tile_x_valid);
+        if (!tile_x_valid || tile_x < 0 || tile_x >= tile_count ||
+            !tileXInsideRange(tile_x, tile_count, tile_x_min, tile_x_max))
+        {
+            continue;
+        }
+
+        QDir x_directory(zoom_dir.filePath(x_directory_name));
+        const QStringList tile_file_names = x_directory.entryList(
+            QStringList() << QStringLiteral("*.png"), QDir::Files);
+        for (const QString &tile_file_name : tile_file_names)
+        {
+            bool tile_y_valid = false;
+            const int tile_y = QFileInfo(tile_file_name).completeBaseName().toInt(&tile_y_valid);
+            if (!tile_y_valid || tile_y < bounded_y_min || tile_y > bounded_y_max)
+                continue;
+
+            const QString tile_path = x_directory.filePath(tile_file_name);
+            if (!QFile::remove(tile_path))
+            {
+                qWarning() << "Failed to delete cached tile:" << tile_path;
+                return -2;
+            }
+
+            ++deleted_count;
+        }
+
+        zoom_dir.rmdir(x_directory_name);
+    }
+
+    provider_dir.rmdir(QString::number(zoom));
+    return deleted_count;
+}
+
+void MapTiles::getMapTile(const QString &url, const QString &path, const QString &tile_path,
+                          const QString &canonical_key, const QString &response_key)
+{
+    {
+        QMutexLocker locker(&this->downloads_mutex);
+        if (this->downloads_active.contains(canonical_key))
+            return;
+
+        this->downloads_active.insert(canonical_key);
+    }
+
+    TileHttpClient *rest = new TileHttpClient(url, this);
+    connect(rest, &TileHttpClient::requestFinished, this,
+            [this, rest, tile_path, canonical_key, response_key](const QByteArray &data)
+    {
+        bool invalidated = false;
         {
             QMutexLocker locker(&this->downloads_mutex);
-            this->downloads_active.remove(key);
+            this->downloads_active.remove(canonical_key);
+            invalidated = this->downloads_invalidated.remove(canonical_key);
         }
-        
-        emit tileReady(key, data);
-        
+
+        if (!invalidated)
+            saveMapTile(data, tile_path);
+
+        emit tileReady(response_key, data);
         rest->deleteLater();
     });
-    connect(rest, &TileHttpClient::requestError, this, [this, rest, key](const QString &err)
+    connect(rest, &TileHttpClient::requestError, this,
+            [this, rest, canonical_key, response_key](const QString &error)
     {
-        qWarning() << "Tile request failed:" << key << err;
-        
+        qWarning() << "Tile request failed:" << response_key << error;
+
         {
             QMutexLocker locker(&this->downloads_mutex);
-            this->downloads_active.remove(key);
+            this->downloads_active.remove(canonical_key);
+            this->downloads_invalidated.remove(canonical_key);
         }
-        
-        emit tileFailed(key);
-        
+
+        emit tileFailed(response_key);
         rest->deleteLater();
     });
     rest->get(path);
 }
 
-void MapTiles::saveMapTile(const QByteArray &data, QString tile_path)
+void MapTiles::saveMapTile(const QByteArray &data, const QString &tile_path)
 {
-    // create all dirs in path if not exist yet
-    QFileInfo info(tile_path);
+    const QFileInfo info(tile_path);
     QDir dir = info.dir();
-    if (!dir.exists())
+    if (!dir.exists() && !dir.mkpath("."))
     {
-        dir.mkpath(".");
+        qWarning() << "Failed to create tile directory:" << dir.path();
+        return;
     }
-    
-    // save tile
+
     QFile file(tile_path);
-    if (file.open(QIODevice::WriteOnly))
+    if (!file.open(QIODevice::WriteOnly))
     {
-        file.write(data);
-        file.close();
-    } else {
-        qWarning() << "Failed to save tile: " << tile_path;
+        qWarning() << "Failed to save tile:" << tile_path;
+        return;
     }
+
+    file.write(data);
 }
-
-
