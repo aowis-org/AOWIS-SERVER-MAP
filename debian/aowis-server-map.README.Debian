@@ -1,0 +1,34 @@
+AOWIS Server Map for Debian
+===========================
+
+The package creates and starts aowis-server-map.service on first installation.
+Its configuration is stored at:
+
+  /etc/aowis-server-map/map-server.ini
+
+The package generates separate read and delete API keys when this file does not
+already exist. Existing configuration is preserved during upgrades and ordinary
+package removal. It is deleted only when the package is purged.
+
+Apache reverse-proxy templates are installed directly as disabled sites:
+
+  /etc/apache2/sites-available/aowis-map.localhost.conf
+  /etc/apache2/sites-available/aowis-server-map.conf
+
+Edit and enable exactly one template. For example:
+
+  sudoedit /etc/apache2/sites-available/aowis-map.localhost.conf
+  sudo a2ensite aowis-map.localhost.conf
+  sudo apache2ctl configtest
+  sudo systemctl reload apache2
+
+The Internet-facing template contains placeholder domain and origin values and
+must be edited before it is enabled. It is intended to be completed with:
+
+  sudo certbot --apache --redirect -d maps.example.com
+
+Service administration:
+
+  sudo systemctl status aowis-server-map.service
+  sudo journalctl -u aowis-server-map.service -f
+  sudo systemctl restart aowis-server-map.service

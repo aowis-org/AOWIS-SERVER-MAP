@@ -1,5 +1,32 @@
 # Apache reverse-proxy configurations
 
+## Debian package installation
+
+The Debian package installs both templates directly into `/etc/apache2/sites-available/` and enables the required Apache modules. Neither site is enabled automatically because the templates are alternatives and the Internet-facing template requires deployment-specific values.
+
+For a same-host installation, edit and enable:
+
+```bash
+sudoedit /etc/apache2/sites-available/aowis-map.localhost.conf
+sudo a2ensite aowis-map.localhost.conf
+```
+
+For an Internet-facing proxy, edit and enable:
+
+```bash
+sudoedit /etc/apache2/sites-available/aowis-server-map.conf
+sudo a2ensite aowis-server-map.conf
+```
+
+Then validate and reload Apache:
+
+```bash
+sudo apache2ctl configtest
+sudo systemctl reload apache2
+```
+
+## Available configurations
+
 Two separate templates are provided. They are alternatives; enable the one matching the deployment.
 
 ## Same-host HTTP setup

@@ -1,0 +1,5 @@
+obj-*/aowis-server-map usr/bin
+configs/systemd/aowis-server-map.service usr/lib/systemd/system
+configs/systemd/map-server.ini usr/share/aowis-server-map
+configs/apache/aowis-map.localhost.conf etc/apache2/sites-available
+configs/apache/aowis-server-map.conf etc/apache2/sites-available

@@ -37,6 +37,37 @@ The executable is created as:
 build-linux/aowis-server-map
 ```
 
+### Debian package
+
+Build a native Debian package, including the binary, systemd service, default system configuration and disabled Apache site templates:
+
+```bash
+./compile_deb.sh --install-dependencies
+```
+
+The package is written to `dist/`. Later builds can omit dependency installation:
+
+```bash
+./compile_deb.sh --clean
+```
+
+Install the result with APT so runtime dependencies are resolved:
+
+```bash
+sudo apt install ./dist/aowis-server-map_<version>_<architecture>.deb
+```
+
+On first installation, the package creates the `aowis-server-map` service account, generates separate read and delete API keys in `/etc/aowis-server-map/map-server.ini`, enables and starts `aowis-server-map.service`, and prints the generated keys.
+
+The Apache templates are installed directly as disabled sites:
+
+```text
+/etc/apache2/sites-available/aowis-map.localhost.conf
+/etc/apache2/sites-available/aowis-server-map.conf
+```
+
+The package enables the required Apache modules but deliberately enables neither site. Edit and enable exactly the template matching the deployment.
+
 ### Windows / macOS
 
 Windows and macOS are not officially supported at this point. The project can nevertheless be built like a regular Qt application.

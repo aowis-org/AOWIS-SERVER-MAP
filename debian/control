@@ -1,0 +1,18 @@
+Source: aowis-server-map
+Section: net
+Priority: optional
+Maintainer: AOWIS Project <aowis@aowis.org>
+Build-Depends: debhelper-compat (= 13), cmake, g++, pkg-config, qt6-base-dev, qt6-httpserver-dev, qt6-websockets-dev
+Standards-Version: 4.7.2
+Rules-Requires-Root: no
+Homepage: https://aowis.org/
+
+Package: aowis-server-map
+Architecture: any
+Depends: ${shlibs:Depends}, ${misc:Depends}, adduser, apache2, openssl, systemd
+Suggests: certbot, python3-certbot-apache
+Description: AOWIS caching map tile server
+ AOWIS Server Map is a Qt-based HTTP service that caches map tiles for the
+ AOWIS Server GUI. The package installs a hardened systemd service, generates
+ separate read and delete API keys on first installation, and provides disabled
+ Apache reverse-proxy site templates for local and Internet-facing deployments.

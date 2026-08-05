@@ -1,0 +1,75 @@
+#!/bin/sh
+set -e
+
+service_name="aowis-server-map"
+service_user="aowis-server-map"
+service_group="aowis-server-map"
+config_directory="/etc/aowis-server-map"
+config_file="$config_directory/map-server.ini"
+config_template="/usr/share/aowis-server-map/map-server.ini"
+created_config=false
+api_key=""
+delete_api_key=""
+
+if [ "$1" = "configure" ]; then
+    if ! getent group "$service_group" >/dev/null; then
+        addgroup --system "$service_group" >/dev/null
+    fi
+
+    if ! getent passwd "$service_user" >/dev/null; then
+        adduser --system --ingroup "$service_group" --home /nonexistent --no-create-home \
+            --shell /usr/sbin/nologin --disabled-password --comment "AOWIS Map Server" \
+            "$service_user" >/dev/null
+    fi
+
+    install -d -o root -g "$service_group" -m 0750 "$config_directory"
+
+    if [ ! -e "$config_file" ]; then
+        api_key="$(openssl rand -hex 32)"
+        delete_api_key="$(openssl rand -hex 32)"
+        while [ "$delete_api_key" = "$api_key" ]; do
+            delete_api_key="$(openssl rand -hex 32)"
+        done
+
+        temporary_config="$(mktemp)"
+        trap 'rm -f -- "$temporary_config"' EXIT HUP INT TERM
+        sed \
+            -e "s/^api_key=$/api_key=$api_key/" \
+            -e "s/^delete_api_key=$/delete_api_key=$delete_api_key/" \
+            "$config_template" > "$temporary_config"
+        install -o root -g "$service_group" -m 0640 "$temporary_config" "$config_file"
+        rm -f -- "$temporary_config"
+        trap - EXIT HUP INT TERM
+        created_config=true
+    else
+        chown root:"$service_group" "$config_file"
+        chmod 0640 "$config_file"
+    fi
+
+    if command -v a2enmod >/dev/null 2>&1; then
+        a2enmod -q headers proxy proxy_http reqtimeout rewrite ssl
+    fi
+fi
+
+#DEBHELPER#
+
+if [ "$1" = "configure" ]; then
+    echo "Apache templates installed but not enabled:"
+    echo "  /etc/apache2/sites-available/aowis-map.localhost.conf"
+    echo "  /etc/apache2/sites-available/aowis-server-map.conf"
+    echo "Edit exactly one template, then enable it with a2ensite."
+
+    if [ "$created_config" = true ]; then
+        cat <<EOF_KEYS
+
+Generated AOWIS map-server API keys
+-----------------------------------
+Read API key:   $api_key
+Delete API key: $delete_api_key
+
+The keys are stored in $config_file with root/service-group-only access.
+EOF_KEYS
+    fi
+fi
+
+exit 0

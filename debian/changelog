@@ -1,0 +1,5 @@
+aowis-server-map (0.1.0+deb1) stable; urgency=medium
+
+  * Initial Debian package.
+
+ -- AOWIS Project <aowis@aowis.org>  Wed, 05 Aug 2026 18:38:00 +0200

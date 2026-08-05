@@ -1,5 +1,16 @@
 # Debian 13 systemd setup
 
+## Debian package installation
+
+The preferred Debian deployment is the package produced by `compile_deb.sh`:
+
+```bash
+./compile_deb.sh --install-dependencies
+sudo apt install ./dist/aowis-server-map_<version>_<architecture>.deb
+```
+
+The package installs the unit under `/usr/lib/systemd/system`, creates the service account, generates `/etc/aowis-server-map/map-server.ini` with separate API keys, enables and starts the service, and preserves the configuration across upgrades. The manual installer below remains available for unpackaged deployments.
+
 The system service uses:
 
 - Binary: `/usr/bin/aowis-server-map`
