@@ -1,6 +1,8 @@
 #include "server.h"
 
 #include <QDebug>
+#include <QDir>
+#include <QFileInfo>
 #include <QMutexLocker>
 
 #include <utility>
@@ -48,7 +50,8 @@ Server::Server(const Config &config, QObject *parent)
     : QObject(parent),
       config(config),
       tcp(new QTcpServer(this)),
-      maptiles(new MapTiles(config.maximum_active_downloads, config.maximum_pending_requests, this)),
+      maptiles(new MapTiles(config.cache_directory, config.maximum_active_downloads,
+                            config.maximum_pending_requests, this)),
       pending_request_count(0)
 {
     connect(this->maptiles, &MapTiles::tileReady, this, &Server::onTileReady);
@@ -58,6 +61,23 @@ Server::Server(const Config &config, QObject *parent)
 
 bool Server::start()
 {
+    QDir cache_directory;
+    if (this->config.cache_directory.trimmed().isEmpty()
+        || !cache_directory.mkpath(this->config.cache_directory))
+    {
+        qCritical() << "Failed to create map tile cache directory:"
+                    << this->config.cache_directory;
+        return false;
+    }
+
+    const QFileInfo cache_info(this->config.cache_directory);
+    if (!cache_info.isDir() || !cache_info.isWritable())
+    {
+        qCritical() << "Map tile cache directory is not writable:"
+                    << this->config.cache_directory;
+        return false;
+    }
+
     if (!this->tcp->listen(this->config.listen_address, this->config.port))
     {
         qCritical() << "Failed to listen on" << this->config.listen_address.toString()
@@ -76,6 +96,7 @@ bool Server::start()
             << "port" << this->tcp->serverPort()
             << "with at most" << this->config.maximum_active_downloads << "active tile downloads and"
             << this->config.maximum_pending_requests << "pending HTTP tile requests"
+            << "using cache directory" << this->config.cache_directory
             << (this->config.api_key.isEmpty() ? "without API-key authentication"
                                                 : "with API-key authentication enabled");
     return true;

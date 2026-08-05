@@ -61,12 +61,21 @@ MapTiles::MapTiles(QObject *parent)
 }
 
 MapTiles::MapTiles(int maximum_active_downloads, int maximum_queued_downloads, QObject *parent)
+    : MapTiles(QStandardPaths::writableLocation(QStandardPaths::AppDataLocation),
+               maximum_active_downloads, maximum_queued_downloads, parent)
+{
+}
+
+MapTiles::MapTiles(const QString &cache_base_directory, int maximum_active_downloads,
+                   int maximum_queued_downloads, QObject *parent)
     : QObject(parent),
+      fscache_base(QDir::cleanPath(cache_base_directory.trimmed().isEmpty()
+                                      ? QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
+                                      : cache_base_directory)),
       network_manager(new QNetworkAccessManager(this)),
       maximum_active_downloads(qMax(1, maximum_active_downloads)),
       maximum_queued_downloads(qMax(0, maximum_queued_downloads))
 {
-    this->fscache_base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
 }
 
 QString MapTiles::domainRandomizer(const QString &url) const

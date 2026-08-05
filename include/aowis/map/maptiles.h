@@ -39,6 +39,8 @@ public:
     explicit MapTiles(QObject *parent = nullptr);
     MapTiles(int maximum_active_downloads, int maximum_queued_downloads,
              QObject *parent = nullptr);
+    MapTiles(const QString &cache_base_directory, int maximum_active_downloads,
+             int maximum_queued_downloads, QObject *parent = nullptr);
 
     TileRequestResult getTile(const QString &provider, int z, int x, int y, const QString &key);
     int deleteTiles(const QString &provider, int zoom, int tile_x_min, int tile_x_max,

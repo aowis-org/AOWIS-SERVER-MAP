@@ -56,6 +56,8 @@ if(AOWIS_SERVER_MAP_BUILD_SERVER)
 
     qt_add_executable(aowis-server-map-server
         src/server/main.cpp
+        src/server/configuration.cpp
+        src/server/configuration.h
         src/server/server.cpp
         src/server/server.h
     )

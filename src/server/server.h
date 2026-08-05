@@ -14,6 +14,7 @@
 #include <QMutex>
 #include <QPromise>
 #include <QSharedPointer>
+#include <QString>
 #include <QTcpServer>
 
 #include <aowis/map/maptiles.h>
@@ -29,6 +30,7 @@ public:
         quint16 port = 8122;
         int maximum_pending_requests = 2048;
         int maximum_active_downloads = 32;
+        QString cache_directory;
         QByteArray api_key;
     };
 

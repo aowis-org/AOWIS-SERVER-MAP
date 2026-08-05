@@ -1,0 +1,39 @@
+[Unit]
+Description=AOWIS Map Tile Server
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=aowis-server-map
+Group=aowis-server-map
+ExecStart=/usr/bin/aowis-server-map --config /etc/aowis-server-map/map-server.ini
+Restart=on-failure
+RestartSec=3s
+
+# Creates /var/cache/aowis-server-map with ownership for the service account.
+# systemd also exports CACHE_DIRECTORY=/var/cache/aowis-server-map.
+CacheDirectory=aowis-server-map
+CacheDirectoryMode=0750
+UMask=0027
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target
