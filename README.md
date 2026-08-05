@@ -3,18 +3,30 @@ RESTful Caching Map Tile Server for [AOWIS-SERVER-GUI](https://github.com/aowis-
 
 **IMPORTANT:**
 
-This Server uses QHttpServer, which is **NOT suitable for exposure to the public Internet**! It does **NOT offer HTTPS**, either.
+This server uses QHttpServer, which is **not suitable for exposure to the public Internet**. It does not provide HTTPS by itself.
 
-Usually, this Software runs on the same device as **AOWIS-EPANET-GUI**, and the **port MUST be closed by the firewall**.
-If you decide to set it up on different machines, create a proper VPN connection between them to get TLS!
+By default, the server listens only on `127.0.0.1:8122`. Keep the port closed by the firewall when changing the listen address. If the GUI and map server run on different machines, use a properly secured VPN or a TLS reverse proxy.
 
 ## Build
 ### Linux
-Run the script `compile_linux.sh`
+Run the script `compile_linux.sh`.
 
-Find the result in the folder `build-linux`
+The result is created in `build-linux`.
 
 ### Windows / macOS
-At this point, Windows and macOS are not officially supported by AOWIS. However, you can build this application for them, just as any other Qt-Application.
+Windows and macOS are not officially supported at this point. The project can nevertheless be built like a regular Qt application.
 
+## Server options
 
+```text
+-a, --listen-address <address>       Listen IP address. Default: 127.0.0.1
+-p, --port <port>                    Listen port. Default: 8122
+--max-pending-requests <count>       Maximum pending tile HTTP requests. Default: 2048
+--max-active-downloads <count>       Maximum simultaneous upstream downloads. Default: 32
+```
+
+Example for listening on all IPv4 interfaces:
+
+```bash
+./aowis-server-map --listen-address 0.0.0.0 --port 8122
+```

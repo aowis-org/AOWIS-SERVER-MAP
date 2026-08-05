@@ -3,31 +3,40 @@
 
 #include <QObject>
 
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
 
-#include <QJsonDocument>
-#include <QJsonObject>
-
 class TileHttpClient : public QObject
 {
     Q_OBJECT
+
 public:
-    explicit TileHttpClient(const QString &url_base, QObject *parent = nullptr);
-    
+    enum class RequestFailureReason
+    {
+        UpstreamError,
+        Timeout,
+        InvalidResponse
+    };
+    Q_ENUM(RequestFailureReason)
+
+    explicit TileHttpClient(QNetworkAccessManager *network_manager, const QString &url_base,
+                            QObject *parent = nullptr);
+
     void get(const QString &endpoint);
     void post(const QString &endpoint, const QJsonObject &payload);
-    
+
 private:
-    QNetworkAccessManager network_manager;
+    void handleReply(QNetworkReply *reply, bool validate_tile_response);
+
+    QNetworkAccessManager *network_manager;
     QString url_base;
-    
-    void handleReply(QNetworkReply *reply);
-    
+
 signals:
     void requestFinished(const QByteArray &data);
-    void requestError(const QString &error);
+    void requestError(RequestFailureReason reason, const QString &error);
 };
 
 #endif // HTTP_CLIENT_TILEFETCH_H

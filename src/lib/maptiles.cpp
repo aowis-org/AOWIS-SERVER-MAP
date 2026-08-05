@@ -6,8 +6,10 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QList>
 #include <QMutexLocker>
 #include <QRandomGenerator>
+#include <QSaveFile>
 #include <QStandardPaths>
 #include <QStringList>
 
@@ -54,7 +56,15 @@ bool parseCanonicalTileKey(const QString &key, QString *provider, int *zoom, int
 }
 
 MapTiles::MapTiles(QObject *parent)
-    : QObject(parent)
+    : MapTiles(32, 2048, parent)
+{
+}
+
+MapTiles::MapTiles(int maximum_active_downloads, int maximum_queued_downloads, QObject *parent)
+    : QObject(parent),
+      network_manager(new QNetworkAccessManager(this)),
+      maximum_active_downloads(qMax(1, maximum_active_downloads)),
+      maximum_queued_downloads(qMax(0, maximum_queued_downloads))
 {
     this->fscache_base = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
 }
@@ -105,20 +115,24 @@ QString MapTiles::canonicalTileKey(const QString &provider, int zoom, int x, int
     return QString("%1/%2/%3/%4").arg(provider).arg(zoom).arg(x).arg(y);
 }
 
-QByteArray MapTiles::getTile(QString provider, int z, int x, int y, QString key)
+MapTiles::TileRequestResult MapTiles::getTile(const QString &provider, int z, int x, int y,
+                                              const QString &key)
 {
     const QString cache_path = providerCachePath(provider);
     const QString url = providerUrl(provider);
     if (cache_path.isEmpty() || url.isEmpty() || z < 0 || z > 30)
     {
         qWarning() << "Invalid map tile request:" << provider << z << x << y;
-        return {};
+        return { TileRequestStatus::InvalidRequest, {} };
     }
 
     const int tile_count = 1 << z;
     const int wrapped_x = positiveModulo(x, tile_count);
     if (y < 0 || y >= tile_count)
-        return {};
+    {
+        qWarning() << "Invalid map tile request:" << provider << z << x << y;
+        return { TileRequestStatus::InvalidRequest, {} };
+    }
 
     QDir dir;
     if (!dir.mkpath(cache_path))
@@ -134,14 +148,22 @@ QByteArray MapTiles::getTile(QString provider, int z, int x, int y, QString key)
     {
         QFile file(tile_path);
         if (file.open(QIODevice::ReadOnly))
-            return file.readAll();
+        {
+            const QByteArray data = file.readAll();
+            if (!data.isEmpty())
+                return { TileRequestStatus::Ready, data };
+        }
     }
 
-    getMapTile(url, remote_path, tile_path, canonical_key, key);
-    return {};
+    const QueuedDownload download = { url, remote_path, tile_path, canonical_key, key };
+    if (scheduleMapTileDownload(download) == DownloadScheduleStatus::QueueFull)
+        return { TileRequestStatus::ServerBusy, {} };
+
+    return { TileRequestStatus::Pending, {} };
 }
 
-int MapTiles::deleteTiles(const QString &provider, int zoom, int tile_x_min, int tile_x_max, int tile_y_min, int tile_y_max)
+int MapTiles::deleteTiles(const QString &provider, int zoom, int tile_x_min, int tile_x_max,
+                          int tile_y_min, int tile_y_max)
 {
     const QString cache_path = providerCachePath(provider);
     if (cache_path.isEmpty() || zoom < 0 || zoom > 30 ||
@@ -158,21 +180,22 @@ int MapTiles::deleteTiles(const QString &provider, int zoom, int tile_x_min, int
 
     {
         QMutexLocker locker(&this->downloads_mutex);
-        const QSet<QString> active_downloads = this->downloads_active;
-        for (const QString &active_key : active_downloads)
+        QSet<QString> downloads_in_progress = this->downloads_active;
+        downloads_in_progress.unite(this->downloads_queued_keys);
+        for (const QString &download_key : downloads_in_progress)
         {
             QString active_provider;
             int active_zoom = 0;
             int active_x = 0;
             int active_y = 0;
-            if (!parseCanonicalTileKey(active_key, &active_provider, &active_zoom, &active_x, &active_y))
+            if (!parseCanonicalTileKey(download_key, &active_provider, &active_zoom, &active_x, &active_y))
                 continue;
 
             if (active_provider == provider && active_zoom == zoom &&
                 active_y >= bounded_y_min && active_y <= bounded_y_max &&
                 tileXInsideRange(active_x, tile_count, tile_x_min, tile_x_max))
             {
-                this->downloads_invalidated.insert(active_key);
+                this->downloads_invalidated.insert(download_key);
             }
         }
     }
@@ -222,67 +245,129 @@ int MapTiles::deleteTiles(const QString &provider, int zoom, int tile_x_min, int
     return deleted_count;
 }
 
-void MapTiles::getMapTile(const QString &url, const QString &path, const QString &tile_path,
-                          const QString &canonical_key, const QString &response_key)
+MapTiles::DownloadScheduleStatus MapTiles::scheduleMapTileDownload(const QueuedDownload &download)
 {
+    bool start_immediately = false;
     {
         QMutexLocker locker(&this->downloads_mutex);
-        if (this->downloads_active.contains(canonical_key))
-            return;
+        if (this->downloads_active.contains(download.canonical_key) ||
+            this->downloads_queued_keys.contains(download.canonical_key))
+        {
+            return DownloadScheduleStatus::Scheduled;
+        }
 
-        this->downloads_active.insert(canonical_key);
+        if (this->downloads_active.size() < this->maximum_active_downloads)
+        {
+            this->downloads_active.insert(download.canonical_key);
+            start_immediately = true;
+        }
+        else
+        {
+            if (this->downloads_queued.size() >= this->maximum_queued_downloads)
+                return DownloadScheduleStatus::QueueFull;
+
+            this->downloads_queued.enqueue(download);
+            this->downloads_queued_keys.insert(download.canonical_key);
+        }
     }
 
-    TileHttpClient *rest = new TileHttpClient(url, this);
+    if (start_immediately)
+        startMapTileDownload(download);
+
+    return DownloadScheduleStatus::Scheduled;
+}
+
+void MapTiles::startMapTileDownload(const QueuedDownload &download)
+{
+    TileHttpClient *rest = new TileHttpClient(this->network_manager, download.url, this);
     connect(rest, &TileHttpClient::requestFinished, this,
-            [this, rest, tile_path, canonical_key, response_key](const QByteArray &data)
+            [this, rest, download](const QByteArray &data)
     {
         bool invalidated = false;
         {
             QMutexLocker locker(&this->downloads_mutex);
-            this->downloads_active.remove(canonical_key);
-            invalidated = this->downloads_invalidated.remove(canonical_key);
+            this->downloads_active.remove(download.canonical_key);
+            invalidated = this->downloads_invalidated.remove(download.canonical_key);
         }
 
         if (!invalidated)
-            saveMapTile(data, tile_path);
+            saveMapTile(data, download.tile_path);
 
-        emit tileReady(response_key, data);
+        emit tileReady(download.response_key, data);
         rest->deleteLater();
+        startQueuedDownloads();
     });
     connect(rest, &TileHttpClient::requestError, this,
-            [this, rest, canonical_key, response_key](const QString &error)
+            [this, rest, download](TileHttpClient::RequestFailureReason reason, const QString &error)
     {
-        qWarning() << "Tile request failed:" << response_key << error;
+        qWarning() << "Tile request failed:" << download.response_key << error;
 
         {
             QMutexLocker locker(&this->downloads_mutex);
-            this->downloads_active.remove(canonical_key);
-            this->downloads_invalidated.remove(canonical_key);
+            this->downloads_active.remove(download.canonical_key);
+            this->downloads_invalidated.remove(download.canonical_key);
         }
 
-        emit tileFailed(response_key);
+        const TileFailureReason failure_reason = reason == TileHttpClient::RequestFailureReason::Timeout
+            ? TileFailureReason::Timeout
+            : TileFailureReason::UpstreamError;
+        emit tileFailed(download.response_key, failure_reason);
         rest->deleteLater();
+        startQueuedDownloads();
     });
-    rest->get(path);
+    rest->get(download.path);
 }
 
-void MapTiles::saveMapTile(const QByteArray &data, const QString &tile_path)
+void MapTiles::startQueuedDownloads()
+{
+    QList<QueuedDownload> downloads_to_start;
+    {
+        QMutexLocker locker(&this->downloads_mutex);
+        while (this->downloads_active.size() < this->maximum_active_downloads &&
+               !this->downloads_queued.isEmpty())
+        {
+            const QueuedDownload download = this->downloads_queued.dequeue();
+            this->downloads_queued_keys.remove(download.canonical_key);
+            this->downloads_active.insert(download.canonical_key);
+            downloads_to_start.append(download);
+        }
+    }
+
+    for (const QueuedDownload &download : downloads_to_start)
+        startMapTileDownload(download);
+}
+
+bool MapTiles::saveMapTile(const QByteArray &data, const QString &tile_path)
 {
     const QFileInfo info(tile_path);
     QDir dir = info.dir();
     if (!dir.exists() && !dir.mkpath("."))
     {
         qWarning() << "Failed to create tile directory:" << dir.path();
-        return;
+        return false;
     }
 
-    QFile file(tile_path);
+    QSaveFile file(tile_path);
     if (!file.open(QIODevice::WriteOnly))
     {
-        qWarning() << "Failed to save tile:" << tile_path;
-        return;
+        qWarning() << "Failed to open tile cache file:" << tile_path << file.errorString();
+        return false;
     }
 
-    file.write(data);
+    const qint64 bytes_written = file.write(data);
+    if (bytes_written != data.size())
+    {
+        qWarning() << "Failed to write complete tile cache file:" << tile_path
+                   << bytes_written << "of" << data.size() << "bytes" << file.errorString();
+        file.cancelWriting();
+        return false;
+    }
+
+    if (!file.commit())
+    {
+        qWarning() << "Failed to commit tile cache file:" << tile_path << file.errorString();
+        return false;
+    }
+
+    return true;
 }
