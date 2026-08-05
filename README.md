@@ -23,6 +23,7 @@ Windows and macOS are not officially supported at this point. The project can ne
 -p, --port <port>                    Listen port. Default: 8122
 --max-pending-requests <count>       Maximum pending tile HTTP requests. Default: 2048
 --max-active-downloads <count>       Maximum simultaneous upstream downloads. Default: 32
+--api-key <key>                      Require this API key for all non-OPTIONS endpoints
 ```
 
 Example for listening on all IPv4 interfaces:
@@ -30,3 +31,17 @@ Example for listening on all IPv4 interfaces:
 ```bash
 ./aowis-server-map --listen-address 0.0.0.0 --port 8122
 ```
+
+When `--api-key` is set, clients must send the key using either header:
+
+```http
+X-API-Key: your-secret-key
+```
+
+or:
+
+```http
+Authorization: Bearer your-secret-key
+```
+
+If `--api-key` is omitted, authentication remains disabled.

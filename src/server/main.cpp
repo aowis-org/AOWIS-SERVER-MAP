@@ -58,12 +58,23 @@ int main(int argc, char *argv[])
         QStringLiteral("Maximum number of simultaneous upstream tile downloads."),
         QStringLiteral("count"),
         QStringLiteral("32"));
+    const QCommandLineOption api_key_option(
+        QStringLiteral("api-key"),
+        QStringLiteral("Optional API key required in X-API-Key or Authorization: Bearer headers."),
+        QStringLiteral("key"));
 
     parser.addOption(listen_address_option);
     parser.addOption(port_option);
     parser.addOption(maximum_pending_requests_option);
     parser.addOption(maximum_active_downloads_option);
+    parser.addOption(api_key_option);
     parser.process(app);
+
+    if (parser.isSet(api_key_option) && parser.value(api_key_option).isEmpty())
+    {
+        qCritical() << "The API key must not be empty when --api-key is specified";
+        return EXIT_FAILURE;
+    }
 
     const QHostAddress listen_address(parser.value(listen_address_option));
     if (listen_address.isNull())
@@ -99,6 +110,7 @@ int main(int argc, char *argv[])
     config.port = quint16(port);
     config.maximum_pending_requests = maximum_pending_requests;
     config.maximum_active_downloads = maximum_active_downloads;
+    config.api_key = parser.value(api_key_option).toUtf8();
 
     Server server(config);
     if (!server.start())

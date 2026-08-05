@@ -21,6 +21,27 @@ QHttpServerResponse makeOptionsResponse()
 {
     return QHttpServerResponse(QHttpServerResponse::StatusCode::NoContent);
 }
+
+QHttpServerResponse makeUnauthorizedResponse()
+{
+    return QHttpServerResponse(
+        "Missing or invalid API key",
+        QHttpServerResponse::StatusCode::Unauthorized);
+}
+
+bool secureEquals(const QByteArray &left, const QByteArray &right)
+{
+    const qsizetype maximum_size = qMax(left.size(), right.size());
+    quint64 difference = quint64(left.size()) ^ quint64(right.size());
+    for (qsizetype index = 0; index < maximum_size; ++index)
+    {
+        const uchar left_value = index < left.size() ? uchar(left.at(index)) : 0;
+        const uchar right_value = index < right.size() ? uchar(right.at(index)) : 0;
+        difference |= left_value ^ right_value;
+    }
+
+    return difference == 0;
+}
 }
 
 Server::Server(const Config &config, QObject *parent)
@@ -54,14 +75,20 @@ bool Server::start()
     qInfo() << "AOWIS map server listening on" << this->tcp->serverAddress().toString()
             << "port" << this->tcp->serverPort()
             << "with at most" << this->config.maximum_active_downloads << "active tile downloads and"
-            << this->config.maximum_pending_requests << "pending HTTP tile requests";
+            << this->config.maximum_pending_requests << "pending HTTP tile requests"
+            << (this->config.api_key.isEmpty() ? "without API-key authentication"
+                                                : "with API-key authentication enabled");
     return true;
 }
 
 void Server::setupRoutes()
 {
-    this->http.route("/status", QHttpServerRequest::Method::Get, []()
+    this->http.route("/status", QHttpServerRequest::Method::Get,
+                     [this](const QHttpServerRequest &request)
     {
+        if (!isAuthorized(request))
+            return makeUnauthorizedResponse();
+
         return QHttpServerResponse(
             QStringLiteral("AOWIS map server running with Qt %1").arg(QString::fromLatin1(QT_VERSION_STR)),
             QHttpServerResponse::StatusCode::Ok);
@@ -74,8 +101,11 @@ void Server::setupRoutes()
 
     this->http.route("/cache/<arg>/<arg>/<arg>/<arg>/<arg>/<arg>", QHttpServerRequest::Method::Delete,
                      [this](const QString &provider, int zoom, int tile_x_min, int tile_x_max,
-                            int tile_y_min, int tile_y_max)
+                            int tile_y_min, int tile_y_max, const QHttpServerRequest &request)
     {
+        if (!isAuthorized(request))
+            return makeUnauthorizedResponse();
+
         const int deleted_count = this->maptiles->deleteTiles(
             provider, zoom, tile_x_min, tile_x_max, tile_y_min, tile_y_max);
         if (deleted_count == -1)
@@ -101,8 +131,12 @@ void Server::setupRoutes()
     });
 
     this->http.route("/<arg>/<arg>/<arg>/<arg>.png", QHttpServerRequest::Method::Get,
-                     [this](const QString &provider, int z, int x, int y) -> QFuture<QHttpServerResponse>
+                     [this](const QString &provider, int z, int x, int y,
+                            const QHttpServerRequest &request) -> QFuture<QHttpServerResponse>
     {
+        if (!isAuthorized(request))
+            return makeReadyResponse(makeUnauthorizedResponse());
+
         const QString key = QString("%1_%2_%3_%4").arg(provider).arg(z).arg(x).arg(y);
         const MapTiles::TileRequestResult tile_result = this->maptiles->getTile(provider, z, x, y, key);
 
@@ -142,6 +176,26 @@ void Server::setupRoutes()
     {
         return makeOptionsResponse();
     });
+}
+
+bool Server::isAuthorized(const QHttpServerRequest &request) const
+{
+    if (this->config.api_key.isEmpty())
+        return true;
+
+    const QByteArray direct_key = request.value("x-api-key");
+    if (secureEquals(direct_key, this->config.api_key))
+        return true;
+
+    const QByteArray authorization = request.value("authorization");
+    static const QByteArray bearer_prefix("Bearer ");
+    if (authorization.size() <= bearer_prefix.size()
+        || authorization.first(bearer_prefix.size()).compare(bearer_prefix, Qt::CaseInsensitive) != 0)
+    {
+        return false;
+    }
+
+    return secureEquals(authorization.sliced(bearer_prefix.size()), this->config.api_key);
 }
 
 bool Server::appendPendingPromise(const QString &key, const PendingPromise &promise)

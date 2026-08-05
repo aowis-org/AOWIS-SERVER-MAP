@@ -3,6 +3,7 @@
 
 #include <QObject>
 
+#include <QByteArray>
 #include <QFuture>
 #include <QHash>
 #include <QHostAddress>
@@ -28,6 +29,7 @@ public:
         quint16 port = 8122;
         int maximum_pending_requests = 2048;
         int maximum_active_downloads = 32;
+        QByteArray api_key;
     };
 
     explicit Server(const Config &config, QObject *parent = nullptr);
@@ -39,6 +41,7 @@ private:
     using PendingPromises = QList<PendingPromise>;
 
     void setupRoutes();
+    bool isAuthorized(const QHttpServerRequest &request) const;
     bool appendPendingPromise(const QString &key, const PendingPromise &promise);
     PendingPromises takePendingPromises(const QString &key);
 
