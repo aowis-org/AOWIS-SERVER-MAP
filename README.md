@@ -11,7 +11,7 @@ By default, the server listens only on `127.0.0.1:8122`. When the reverse proxy 
 
 ### Linux
 
-On Debian or a Debian-based distribution, install the required compiler, CMake and Qt 6 development packages and build without starting the server:
+On Debian or a Debian-based distribution, install the required compiler, CMake, Qt 6 base, WebSockets and HttpServer development packages and build without starting the server:
 
 ```bash
 ./compile_linux.sh --install-dependencies --no-run

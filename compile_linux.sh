@@ -38,7 +38,7 @@ install_debian_dependencies()
         exit 1
     fi
 
-    local packages=(build-essential cmake qt6-base-dev qt6-httpserver-dev)
+    local packages=(build-essential cmake qt6-base-dev qt6-websockets-dev qt6-httpserver-dev)
 
     if (( EUID == 0 )); then
         apt-get update
