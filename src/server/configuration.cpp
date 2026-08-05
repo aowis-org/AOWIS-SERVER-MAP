@@ -123,6 +123,13 @@ bool MapServerConfiguration::loadConfigFile(const QString &path, Server::Config 
     if (settings.contains(QStringLiteral("authentication/api_key")))
         config->api_key = settings.value(QStringLiteral("authentication/api_key")).toString().toUtf8();
 
+    if (settings.contains(QStringLiteral("authentication/delete_api_key")))
+    {
+        config->delete_api_key = settings.value(QStringLiteral("authentication/delete_api_key"))
+                                     .toString()
+                                     .toUtf8();
+    }
+
     if (settings.status() == QSettings::AccessError)
     {
         *error_message = QStringLiteral("Failed to access configuration file: %1").arg(path);
@@ -183,8 +190,10 @@ bool MapServerConfiguration::writeDefaultConfigFile(const QString &path, bool ov
         "cache_directory=\n"
         "\n"
         "[authentication]\n"
-        "# Leave empty to disable API-key authentication.\n"
-        "api_key=\n")
+        "# Empty disables API-key authentication for status and tile GET requests.\n"
+        "api_key=\n"
+        "# Empty disables the cache DELETE endpoint.\n"
+        "delete_api_key=\n")
                                           .arg(defaults.listen_address.toString())
                                           .arg(defaults.port)
                                           .arg(defaults.maximum_pending_requests)

@@ -7,7 +7,7 @@ After=network-online.target
 Type=simple
 User=aowis-server-map
 Group=aowis-server-map
-ExecStart=/usr/bin/aowis-server-map --config /etc/aowis-server-map/map-server.ini
+ExecStart=/usr/bin/aowis-server-map --config /etc/aowis-server-map/map-server.ini --require-api-key --require-delete-api-key
 Restart=on-failure
 RestartSec=3s
 

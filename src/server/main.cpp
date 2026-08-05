@@ -73,8 +73,18 @@ int main(int argc, char *argv[])
         QStringLiteral("path"));
     const QCommandLineOption api_key_option(
         QStringLiteral("api-key"),
-        QStringLiteral("Optional API key required in X-API-Key or Authorization: Bearer headers."),
+        QStringLiteral("API key required for status and tile GET requests."),
         QStringLiteral("key"));
+    const QCommandLineOption delete_api_key_option(
+        QStringLiteral("delete-api-key"),
+        QStringLiteral("Separate API key required for cache DELETE requests."),
+        QStringLiteral("key"));
+    const QCommandLineOption require_api_key_option(
+        QStringLiteral("require-api-key"),
+        QStringLiteral("Refuse to start when no read API key is configured."));
+    const QCommandLineOption require_delete_api_key_option(
+        QStringLiteral("require-delete-api-key"),
+        QStringLiteral("Refuse to start when no delete API key is configured."));
 
     parser.addOption(config_option);
     parser.addOption(write_default_config_option);
@@ -85,6 +95,9 @@ int main(int argc, char *argv[])
     parser.addOption(maximum_active_downloads_option);
     parser.addOption(cache_directory_option);
     parser.addOption(api_key_option);
+    parser.addOption(delete_api_key_option);
+    parser.addOption(require_api_key_option);
+    parser.addOption(require_delete_api_key_option);
     parser.process(app);
 
     if (parser.isSet(overwrite_option) && !parser.isSet(write_default_config_option))
@@ -211,6 +224,19 @@ int main(int argc, char *argv[])
         }
         config.api_key = parser.value(api_key_option).toUtf8();
     }
+
+    if (parser.isSet(delete_api_key_option))
+    {
+        if (parser.value(delete_api_key_option).isEmpty())
+        {
+            qCritical() << "The delete API key must not be empty when --delete-api-key is specified";
+            return EXIT_FAILURE;
+        }
+        config.delete_api_key = parser.value(delete_api_key_option).toUtf8();
+    }
+
+    config.require_api_key = parser.isSet(require_api_key_option);
+    config.require_delete_api_key = parser.isSet(require_delete_api_key_option);
 
     Server server(config);
     if (!server.start())

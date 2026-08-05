@@ -32,6 +32,9 @@ public:
         int maximum_active_downloads = 32;
         QString cache_directory;
         QByteArray api_key;
+        QByteArray delete_api_key;
+        bool require_api_key = false;
+        bool require_delete_api_key = false;
     };
 
     explicit Server(const Config &config, QObject *parent = nullptr);
@@ -43,7 +46,9 @@ private:
     using PendingPromises = QList<PendingPromise>;
 
     void setupRoutes();
-    bool isAuthorized(const QHttpServerRequest &request) const;
+    bool isReadAuthorized(const QHttpServerRequest &request) const;
+    bool isDeleteAuthorized(const QHttpServerRequest &request) const;
+    bool requestContainsKey(const QHttpServerRequest &request, const QByteArray &expected_key) const;
     bool appendPendingPromise(const QString &key, const PendingPromise &promise);
     PendingPromises takePendingPromises(const QString &key);
 

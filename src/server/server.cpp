@@ -61,6 +61,17 @@ Server::Server(const Config &config, QObject *parent)
 
 bool Server::start()
 {
+    if (this->config.require_api_key && this->config.api_key.isEmpty())
+    {
+        qCritical() << "The map server requires an API key, but authentication/api_key is empty";
+        return false;
+    }
+    if (this->config.require_delete_api_key && this->config.delete_api_key.isEmpty())
+    {
+        qCritical() << "The map server requires a delete API key, but authentication/delete_api_key is empty";
+        return false;
+    }
+
     QDir cache_directory;
     if (this->config.cache_directory.trimmed().isEmpty()
         || !cache_directory.mkpath(this->config.cache_directory))
@@ -92,13 +103,19 @@ bool Server::start()
         return false;
     }
 
+    const QString read_authentication_status = this->config.api_key.isEmpty()
+        ? QStringLiteral("read API-key authentication disabled")
+        : QStringLiteral("read API-key authentication enabled");
+    const QString delete_authentication_status = this->config.delete_api_key.isEmpty()
+        ? QStringLiteral("cache deletion disabled")
+        : QStringLiteral("delete API-key authentication enabled");
+
     qInfo() << "AOWIS map server listening on" << this->tcp->serverAddress().toString()
             << "port" << this->tcp->serverPort()
             << "with at most" << this->config.maximum_active_downloads << "active tile downloads and"
             << this->config.maximum_pending_requests << "pending HTTP tile requests"
             << "using cache directory" << this->config.cache_directory
-            << (this->config.api_key.isEmpty() ? "without API-key authentication"
-                                                : "with API-key authentication enabled");
+            << read_authentication_status << "and" << delete_authentication_status;
     return true;
 }
 
@@ -107,7 +124,7 @@ void Server::setupRoutes()
     this->http.route("/status", QHttpServerRequest::Method::Get,
                      [this](const QHttpServerRequest &request)
     {
-        if (!isAuthorized(request))
+        if (!isReadAuthorized(request))
             return makeUnauthorizedResponse();
 
         return QHttpServerResponse(
@@ -124,7 +141,7 @@ void Server::setupRoutes()
                      [this](const QString &provider, int zoom, int tile_x_min, int tile_x_max,
                             int tile_y_min, int tile_y_max, const QHttpServerRequest &request)
     {
-        if (!isAuthorized(request))
+        if (!isDeleteAuthorized(request))
             return makeUnauthorizedResponse();
 
         const int deleted_count = this->maptiles->deleteTiles(
@@ -155,7 +172,7 @@ void Server::setupRoutes()
                      [this](const QString &provider, int z, int x, int y,
                             const QHttpServerRequest &request) -> QFuture<QHttpServerResponse>
     {
-        if (!isAuthorized(request))
+        if (!isReadAuthorized(request))
             return makeReadyResponse(makeUnauthorizedResponse());
 
         const QString key = QString("%1_%2_%3_%4").arg(provider).arg(z).arg(x).arg(y);
@@ -199,13 +216,26 @@ void Server::setupRoutes()
     });
 }
 
-bool Server::isAuthorized(const QHttpServerRequest &request) const
+bool Server::isReadAuthorized(const QHttpServerRequest &request) const
 {
     if (this->config.api_key.isEmpty())
         return true;
 
+    return requestContainsKey(request, this->config.api_key);
+}
+
+bool Server::isDeleteAuthorized(const QHttpServerRequest &request) const
+{
+    if (this->config.delete_api_key.isEmpty())
+        return false;
+
+    return requestContainsKey(request, this->config.delete_api_key);
+}
+
+bool Server::requestContainsKey(const QHttpServerRequest &request, const QByteArray &expected_key) const
+{
     const QByteArray direct_key = request.value("x-api-key");
-    if (secureEquals(direct_key, this->config.api_key))
+    if (secureEquals(direct_key, expected_key))
         return true;
 
     const QByteArray authorization = request.value("authorization");
@@ -216,7 +246,7 @@ bool Server::isAuthorized(const QHttpServerRequest &request) const
         return false;
     }
 
-    return secureEquals(authorization.sliced(bearer_prefix.size()), this->config.api_key);
+    return secureEquals(authorization.sliced(bearer_prefix.size()), expected_key);
 }
 
 bool Server::appendPendingPromise(const QString &key, const PendingPromise &promise)
