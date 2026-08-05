@@ -60,6 +60,7 @@ install_debian_dependencies()
     local packages=(
         build-essential
         cmake
+        ninja-build
         debhelper
         dpkg-dev
         pkg-config
@@ -93,7 +94,7 @@ require_build_tools()
     local missing_tools=()
     local tool=""
 
-    for tool in cmake c++ dh dpkg-buildpackage dpkg-deb tar; do
+    for tool in cmake c++ ninja dh dpkg-buildpackage dpkg-deb tar; do
         if ! command -v "$tool" >/dev/null 2>&1; then
             missing_tools+=("$tool")
         fi

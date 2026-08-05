@@ -38,7 +38,7 @@ install_debian_dependencies()
         exit 1
     fi
 
-    local packages=(build-essential cmake qt6-base-dev qt6-websockets-dev qt6-httpserver-dev)
+    local packages=(build-essential cmake ninja-build qt6-base-dev qt6-websockets-dev qt6-httpserver-dev)
 
     if (( EUID == 0 )); then
         apt-get update
@@ -65,6 +65,10 @@ check_build_tools()
 
     if ! command -v c++ >/dev/null 2>&1; then
         missing_tools+=("C++ compiler")
+    fi
+
+    if ! command -v ninja >/dev/null 2>&1; then
+        missing_tools+=(ninja)
     fi
 
     if (( ${#missing_tools[@]} == 0 )); then
@@ -106,7 +110,15 @@ fi
 
 check_build_tools
 
-cmake -S "$project_directory" -B "$build_directory" -DCMAKE_BUILD_TYPE=Release
+if [[ -f "$build_directory/CMakeCache.txt" ]]; then
+    current_generator="$(sed -n 's/^CMAKE_GENERATOR:INTERNAL=//p' "$build_directory/CMakeCache.txt" | head -n 1)"
+    if [[ -n "$current_generator" && "$current_generator" != "Ninja" ]]; then
+        echo "Existing build directory uses '$current_generator'; recreating it for Ninja."
+        rm -rf -- "$build_directory"
+    fi
+fi
+
+cmake -S "$project_directory" -B "$build_directory" -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build "$build_directory" --parallel
 
 executable="$build_directory/aowis-server-map"
