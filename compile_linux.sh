@@ -29,7 +29,7 @@ install_debian_dependencies()
 {
     if ! is_debian_family; then
         echo "Error: --install-dependencies is only supported on Debian and Debian-based distributions." >&2
-        echo "Install a C++ compiler, CMake, Qt 6 Core/Network development files, and Qt 6 HttpServer development files manually." >&2
+        echo "Install a C++ compiler, CMake, Qt 6 Core/Network development files, and Qt 6 HttpServer development files, and libtiff development files manually." >&2
         exit 1
     fi
 
@@ -38,7 +38,7 @@ install_debian_dependencies()
         exit 1
     fi
 
-    local packages=(build-essential cmake ninja-build qt6-base-dev qt6-websockets-dev qt6-httpserver-dev)
+    local packages=(build-essential cmake ninja-build qt6-base-dev qt6-websockets-dev qt6-httpserver-dev libtiff-dev)
 
     if (( EUID == 0 )); then
         apt-get update

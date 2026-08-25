@@ -19,6 +19,11 @@
 
 #include <aowis/map/maptiles.h>
 
+namespace Aowis::Map
+{
+class TerrainData;
+}
+
 class Server : public QObject
 {
     Q_OBJECT
@@ -31,6 +36,10 @@ public:
         int maximum_pending_requests = 2048;
         int maximum_active_downloads = 32;
         QString cache_directory;
+        bool terrain_enabled = true;
+        bool terrain_remote_fetch_enabled = true;
+        QString terrain_default_dataset = QStringLiteral("copernicus-glo30");
+        QString terrain_cache_directory;
         QByteArray api_key;
         QByteArray delete_api_key;
         bool require_api_key = false;
@@ -56,6 +65,7 @@ private:
     QHttpServer http;
     QTcpServer *tcp;
     MapTiles *maptiles;
+    Aowis::Map::TerrainData *terrain_data;
 
     QMutex mutex_pending;
     QHash<QString, PendingPromises> connections_pending;

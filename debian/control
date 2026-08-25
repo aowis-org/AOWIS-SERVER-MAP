@@ -2,7 +2,7 @@ Source: aowis-server-map
 Section: net
 Priority: optional
 Maintainer: AOWIS Project <aowis@aowis.org>
-Build-Depends: debhelper-compat (= 13), cmake, ninja-build, g++, pkg-config, qt6-base-dev, qt6-httpserver-dev, qt6-websockets-dev
+Build-Depends: debhelper-compat (= 13), cmake, ninja-build, g++, pkg-config, qt6-base-dev, qt6-httpserver-dev, qt6-websockets-dev, libtiff-dev
 Standards-Version: 4.7.2
 Rules-Requires-Root: no
 Homepage: https://aowis.org/

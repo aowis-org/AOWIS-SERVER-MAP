@@ -1,5 +1,7 @@
 #include "configuration.h"
 
+#include <aowis/map/terrain_tile.h>
+
 #include <QByteArray>
 #include <QDir>
 #include <QFile>
@@ -33,6 +35,30 @@ bool readPositiveInt(QSettings *settings, const QString &key, int maximum, int *
 
     *value = parsed_value;
     return true;
+}
+
+bool readBoolean(QSettings *settings, const QString &key, bool *value, QString *error_message)
+{
+    if (!settings->contains(key))
+        return true;
+
+    const QString text = settings->value(key).toString().trimmed().toLower();
+    if (text == QStringLiteral("true") || text == QStringLiteral("1") ||
+        text == QStringLiteral("yes") || text == QStringLiteral("on"))
+    {
+        *value = true;
+        return true;
+    }
+    if (text == QStringLiteral("false") || text == QStringLiteral("0") ||
+        text == QStringLiteral("no") || text == QStringLiteral("off"))
+    {
+        *value = false;
+        return true;
+    }
+
+    *error_message = QStringLiteral("Invalid boolean for '%1': %2")
+                         .arg(key, settings->value(key).toString());
+    return false;
 }
 }
 
@@ -120,6 +146,48 @@ bool MapServerConfiguration::loadConfigFile(const QString &path, Server::Config 
         }
     }
 
+    if (!readBoolean(&settings, QStringLiteral("terrain/enabled"),
+                     &config->terrain_enabled, error_message))
+    {
+        return false;
+    }
+    if (!readBoolean(&settings, QStringLiteral("terrain/remote_fetch_enabled"),
+                     &config->terrain_remote_fetch_enabled, error_message))
+    {
+        return false;
+    }
+
+    if (settings.contains(QStringLiteral("terrain/default_dataset")))
+    {
+        const QString dataset = settings.value(
+            QStringLiteral("terrain/default_dataset")).toString().trimmed();
+        if (!Aowis::Map::isValidTerrainDatasetId(dataset))
+        {
+            *error_message = QStringLiteral("Invalid terrain default dataset identifier: %1")
+                                 .arg(dataset);
+            return false;
+        }
+        config->terrain_default_dataset = dataset;
+    }
+
+    if (settings.contains(QStringLiteral("terrain/cache_directory")))
+    {
+        const QString configured_terrain_cache_directory =
+            settings.value(QStringLiteral("terrain/cache_directory")).toString().trimmed();
+        if (!configured_terrain_cache_directory.isEmpty())
+        {
+            const QFileInfo terrain_cache_info(configured_terrain_cache_directory);
+            config->terrain_cache_directory = terrain_cache_info.isAbsolute()
+                ? QDir::cleanPath(configured_terrain_cache_directory)
+                : QDir::cleanPath(QDir(file_info.absolutePath())
+                                      .absoluteFilePath(configured_terrain_cache_directory));
+        }
+        else
+        {
+            config->terrain_cache_directory.clear();
+        }
+    }
+
     if (settings.contains(QStringLiteral("authentication/api_key")))
         config->api_key = settings.value(QStringLiteral("authentication/api_key")).toString().toUtf8();
 
@@ -189,15 +257,27 @@ bool MapServerConfiguration::writeDefaultConfigFile(const QString &path, bool ov
         "# Empty uses the automatically selected cache directory shown at startup.\n"
         "cache_directory=\n"
         "\n"
+        "[terrain]\n"
+        "# Disable terrain/elevation support without affecting raster map tiles.\n"
+        "enabled=true\n"
+        "# When false, terrain may use only local/cache/offline data.\n"
+        "remote_fetch_enabled=true\n"
+        "# Dataset used by point-elevation requests that do not name a dataset.\n"
+        "default_dataset=%5\n"
+        "# Empty uses <downloads cache>/terrain.\n"
+        "cache_directory=\n"
+        "\n"
         "[authentication]\n"
         "# Empty disables API-key authentication for status and tile GET requests.\n"
         "api_key=\n"
-        "# Empty disables the cache DELETE endpoint.\n"
+        "# Empty allows cache DELETE requests without API-key authentication.\n"
+        "# The supplied systemd service requires this key and refuses startup when it is empty.\n"
         "delete_api_key=\n")
                                           .arg(defaults.listen_address.toString())
                                           .arg(defaults.port)
                                           .arg(defaults.maximum_pending_requests)
                                           .arg(defaults.maximum_active_downloads)
+                                          .arg(defaults.terrain_default_dataset)
                                           .toUtf8();
 
     QSaveFile file(file_info.absoluteFilePath());

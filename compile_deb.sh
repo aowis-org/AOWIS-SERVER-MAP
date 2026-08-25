@@ -67,6 +67,7 @@ install_debian_dependencies()
         qt6-base-dev
         qt6-httpserver-dev
         qt6-websockets-dev
+        libtiff-dev
     )
 
     if ! command -v apt-get >/dev/null 2>&1; then

@@ -1,10 +1,17 @@
 #include "server.h"
 
+#include <aowis/map/terrain_data.h>
+
 #include <QDebug>
 #include <QDir>
 #include <QFileInfo>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QMutexLocker>
+#include <QUrlQuery>
+#include <QtConcurrentRun>
 
+#include <optional>
 #include <utility>
 
 namespace
@@ -31,6 +38,150 @@ QHttpServerResponse makeUnauthorizedResponse()
         QHttpServerResponse::StatusCode::Unauthorized);
 }
 
+QHttpServerResponse makeTerrainTileErrorResponse(
+    const Aowis::Map::TerrainTileLookupResult &result)
+{
+    QHttpServerResponse::StatusCode status = QHttpServerResponse::StatusCode::InternalServerError;
+    switch (result.status)
+    {
+        case Aowis::Map::TerrainTileLookupStatus::Disabled:
+        case Aowis::Map::TerrainTileLookupStatus::NotInitialized:
+            status = QHttpServerResponse::StatusCode::ServiceUnavailable;
+            break;
+        case Aowis::Map::TerrainTileLookupStatus::InvalidDataset:
+        case Aowis::Map::TerrainTileLookupStatus::InvalidAddress:
+            status = QHttpServerResponse::StatusCode::BadRequest;
+            break;
+        case Aowis::Map::TerrainTileLookupStatus::TileUnavailable:
+            status = QHttpServerResponse::StatusCode::NotFound;
+            break;
+        case Aowis::Map::TerrainTileLookupStatus::RemoteFetchError:
+            status = QHttpServerResponse::StatusCode::BadGateway;
+            break;
+        case Aowis::Map::TerrainTileLookupStatus::TileReadError:
+        case Aowis::Map::TerrainTileLookupStatus::CorruptTile:
+        case Aowis::Map::TerrainTileLookupStatus::ProviderError:
+        case Aowis::Map::TerrainTileLookupStatus::Ready:
+        default:
+            status = QHttpServerResponse::StatusCode::InternalServerError;
+            break;
+    }
+
+    const QString message = result.error_message.isEmpty()
+        ? QStringLiteral("Terrain tile request failed: %1")
+              .arg(Aowis::Map::terrainTileLookupStatusId(result.status))
+        : result.error_message;
+    return QHttpServerResponse(message, status);
+}
+
+QHttpServerResponse makeTerrainElevationJsonResponse(
+    const QJsonObject &object,
+    QHttpServerResponse::StatusCode status = QHttpServerResponse::StatusCode::Ok)
+{
+    return QHttpServerResponse(
+        QByteArrayLiteral("application/json"),
+        QJsonDocument(object).toJson(QJsonDocument::Compact),
+        status);
+}
+
+QHttpServerResponse makeTerrainElevationErrorResponse(
+    const Aowis::Map::TerrainElevationLookupResult &result)
+{
+    QHttpServerResponse::StatusCode status = QHttpServerResponse::StatusCode::InternalServerError;
+    switch (result.status)
+    {
+        case Aowis::Map::TerrainElevationLookupStatus::Disabled:
+        case Aowis::Map::TerrainElevationLookupStatus::NotInitialized:
+            status = QHttpServerResponse::StatusCode::ServiceUnavailable;
+            break;
+        case Aowis::Map::TerrainElevationLookupStatus::InvalidCoordinate:
+        case Aowis::Map::TerrainElevationLookupStatus::InvalidDataset:
+        case Aowis::Map::TerrainElevationLookupStatus::InvalidVerticalDatum:
+        case Aowis::Map::TerrainElevationLookupStatus::VerticalDatumConversionUnavailable:
+            status = QHttpServerResponse::StatusCode::BadRequest;
+            break;
+        case Aowis::Map::TerrainElevationLookupStatus::OutsideCoverage:
+        case Aowis::Map::TerrainElevationLookupStatus::TileUnavailable:
+        case Aowis::Map::TerrainElevationLookupStatus::NoData:
+            status = QHttpServerResponse::StatusCode::NotFound;
+            break;
+        case Aowis::Map::TerrainElevationLookupStatus::RemoteFetchError:
+            status = QHttpServerResponse::StatusCode::BadGateway;
+            break;
+        case Aowis::Map::TerrainElevationLookupStatus::TileReadError:
+        case Aowis::Map::TerrainElevationLookupStatus::CorruptTile:
+        case Aowis::Map::TerrainElevationLookupStatus::ProviderError:
+        case Aowis::Map::TerrainElevationLookupStatus::Ready:
+        default:
+            status = QHttpServerResponse::StatusCode::InternalServerError;
+            break;
+    }
+
+    QJsonObject object;
+    object.insert(QStringLiteral("status"),
+                  Aowis::Map::terrainElevationLookupStatusId(result.status));
+    if (!result.error_message.isEmpty())
+        object.insert(QStringLiteral("error"), result.error_message);
+    if (result.requested_vertical_datum.has_value())
+    {
+        object.insert(QStringLiteral("requested_vertical_datum"),
+                      Aowis::Map::terrainVerticalDatumId(
+                          result.requested_vertical_datum.value()));
+    }
+    if (result.source_vertical_datum.has_value())
+    {
+        object.insert(QStringLiteral("source_vertical_datum"),
+                      Aowis::Map::terrainVerticalDatumId(
+                          result.source_vertical_datum.value()));
+    }
+    return makeTerrainElevationJsonResponse(object, status);
+}
+
+QHttpServerResponse makeTerrainElevationSuccessResponse(
+    const Aowis::Map::TerrainElevationLookupResult &result)
+{
+    if (result.status != Aowis::Map::TerrainElevationLookupStatus::Ready ||
+        !result.sample.has_value())
+    {
+        return makeTerrainElevationErrorResponse(result);
+    }
+
+    const Aowis::Map::TerrainElevationSample &sample = result.sample.value();
+    QJsonObject object;
+    object.insert(QStringLiteral("status"), QStringLiteral("ready"));
+    object.insert(QStringLiteral("elevation_m"), sample.elevation_m);
+    object.insert(QStringLiteral("dataset"), sample.dataset);
+    object.insert(QStringLiteral("nominal_resolution_m"), sample.nominal_resolution_m);
+    object.insert(QStringLiteral("vertical_datum"),
+                  Aowis::Map::terrainVerticalDatumId(sample.vertical_datum));
+    object.insert(QStringLiteral("vertical_datum_name"),
+                  Aowis::Map::terrainVerticalDatumDisplayName(sample.vertical_datum));
+    const QString vertical_datum_authority =
+        Aowis::Map::terrainVerticalDatumAuthorityCode(sample.vertical_datum);
+    if (!vertical_datum_authority.isEmpty())
+    {
+        object.insert(QStringLiteral("vertical_datum_authority"), vertical_datum_authority);
+    }
+    object.insert(QStringLiteral("vertical_reference"),
+                  Aowis::Map::terrainVerticalReferenceId(
+                      Aowis::Map::terrainVerticalReference(sample.vertical_datum)));
+    object.insert(QStringLiteral("source_vertical_datum"),
+                  Aowis::Map::terrainVerticalDatumId(sample.source_vertical_datum));
+    object.insert(QStringLiteral("origin"), Aowis::Map::terrainDataOriginId(sample.origin));
+
+    if (result.tile_address.has_value())
+    {
+        const Aowis::Map::TerrainTileAddress &address = result.tile_address.value();
+        QJsonObject tile;
+        tile.insert(QStringLiteral("zoom"), address.zoom);
+        tile.insert(QStringLiteral("x"), double(address.x));
+        tile.insert(QStringLiteral("y"), double(address.y));
+        object.insert(QStringLiteral("tile"), tile);
+    }
+
+    return makeTerrainElevationJsonResponse(object);
+}
+
 bool secureEquals(const QByteArray &left, const QByteArray &right)
 {
     const qsizetype maximum_size = qMax(left.size(), right.size());
@@ -52,6 +203,14 @@ Server::Server(const Config &config, QObject *parent)
       tcp(new QTcpServer(this)),
       maptiles(new MapTiles(config.cache_directory, config.maximum_active_downloads,
                             config.maximum_pending_requests, this)),
+      terrain_data(new Aowis::Map::TerrainData(
+          {
+              config.terrain_enabled,
+              config.terrain_remote_fetch_enabled,
+              config.cache_directory,
+              config.terrain_cache_directory
+          },
+          this)),
       pending_request_count(0)
 {
     connect(this->maptiles, &MapTiles::tileReady, this, &Server::onTileReady);
@@ -89,6 +248,13 @@ bool Server::start()
         return false;
     }
 
+    QString terrain_error_message;
+    if (!this->terrain_data->initialize(&terrain_error_message))
+    {
+        qCritical().noquote() << terrain_error_message;
+        return false;
+    }
+
     if (!this->tcp->listen(this->config.listen_address, this->config.port))
     {
         qCritical() << "Failed to listen on" << this->config.listen_address.toString()
@@ -107,14 +273,26 @@ bool Server::start()
         ? QStringLiteral("read API-key authentication disabled")
         : QStringLiteral("read API-key authentication enabled");
     const QString delete_authentication_status = this->config.delete_api_key.isEmpty()
-        ? QStringLiteral("cache deletion disabled")
+        ? QStringLiteral("delete API-key authentication disabled")
         : QStringLiteral("delete API-key authentication enabled");
+
+    const Aowis::Map::TerrainData::StoragePaths terrain_paths = this->terrain_data->storagePaths();
+    const QString terrain_status = !this->terrain_data->isEnabled()
+        ? QStringLiteral("terrain subsystem disabled")
+        : this->terrain_data->isRemoteFetchEnabled()
+              ? QStringLiteral("terrain subsystem enabled with remote fetching")
+              : QStringLiteral("terrain subsystem enabled in offline-only mode");
 
     qInfo() << "AOWIS map server listening on" << this->tcp->serverAddress().toString()
             << "port" << this->tcp->serverPort()
             << "with at most" << this->config.maximum_active_downloads << "active tile downloads and"
             << this->config.maximum_pending_requests << "pending HTTP tile requests"
             << "using cache directory" << this->config.cache_directory
+            << terrain_status
+            << (this->terrain_data->isEnabled()
+                    ? QStringLiteral("terrain cache: %1, default dataset: %2")
+                          .arg(terrain_paths.root, this->config.terrain_default_dataset)
+                    : QString())
             << read_authentication_status << "and" << delete_authentication_status;
     return true;
 }
@@ -127,9 +305,21 @@ void Server::setupRoutes()
         if (!isReadAuthorized(request))
             return makeUnauthorizedResponse();
 
-        return QHttpServerResponse(
-            QStringLiteral("AOWIS map server running with Qt %1").arg(QString::fromLatin1(QT_VERSION_STR)),
-            QHttpServerResponse::StatusCode::Ok);
+        const Aowis::Map::TerrainData::StoragePaths terrain_paths = this->terrain_data->storagePaths();
+        const QString terrain_status = !this->terrain_data->isEnabled()
+            ? QStringLiteral("disabled")
+            : this->terrain_data->isRemoteFetchEnabled()
+                  ? QStringLiteral("enabled, remote fetching enabled")
+                  : QStringLiteral("enabled, offline-only");
+        QString status = QStringLiteral("AOWIS map server running with Qt %1\nTerrain subsystem: %2")
+                             .arg(QString::fromLatin1(QT_VERSION_STR), terrain_status);
+        if (this->terrain_data->isEnabled())
+        {
+            status += QStringLiteral("\nTerrain cache: %1\nTerrain default dataset: %2")
+                          .arg(terrain_paths.root, this->config.terrain_default_dataset);
+        }
+
+        return QHttpServerResponse(status, QHttpServerResponse::StatusCode::Ok);
     });
 
     this->http.route("/status", QHttpServerRequest::Method::Options, []()
@@ -164,6 +354,109 @@ void Server::setupRoutes()
 
     this->http.route("/cache/<arg>/<arg>/<arg>/<arg>/<arg>/<arg>", QHttpServerRequest::Method::Options,
                      [](const QString &, int, int, int, int, int)
+    {
+        return makeOptionsResponse();
+    });
+
+    this->http.route("/terrain/v1/elevation",
+                     QHttpServerRequest::Method::Get,
+                     [this](const QHttpServerRequest &request) -> QFuture<QHttpServerResponse>
+    {
+        if (!isReadAuthorized(request))
+            return makeReadyResponse(makeUnauthorizedResponse());
+
+        const QUrlQuery query(request.url());
+        const QString latitude_text = query.queryItemValue(QStringLiteral("latitude"));
+        const QString longitude_text = query.queryItemValue(QStringLiteral("longitude"));
+        bool latitude_ok = false;
+        bool longitude_ok = false;
+        const double latitude_deg = latitude_text.toDouble(&latitude_ok);
+        const double longitude_deg = longitude_text.toDouble(&longitude_ok);
+        if (!latitude_ok || !longitude_ok || latitude_text.isEmpty() || longitude_text.isEmpty())
+        {
+            Aowis::Map::TerrainElevationLookupResult invalid_result;
+            invalid_result.status = Aowis::Map::TerrainElevationLookupStatus::InvalidCoordinate;
+            invalid_result.error_message = QStringLiteral(
+                "Terrain elevation requests require numeric latitude and longitude query parameters");
+            return makeReadyResponse(makeTerrainElevationErrorResponse(invalid_result));
+        }
+
+        std::optional<Aowis::Map::TerrainVerticalDatum> requested_vertical_datum;
+        const QString vertical_datum_text =
+            query.queryItemValue(QStringLiteral("vertical_datum")).trimmed().toLower();
+        if (!vertical_datum_text.isEmpty() && vertical_datum_text != QStringLiteral("native"))
+        {
+            const std::optional<Aowis::Map::TerrainVerticalDatum> parsed_vertical_datum =
+                Aowis::Map::terrainVerticalDatumFromId(vertical_datum_text);
+            if (!parsed_vertical_datum.has_value() ||
+                !Aowis::Map::isRequestableTerrainVerticalDatum(parsed_vertical_datum.value()))
+            {
+                Aowis::Map::TerrainElevationLookupResult invalid_result;
+                invalid_result.status = Aowis::Map::TerrainElevationLookupStatus::InvalidVerticalDatum;
+                invalid_result.error_message = QStringLiteral(
+                    "vertical_datum must be native, wgs84-ellipsoid, egm96 or egm2008");
+                return makeReadyResponse(makeTerrainElevationErrorResponse(invalid_result));
+            }
+            requested_vertical_datum = parsed_vertical_datum.value();
+        }
+
+        const QString dataset = this->config.terrain_default_dataset;
+        return QtConcurrent::run(
+            [this, dataset, latitude_deg, longitude_deg, requested_vertical_datum]()
+        {
+            const Aowis::Map::TerrainElevationLookupResult elevation_result =
+                this->terrain_data->sampleElevation(
+                    dataset, latitude_deg, longitude_deg, requested_vertical_datum);
+            return makeTerrainElevationSuccessResponse(elevation_result);
+        });
+    });
+
+    this->http.route("/terrain/v1/elevation",
+                     QHttpServerRequest::Method::Options,
+                     []()
+    {
+        return makeOptionsResponse();
+    });
+
+    this->http.route("/terrain/v1/<arg>/<arg>/<arg>/<arg>.aowterrain",
+                     QHttpServerRequest::Method::Get,
+                     [this](const QString &dataset, int zoom, int tile_x, int tile_y,
+                            const QHttpServerRequest &request) -> QFuture<QHttpServerResponse>
+    {
+        if (!isReadAuthorized(request))
+            return makeReadyResponse(makeUnauthorizedResponse());
+
+        Aowis::Map::TerrainTileAddress address;
+        address.zoom = zoom;
+        if (tile_x >= 0)
+            address.x = quint32(tile_x);
+        if (tile_y >= 0)
+            address.y = quint32(tile_y);
+
+        if (tile_x < 0 || tile_y < 0)
+        {
+            Aowis::Map::TerrainTileLookupResult invalid_result;
+            invalid_result.status = Aowis::Map::TerrainTileLookupStatus::InvalidAddress;
+            invalid_result.error_message = QStringLiteral("Terrain tile X and Y must be non-negative");
+            return makeReadyResponse(makeTerrainTileErrorResponse(invalid_result));
+        }
+
+        return QtConcurrent::run([this, dataset, address]()
+        {
+            const Aowis::Map::TerrainTileLookupResult terrain_result =
+                this->terrain_data->terrainTile(dataset, address);
+            if (terrain_result.status != Aowis::Map::TerrainTileLookupStatus::Ready)
+                return makeTerrainTileErrorResponse(terrain_result);
+
+            return QHttpServerResponse(
+                Aowis::Map::terrainTileMimeType().toUtf8(),
+                terrain_result.data);
+        });
+    });
+
+    this->http.route("/terrain/v1/<arg>/<arg>/<arg>/<arg>.aowterrain",
+                     QHttpServerRequest::Method::Options,
+                     [](const QString &, int, int, int)
     {
         return makeOptionsResponse();
     });
@@ -227,7 +520,7 @@ bool Server::isReadAuthorized(const QHttpServerRequest &request) const
 bool Server::isDeleteAuthorized(const QHttpServerRequest &request) const
 {
     if (this->config.delete_api_key.isEmpty())
-        return false;
+        return true;
 
     return requestContainsKey(request, this->config.delete_api_key);
 }

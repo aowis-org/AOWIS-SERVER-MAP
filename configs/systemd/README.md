@@ -15,10 +15,12 @@ The system service uses:
 
 - Binary: `/usr/bin/aowis-server-map`
 - Configuration: `/etc/aowis-server-map/map-server.ini`
-- Tile cache: `/var/cache/aowis-server-map`
+- Cache root: `/var/cache/aowis-server-map`
+- Map tile cache: `/var/cache/aowis-server-map/maptiles`
+- Terrain cache: `/var/cache/aowis-server-map/terrain`
 - Service account: `aowis-server-map`
 
-The unit uses `CacheDirectory=aowis-server-map`. systemd creates the cache directory with the correct ownership and exports `CACHE_DIRECTORY=/var/cache/aowis-server-map` to the process.
+The unit uses `CacheDirectory=aowis-server-map`. systemd creates the cache root with the correct ownership and exports `CACHE_DIRECTORY=/var/cache/aowis-server-map` to the process. Raster map tiles and terrain then use separate subdirectories below that root.
 
 The unit also passes `--require-api-key` and `--require-delete-api-key`, so it refuses to start unless both keys are configured.
 
