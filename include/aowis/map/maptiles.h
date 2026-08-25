@@ -4,6 +4,7 @@
 #include <QObject>
 
 #include <QByteArray>
+#include <QCache>
 #include <QMutex>
 #include <QNetworkAccessManager>
 #include <QQueue>
@@ -76,6 +77,7 @@ private:
 
     QString fscache_base;
     QNetworkAccessManager *network_manager;
+    QCache<QString, QByteArray> tile_memory_cache;
     int maximum_active_downloads;
     int maximum_queued_downloads;
 

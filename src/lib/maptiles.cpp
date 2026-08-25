@@ -15,6 +15,14 @@
 
 namespace
 {
+constexpr int TileMemoryCacheMaximumCostKiB = 256 * 1024;
+
+int tileMemoryCacheCostKiB(const QByteArray &data)
+{
+    const qint64 rounded_cost = (qint64(data.size()) + 1023) / 1024;
+    return qMax(1, int(qMin<qint64>(rounded_cost, TileMemoryCacheMaximumCostKiB)));
+}
+
 int positiveModulo(qint64 value, int divisor)
 {
     const qint64 remainder = value % divisor;
@@ -73,6 +81,7 @@ MapTiles::MapTiles(const QString &cache_base_directory, int maximum_active_downl
                                       ? QStandardPaths::writableLocation(QStandardPaths::AppDataLocation)
                                       : cache_base_directory)),
       network_manager(new QNetworkAccessManager(this)),
+      tile_memory_cache(TileMemoryCacheMaximumCostKiB),
       maximum_active_downloads(qMax(1, maximum_active_downloads)),
       maximum_queued_downloads(qMax(0, maximum_queued_downloads))
 {
@@ -143,24 +152,24 @@ MapTiles::TileRequestResult MapTiles::getTile(const QString &provider, int z, in
         return { TileRequestStatus::InvalidRequest, {} };
     }
 
-    QDir dir;
-    if (!dir.mkpath(cache_path))
-        qWarning() << "Failed to create directory:" << cache_path;
-
     const QString file_name = QString("%1/%2/%3.png").arg(z).arg(wrapped_x).arg(y);
     const QString tile_path = QDir(cache_path).filePath(file_name);
     const QString remote_path = providerTilePath(provider, z, wrapped_x, y);
     const QString canonical_key = canonicalTileKey(provider, z, wrapped_x, y);
 
-    const QFileInfo info(tile_path);
-    if (info.exists() && info.isFile())
+    const QByteArray *memory_tile = this->tile_memory_cache.object(canonical_key);
+    if (memory_tile != nullptr && !memory_tile->isEmpty())
+        return { TileRequestStatus::Ready, *memory_tile };
+
+    QFile file(tile_path);
+    if (file.open(QIODevice::ReadOnly))
     {
-        QFile file(tile_path);
-        if (file.open(QIODevice::ReadOnly))
+        const QByteArray data = file.readAll();
+        if (!data.isEmpty())
         {
-            const QByteArray data = file.readAll();
-            if (!data.isEmpty())
-                return { TileRequestStatus::Ready, data };
+            this->tile_memory_cache.insert(
+                canonical_key, new QByteArray(data), tileMemoryCacheCostKiB(data));
+            return { TileRequestStatus::Ready, data };
         }
     }
 
@@ -206,6 +215,27 @@ int MapTiles::deleteTiles(const QString &provider, int zoom, int tile_x_min, int
             {
                 this->downloads_invalidated.insert(download_key);
             }
+        }
+    }
+
+    const QList<QString> memory_keys = this->tile_memory_cache.keys();
+    for (const QString &memory_key : memory_keys)
+    {
+        QString memory_provider;
+        int memory_zoom = 0;
+        int memory_x = 0;
+        int memory_y = 0;
+        if (!parseCanonicalTileKey(
+                memory_key, &memory_provider, &memory_zoom, &memory_x, &memory_y))
+        {
+            continue;
+        }
+
+        if (memory_provider == provider && memory_zoom == zoom
+            && memory_y >= bounded_y_min && memory_y <= bounded_y_max
+            && tileXInsideRange(memory_x, tile_count, tile_x_min, tile_x_max))
+        {
+            this->tile_memory_cache.remove(memory_key);
         }
     }
 
@@ -300,7 +330,14 @@ void MapTiles::startMapTileDownload(const QueuedDownload &download)
         }
 
         if (!invalidated)
+        {
             saveMapTile(data, download.tile_path);
+            if (!data.isEmpty())
+            {
+                this->tile_memory_cache.insert(
+                    download.canonical_key, new QByteArray(data), tileMemoryCacheCostKiB(data));
+            }
+        }
 
         emit tileReady(download.response_key, data);
         rest->deleteLater();

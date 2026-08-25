@@ -469,6 +469,12 @@ void Server::setupRoutes()
             return makeReadyResponse(makeUnauthorizedResponse());
 
         const QString key = QString("%1_%2_%3_%4").arg(provider).arg(z).arg(x).arg(y);
+        const QUrlQuery tile_query(request.url());
+        const bool cache_first_delivery =
+            tile_query.queryItemValue(QStringLiteral("delivery")).compare(
+                QStringLiteral("cache-first"), Qt::CaseInsensitive) == 0
+            || request.value("x-aowis-tile-delivery").compare(
+                QByteArrayLiteral("cache-first"), Qt::CaseInsensitive) == 0;
         const MapTiles::TileRequestResult tile_result = this->maptiles->getTile(provider, z, x, y, key);
 
         if (tile_result.status == MapTiles::TileRequestStatus::Ready)
@@ -486,6 +492,13 @@ void Server::setupRoutes()
             return makeReadyResponse(QHttpServerResponse(
                 "Map tile download queue is full",
                 QHttpServerResponse::StatusCode::ServiceUnavailable));
+        }
+
+        if (cache_first_delivery)
+        {
+            return makeReadyResponse(QHttpServerResponse(
+                "Map tile is being fetched",
+                QHttpServerResponse::StatusCode::Accepted));
         }
 
         PendingPromise promise = PendingPromise::create();
