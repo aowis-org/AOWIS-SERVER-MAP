@@ -346,7 +346,10 @@ void MapTiles::startMapTileDownload(const QueuedDownload &download)
     connect(rest, &TileHttpClient::requestError, this,
             [this, rest, download](TileHttpClient::RequestFailureReason reason, const QString &error)
     {
-        qWarning() << "Tile request failed:" << download.response_key << error;
+        if (reason == TileHttpClient::RequestFailureReason::Timeout)
+            qWarning() << "Tile request timed out:" << download.response_key << error;
+        else
+            qWarning() << "Tile request failed:" << download.response_key << error;
 
         {
             QMutexLocker locker(&this->downloads_mutex);

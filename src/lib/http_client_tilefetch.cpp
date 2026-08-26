@@ -4,8 +4,8 @@
 
 namespace
 {
-constexpr int transfer_timeout_ms = 15000;
-constexpr int overall_timeout_ms = 45000;
+constexpr int transfer_timeout_ms = 45000;
+constexpr int overall_timeout_ms = 90000;
 constexpr qsizetype maximum_tile_size = 10 * 1024 * 1024;
 
 bool hasSupportedImageSignature(const QByteArray &data)
@@ -77,14 +77,36 @@ void TileHttpClient::post(const QString &endpoint, const QJsonObject &payload)
 void TileHttpClient::handleReply(QNetworkReply *reply, bool validate_tile_response)
 {
     const bool overall_timeout = reply->property("aowis_overall_timeout").toBool();
-    if (overall_timeout || reply->error() == QNetworkReply::TimeoutError)
+    const QNetworkReply::NetworkError network_error = reply->error();
+
+    // QNetworkRequest::setTransferTimeout() aborts the reply internally. On
+    // Qt 6.x that commonly surfaces as OperationCanceledError rather than
+    // TimeoutError. TileHttpClient has no external cancellation path, so an
+    // OperationCanceledError here is a transfer timeout unless our explicit
+    // overall timeout already marked the reply.
+    if (overall_timeout ||
+        network_error == QNetworkReply::TimeoutError ||
+        network_error == QNetworkReply::OperationCanceledError)
     {
-        emit requestError(RequestFailureReason::Timeout, reply->errorString());
+        QString timeout_description;
+        if (overall_timeout)
+        {
+            timeout_description = QStringLiteral("Overall tile request timed out after %1 ms")
+                .arg(overall_timeout_ms);
+        }
+        else
+        {
+            timeout_description =
+                QStringLiteral("Tile transfer timed out after %1 ms without data")
+                    .arg(transfer_timeout_ms);
+        }
+
+        emit requestError(RequestFailureReason::Timeout, timeout_description);
         reply->deleteLater();
         return;
     }
 
-    if (reply->error() != QNetworkReply::NoError)
+    if (network_error != QNetworkReply::NoError)
     {
         emit requestError(RequestFailureReason::UpstreamError, reply->errorString());
         reply->deleteLater();
