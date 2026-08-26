@@ -4,8 +4,15 @@
 
 namespace
 {
-constexpr int transfer_timeout_ms = 45000;
-constexpr int overall_timeout_ms = 90000;
+#ifdef Q_OS_WIN
+constexpr int transfer_timeout_ms = 20000;
+constexpr int overall_timeout_ms = 30000;
+constexpr int timeout_retry_count = 1;
+constexpr int timeout_retry_delay_ms = 250;
+#else
+constexpr int transfer_timeout_ms = 15000;
+constexpr int overall_timeout_ms = 45000;
+#endif
 constexpr qsizetype maximum_tile_size = 10 * 1024 * 1024;
 
 bool hasSupportedImageSignature(const QByteArray &data)
@@ -39,6 +46,9 @@ TileHttpClient::TileHttpClient(QNetworkAccessManager *network_manager, const QSt
 
 void TileHttpClient::get(const QString &endpoint)
 {
+#ifdef Q_OS_WIN
+    getAttempt(endpoint, 0);
+#else
     QNetworkRequest request(this->url_base + endpoint);
     request.setRawHeader("User-Agent", "aowis-server-map/1.0 (https://github.com/aowis-org/AOWIS-SERVER-MAP)");
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/octet-stream");
@@ -59,7 +69,36 @@ void TileHttpClient::get(const QString &endpoint)
     {
         handleReply(reply, true);
     });
+#endif
 }
+
+#ifdef Q_OS_WIN
+void TileHttpClient::getAttempt(const QString &endpoint, int attempt)
+{
+    QNetworkRequest request(this->url_base + endpoint);
+    request.setRawHeader("User-Agent", "aowis-server-map/1.0 (https://github.com/aowis-org/AOWIS-SERVER-MAP)");
+    request.setHeader(QNetworkRequest::ContentTypeHeader, "application/octet-stream");
+    request.setRawHeader("Accept", "*/*");
+    request.setTransferTimeout(transfer_timeout_ms);
+    request.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
+
+    QNetworkReply *reply = this->network_manager->get(request);
+    QTimer::singleShot(overall_timeout_ms, reply, [reply]()
+    {
+        if (reply->isFinished())
+            return;
+
+        reply->setProperty("aowis_overall_timeout", true);
+        reply->abort();
+    });
+
+    connect(reply, &QNetworkReply::finished, this,
+            [this, reply, endpoint, attempt]()
+    {
+        handleReply(reply, true, endpoint, attempt);
+    });
+}
+#endif
 
 void TileHttpClient::post(const QString &endpoint, const QJsonObject &payload)
 {
@@ -74,20 +113,27 @@ void TileHttpClient::post(const QString &endpoint, const QJsonObject &payload)
     });
 }
 
-void TileHttpClient::handleReply(QNetworkReply *reply, bool validate_tile_response)
+#ifdef Q_OS_WIN
+void TileHttpClient::handleReply(QNetworkReply *reply, bool validate_tile_response,
+                                 const QString &endpoint, int attempt)
 {
     const bool overall_timeout = reply->property("aowis_overall_timeout").toBool();
     const QNetworkReply::NetworkError network_error = reply->error();
 
-    // QNetworkRequest::setTransferTimeout() aborts the reply internally. On
-    // Qt 6.x that commonly surfaces as OperationCanceledError rather than
-    // TimeoutError. TileHttpClient has no external cancellation path, so an
-    // OperationCanceledError here is a transfer timeout unless our explicit
-    // overall timeout already marked the reply.
     if (overall_timeout ||
         network_error == QNetworkReply::TimeoutError ||
         network_error == QNetworkReply::OperationCanceledError)
     {
+        if (validate_tile_response && attempt < timeout_retry_count && !endpoint.isEmpty())
+        {
+            reply->deleteLater();
+            QTimer::singleShot(timeout_retry_delay_ms, this, [this, endpoint, attempt]()
+            {
+                getAttempt(endpoint, attempt + 1);
+            });
+            return;
+        }
+
         QString timeout_description;
         if (overall_timeout)
         {
@@ -112,6 +158,24 @@ void TileHttpClient::handleReply(QNetworkReply *reply, bool validate_tile_respon
         reply->deleteLater();
         return;
     }
+#else
+void TileHttpClient::handleReply(QNetworkReply *reply, bool validate_tile_response)
+{
+    const bool overall_timeout = reply->property("aowis_overall_timeout").toBool();
+    if (overall_timeout || reply->error() == QNetworkReply::TimeoutError)
+    {
+        emit requestError(RequestFailureReason::Timeout, reply->errorString());
+        reply->deleteLater();
+        return;
+    }
+
+    if (reply->error() != QNetworkReply::NoError)
+    {
+        emit requestError(RequestFailureReason::UpstreamError, reply->errorString());
+        reply->deleteLater();
+        return;
+    }
+#endif
 
     const QVariant status_attribute = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute);
     if (!status_attribute.isValid())

@@ -29,7 +29,13 @@ public:
     void post(const QString &endpoint, const QJsonObject &payload);
 
 private:
+#ifdef Q_OS_WIN
+    void getAttempt(const QString &endpoint, int attempt);
+    void handleReply(QNetworkReply *reply, bool validate_tile_response,
+                     const QString &endpoint = QString(), int attempt = 0);
+#else
     void handleReply(QNetworkReply *reply, bool validate_tile_response);
+#endif
 
     QNetworkAccessManager *network_manager;
     QString url_base;

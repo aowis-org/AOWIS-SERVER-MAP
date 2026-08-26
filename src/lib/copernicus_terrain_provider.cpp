@@ -211,6 +211,12 @@ SourceLoadResult downloadSourceTile(const QString &provider_cache_directory,
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
                          QNetworkRequest::NoLessSafeRedirectPolicy);
     request.setTransferTimeout(RemoteTransferTimeoutMs);
+#ifdef Q_OS_WIN
+    // Keep the Qt 6.7.0 Windows network path on HTTP/1.1 for the same reason
+    // as raster tile fetching: avoid HTTP/2 replies that can remain unfinished
+    // until the application-level timeout fires.
+    request.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
+#endif
     request.setRawHeader("User-Agent", "AOWIS-SERVER-MAP terrain-provider");
 
     QNetworkReply *reply = network_manager.get(request);
