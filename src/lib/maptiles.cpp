@@ -16,6 +16,7 @@
 namespace
 {
 constexpr int TileMemoryCacheMaximumCostKiB = 256 * 1024;
+constexpr int MaximumActiveDownloadsPerOrigin = 6;
 
 int tileMemoryCacheCostKiB(const QByteArray &data)
 {
@@ -284,6 +285,44 @@ int MapTiles::deleteTiles(const QString &provider, int zoom, int tile_x_min, int
     return deleted_count;
 }
 
+MapTiles::UpstreamActivity MapTiles::upstreamActivity() const
+{
+    QMutexLocker locker(&this->downloads_mutex);
+    UpstreamActivity activity;
+    activity.active = this->downloads_active.size();
+    activity.queued = this->downloads_queued.size();
+    return activity;
+}
+
+void MapTiles::cancelUpstreamDownloads()
+{
+    QList<TileHttpClient *> active_clients;
+    QList<QueuedDownload> queued_downloads;
+    {
+        QMutexLocker locker(&this->downloads_mutex);
+        active_clients = this->downloads_active_clients.values();
+        while (!this->downloads_queued.isEmpty())
+        {
+            const QueuedDownload download = this->downloads_queued.dequeue();
+            queued_downloads.append(download);
+            this->downloads_invalidated.remove(download.canonical_key);
+        }
+        this->downloads_queued_keys.clear();
+    }
+
+    for (const QueuedDownload &download : queued_downloads)
+        emit tileFailed(download.response_key, TileFailureReason::Cancelled);
+
+    for (TileHttpClient *client : active_clients)
+    {
+        if (client != nullptr)
+            client->cancel();
+    }
+
+    const UpstreamActivity activity = upstreamActivity();
+    emit upstreamActivityChanged(activity.active, activity.queued);
+}
+
 MapTiles::DownloadScheduleStatus MapTiles::scheduleMapTileDownload(const QueuedDownload &download)
 {
     bool start_immediately = false;
@@ -295,9 +334,9 @@ MapTiles::DownloadScheduleStatus MapTiles::scheduleMapTileDownload(const QueuedD
             return DownloadScheduleStatus::Scheduled;
         }
 
-        if (this->downloads_active.size() < this->maximum_active_downloads)
+        if (canStartDownloadLocked(download))
         {
-            this->downloads_active.insert(download.canonical_key);
+            markDownloadStartedLocked(download);
             start_immediately = true;
         }
         else
@@ -313,19 +352,53 @@ MapTiles::DownloadScheduleStatus MapTiles::scheduleMapTileDownload(const QueuedD
     if (start_immediately)
         startMapTileDownload(download);
 
+    const UpstreamActivity activity = upstreamActivity();
+    emit upstreamActivityChanged(activity.active, activity.queued);
     return DownloadScheduleStatus::Scheduled;
+}
+
+bool MapTiles::canStartDownloadLocked(const QueuedDownload &download) const
+{
+    if (this->downloads_active.size() >= this->maximum_active_downloads)
+        return false;
+
+    return this->downloads_active_per_origin.value(download.url, 0) <
+           MaximumActiveDownloadsPerOrigin;
+}
+
+void MapTiles::markDownloadStartedLocked(const QueuedDownload &download)
+{
+    this->downloads_active.insert(download.canonical_key);
+    this->downloads_active_per_origin.insert(
+        download.url, this->downloads_active_per_origin.value(download.url, 0) + 1);
+}
+
+void MapTiles::markDownloadFinishedLocked(const QueuedDownload &download)
+{
+    this->downloads_active.remove(download.canonical_key);
+
+    const int remaining = this->downloads_active_per_origin.value(download.url, 0) - 1;
+    if (remaining > 0)
+        this->downloads_active_per_origin.insert(download.url, remaining);
+    else
+        this->downloads_active_per_origin.remove(download.url);
 }
 
 void MapTiles::startMapTileDownload(const QueuedDownload &download)
 {
     TileHttpClient *rest = new TileHttpClient(this->network_manager, download.url, this);
+    {
+        QMutexLocker locker(&this->downloads_mutex);
+        this->downloads_active_clients.insert(download.canonical_key, rest);
+    }
     connect(rest, &TileHttpClient::requestFinished, this,
             [this, rest, download](const QByteArray &data)
     {
         bool invalidated = false;
         {
             QMutexLocker locker(&this->downloads_mutex);
-            this->downloads_active.remove(download.canonical_key);
+            markDownloadFinishedLocked(download);
+            this->downloads_active_clients.remove(download.canonical_key);
             invalidated = this->downloads_invalidated.remove(download.canonical_key);
         }
 
@@ -342,27 +415,34 @@ void MapTiles::startMapTileDownload(const QueuedDownload &download)
         emit tileReady(download.response_key, data);
         rest->deleteLater();
         startQueuedDownloads();
+        const UpstreamActivity activity = upstreamActivity();
+        emit upstreamActivityChanged(activity.active, activity.queued);
     });
     connect(rest, &TileHttpClient::requestError, this,
             [this, rest, download](TileHttpClient::RequestFailureReason reason, const QString &error)
     {
         if (reason == TileHttpClient::RequestFailureReason::Timeout)
             qWarning() << "Tile request timed out:" << download.response_key << error;
-        else
+        else if (reason != TileHttpClient::RequestFailureReason::Cancelled)
             qWarning() << "Tile request failed:" << download.response_key << error;
 
         {
             QMutexLocker locker(&this->downloads_mutex);
-            this->downloads_active.remove(download.canonical_key);
+            markDownloadFinishedLocked(download);
+            this->downloads_active_clients.remove(download.canonical_key);
             this->downloads_invalidated.remove(download.canonical_key);
         }
 
-        const TileFailureReason failure_reason = reason == TileHttpClient::RequestFailureReason::Timeout
-            ? TileFailureReason::Timeout
-            : TileFailureReason::UpstreamError;
+        TileFailureReason failure_reason = TileFailureReason::UpstreamError;
+        if (reason == TileHttpClient::RequestFailureReason::Timeout)
+            failure_reason = TileFailureReason::Timeout;
+        else if (reason == TileHttpClient::RequestFailureReason::Cancelled)
+            failure_reason = TileFailureReason::Cancelled;
         emit tileFailed(download.response_key, failure_reason);
         rest->deleteLater();
         startQueuedDownloads();
+        const UpstreamActivity activity = upstreamActivity();
+        emit upstreamActivityChanged(activity.active, activity.queued);
     });
     rest->get(download.path);
 }
@@ -375,9 +455,22 @@ void MapTiles::startQueuedDownloads()
         while (this->downloads_active.size() < this->maximum_active_downloads &&
                !this->downloads_queued.isEmpty())
         {
-            const QueuedDownload download = this->downloads_queued.dequeue();
+            qsizetype eligible_index = -1;
+            for (qsizetype index = 0; index < this->downloads_queued.size(); ++index)
+            {
+                if (canStartDownloadLocked(this->downloads_queued.at(index)))
+                {
+                    eligible_index = index;
+                    break;
+                }
+            }
+
+            if (eligible_index < 0)
+                break;
+
+            const QueuedDownload download = this->downloads_queued.takeAt(eligible_index);
             this->downloads_queued_keys.remove(download.canonical_key);
-            this->downloads_active.insert(download.canonical_key);
+            markDownloadStartedLocked(download);
             downloads_to_start.append(download);
         }
     }

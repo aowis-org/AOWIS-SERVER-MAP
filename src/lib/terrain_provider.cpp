@@ -23,6 +23,8 @@ QString terrainProviderFetchStatusId(TerrainProviderFetchStatus status)
             return QStringLiteral("source-read-error");
         case TerrainProviderFetchStatus::ConversionError:
             return QStringLiteral("conversion-error");
+        case TerrainProviderFetchStatus::Cancelled:
+            return QStringLiteral("cancelled");
         default:
             return QStringLiteral("source-unavailable");
     }

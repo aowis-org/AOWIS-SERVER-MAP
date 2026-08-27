@@ -2,6 +2,7 @@
 #define AOWIS_MAP_TERRAIN_DATA_H
 
 #include <aowis/map/terrain_tile.h>
+#include <aowis/map/terrain_provider.h>
 
 #include <QObject>
 
@@ -111,6 +112,9 @@ public:
         double latitude_deg,
         double longitude_deg,
         std::optional<TerrainVerticalDatum> requested_vertical_datum = std::nullopt) const;
+
+    TerrainUpstreamActivity upstreamActivity() const;
+    void cancelUpstreamDownloads();
 
 private:
     static QString resolveCacheDirectory(const Config &config);

@@ -6,6 +6,8 @@
 #include <QDateTime>
 #include <QHash>
 #include <QMutex>
+#include <QNetworkReply>
+#include <QSet>
 
 namespace Aowis::Map
 {
@@ -21,10 +23,15 @@ public:
                                          const TerrainTileAddress &address,
                                          const QString &provider_cache_directory,
                                          bool allow_remote_fetch) override;
+    TerrainUpstreamActivity upstreamActivity() const override;
+    void cancelUpstreamDownloads() override;
 
 private:
     QHash<QString, QDateTime> unavailable_source_until;
     QMutex unavailable_source_mutex;
+    mutable QMutex upstream_mutex;
+    QSet<QNetworkReply *> upstream_active_replies;
+    quint64 upstream_cancel_generation = 0;
 };
 
 } // namespace Aowis::Map

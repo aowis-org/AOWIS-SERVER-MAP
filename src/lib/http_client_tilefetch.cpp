@@ -1,5 +1,8 @@
 #include "http_client_tilefetch.h"
 
+#include <QMetaObject>
+#include <QPointer>
+#include <QThread>
 #include <QTimer>
 
 namespace
@@ -10,7 +13,6 @@ constexpr int overall_timeout_ms = 30000;
 constexpr int timeout_retry_count = 1;
 constexpr int timeout_retry_delay_ms = 250;
 #else
-constexpr int transfer_timeout_ms = 15000;
 constexpr int overall_timeout_ms = 45000;
 #endif
 constexpr qsizetype maximum_tile_size = 10 * 1024 * 1024;
@@ -46,6 +48,7 @@ TileHttpClient::TileHttpClient(QNetworkAccessManager *network_manager, const QSt
 
 void TileHttpClient::get(const QString &endpoint)
 {
+    this->cancel_requested = false;
 #ifdef Q_OS_WIN
     getAttempt(endpoint, 0);
 #else
@@ -53,9 +56,9 @@ void TileHttpClient::get(const QString &endpoint)
     request.setRawHeader("User-Agent", "aowis-server-map/1.0 (https://github.com/aowis-org/AOWIS-SERVER-MAP)");
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/octet-stream");
     request.setRawHeader("Accept", "*/*");
-    request.setTransferTimeout(transfer_timeout_ms);
 
     QNetworkReply *reply = this->network_manager->get(request);
+    this->active_reply = reply;
     QTimer::singleShot(overall_timeout_ms, reply, [reply]()
     {
         if (reply->isFinished())
@@ -75,6 +78,12 @@ void TileHttpClient::get(const QString &endpoint)
 #ifdef Q_OS_WIN
 void TileHttpClient::getAttempt(const QString &endpoint, int attempt)
 {
+    if (this->cancel_requested)
+    {
+        emit requestError(RequestFailureReason::Cancelled, QStringLiteral("Tile download canceled"));
+        return;
+    }
+
     QNetworkRequest request(this->url_base + endpoint);
     request.setRawHeader("User-Agent", "aowis-server-map/1.0 (https://github.com/aowis-org/AOWIS-SERVER-MAP)");
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/octet-stream");
@@ -83,6 +92,7 @@ void TileHttpClient::getAttempt(const QString &endpoint, int attempt)
     request.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
 
     QNetworkReply *reply = this->network_manager->get(request);
+    this->active_reply = reply;
     QTimer::singleShot(overall_timeout_ms, reply, [reply]()
     {
         if (reply->isFinished())
@@ -113,10 +123,41 @@ void TileHttpClient::post(const QString &endpoint, const QJsonObject &payload)
     });
 }
 
+void TileHttpClient::cancel()
+{
+    this->cancel_requested = true;
+    QPointer<QNetworkReply> reply(this->active_reply);
+    if (reply.isNull())
+        return;
+
+    if (reply->thread() == QThread::currentThread())
+    {
+        if (!reply->isFinished())
+            reply->abort();
+        return;
+    }
+
+    QMetaObject::invokeMethod(reply.data(), [reply]()
+    {
+        if (!reply.isNull() && !reply->isFinished())
+            reply->abort();
+    }, Qt::QueuedConnection);
+}
+
 #ifdef Q_OS_WIN
 void TileHttpClient::handleReply(QNetworkReply *reply, bool validate_tile_response,
                                  const QString &endpoint, int attempt)
 {
+    if (this->active_reply == reply)
+        this->active_reply = nullptr;
+
+    if (this->cancel_requested)
+    {
+        emit requestError(RequestFailureReason::Cancelled, QStringLiteral("Tile download canceled"));
+        reply->deleteLater();
+        return;
+    }
+
     const bool overall_timeout = reply->property("aowis_overall_timeout").toBool();
     const QNetworkReply::NetworkError network_error = reply->error();
 
@@ -161,10 +202,23 @@ void TileHttpClient::handleReply(QNetworkReply *reply, bool validate_tile_respon
 #else
 void TileHttpClient::handleReply(QNetworkReply *reply, bool validate_tile_response)
 {
+    if (this->active_reply == reply)
+        this->active_reply = nullptr;
+
+    if (this->cancel_requested)
+    {
+        emit requestError(RequestFailureReason::Cancelled, QStringLiteral("Tile download canceled"));
+        reply->deleteLater();
+        return;
+    }
+
     const bool overall_timeout = reply->property("aowis_overall_timeout").toBool();
     if (overall_timeout || reply->error() == QNetworkReply::TimeoutError)
     {
-        emit requestError(RequestFailureReason::Timeout, reply->errorString());
+        const QString timeout_description = overall_timeout
+            ? QStringLiteral("Overall tile request timed out after %1 ms").arg(overall_timeout_ms)
+            : reply->errorString();
+        emit requestError(RequestFailureReason::Timeout, timeout_description);
         reply->deleteLater();
         return;
     }

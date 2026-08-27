@@ -18,7 +18,8 @@ public:
     {
         UpstreamError,
         Timeout,
-        InvalidResponse
+        InvalidResponse,
+        Cancelled
     };
     Q_ENUM(RequestFailureReason)
 
@@ -27,6 +28,7 @@ public:
 
     void get(const QString &endpoint);
     void post(const QString &endpoint, const QJsonObject &payload);
+    void cancel();
 
 private:
 #ifdef Q_OS_WIN
@@ -39,6 +41,8 @@ private:
 
     QNetworkAccessManager *network_manager;
     QString url_base;
+    QNetworkReply *active_reply = nullptr;
+    bool cancel_requested = false;
 
 signals:
     void requestFinished(const QByteArray &data);

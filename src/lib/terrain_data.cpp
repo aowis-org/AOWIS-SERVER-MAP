@@ -304,6 +304,24 @@ QString TerrainData::normalizedTilePath(const QString &dataset,
     return QDir(this->storage_paths.normalized).filePath(relative_path);
 }
 
+TerrainUpstreamActivity TerrainData::upstreamActivity() const
+{
+    TerrainUpstreamActivity total;
+    for (const std::unique_ptr<TerrainProvider> &provider : this->providers)
+    {
+        const TerrainUpstreamActivity activity = provider->upstreamActivity();
+        total.active += activity.active;
+        total.queued += activity.queued;
+    }
+    return total;
+}
+
+void TerrainData::cancelUpstreamDownloads()
+{
+    for (const std::unique_ptr<TerrainProvider> &provider : this->providers)
+        provider->cancelUpstreamDownloads();
+}
+
 TerrainTileLookupResult TerrainData::terrainTile(const QString &dataset,
                                                   const TerrainTileAddress &address) const
 {
@@ -495,7 +513,8 @@ TerrainTileLookupResult TerrainData::fetchAndStoreNormalizedTile(
         {
             continue;
         }
-        if (provider_result.status == TerrainProviderFetchStatus::NetworkError)
+        if (provider_result.status == TerrainProviderFetchStatus::NetworkError ||
+            provider_result.status == TerrainProviderFetchStatus::Cancelled)
         {
             result.status = TerrainTileLookupStatus::RemoteFetchError;
             result.error_message = provider_result.error_message;

@@ -7,6 +7,8 @@
 #include <QHash>
 #include <QLockFile>
 #include <QMutexLocker>
+#include <QMetaObject>
+#include <QPointer>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
@@ -50,7 +52,8 @@ enum class SourceLoadStatus
     Ready,
     Unavailable,
     NetworkError,
-    ReadError
+    ReadError,
+    Cancelled
 };
 
 struct SourceLoadResult
@@ -148,7 +151,11 @@ bool ensureParentDirectory(const QString &path, QString *error_message)
 
 SourceLoadResult downloadSourceTile(const QString &provider_cache_directory,
                                     const CopernicusSourceAddress &address,
-                                    bool allow_remote_fetch)
+                                    bool allow_remote_fetch,
+                                    QMutex *upstream_mutex,
+                                    QSet<QNetworkReply *> *upstream_active_replies,
+                                    quint64 *upstream_cancel_generation,
+                                    quint64 request_cancel_generation)
 {
     SourceLoadResult result;
     result.path = sourceTileCachePath(provider_cache_directory, address);
@@ -206,6 +213,17 @@ SourceLoadResult downloadSourceTile(const QString &provider_cache_directory,
         return result;
     }
 
+    if (upstream_mutex != nullptr && upstream_cancel_generation != nullptr)
+    {
+        QMutexLocker locker(upstream_mutex);
+        if (*upstream_cancel_generation != request_cancel_generation)
+        {
+            result.status = SourceLoadStatus::Cancelled;
+            result.error_message = QStringLiteral("Copernicus upstream download canceled");
+            return result;
+        }
+    }
+
     QNetworkAccessManager network_manager;
     QNetworkRequest request(sourceTileUrl(address));
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
@@ -220,6 +238,16 @@ SourceLoadResult downloadSourceTile(const QString &provider_cache_directory,
     request.setRawHeader("User-Agent", "AOWIS-SERVER-MAP terrain-provider");
 
     QNetworkReply *reply = network_manager.get(request);
+    if (upstream_mutex != nullptr && upstream_active_replies != nullptr)
+    {
+        QMutexLocker locker(upstream_mutex);
+        upstream_active_replies->insert(reply);
+        if (upstream_cancel_generation != nullptr &&
+            *upstream_cancel_generation != request_cancel_generation)
+        {
+            reply->abort();
+        }
+    }
     QEventLoop event_loop;
     bool write_failed = false;
     qint64 downloaded_bytes = 0;
@@ -245,6 +273,25 @@ SourceLoadResult downloadSourceTile(const QString &provider_cache_directory,
     });
     QObject::connect(reply, &QNetworkReply::finished, &event_loop, &QEventLoop::quit);
     event_loop.exec();
+
+    bool canceled = false;
+    if (upstream_mutex != nullptr)
+    {
+        QMutexLocker locker(upstream_mutex);
+        if (upstream_active_replies != nullptr)
+            upstream_active_replies->remove(reply);
+        canceled = upstream_cancel_generation != nullptr &&
+            *upstream_cancel_generation != request_cancel_generation;
+    }
+
+    if (canceled)
+    {
+        output.cancelWriting();
+        reply->deleteLater();
+        result.status = SourceLoadStatus::Cancelled;
+        result.error_message = QStringLiteral("Copernicus upstream download canceled");
+        return result;
+    }
 
     if (!write_failed)
     {
@@ -529,11 +576,17 @@ class CopernicusRasterSet
 public:
     CopernicusRasterSet(const QString &provider_cache_directory, bool allow_remote_fetch,
                         QHash<QString, QDateTime> *unavailable_source_until,
-                        QMutex *unavailable_source_mutex)
+                        QMutex *unavailable_source_mutex, QMutex *upstream_mutex,
+                        QSet<QNetworkReply *> *upstream_active_replies,
+                        quint64 *upstream_cancel_generation, quint64 request_cancel_generation)
         : provider_cache_directory(provider_cache_directory),
           allow_remote_fetch(allow_remote_fetch),
           unavailable_source_until(unavailable_source_until),
-          unavailable_source_mutex(unavailable_source_mutex)
+          unavailable_source_mutex(unavailable_source_mutex),
+          upstream_mutex(upstream_mutex),
+          upstream_active_replies(upstream_active_replies),
+          upstream_cancel_generation(upstream_cancel_generation),
+          request_cancel_generation(request_cancel_generation)
     {
     }
 
@@ -629,7 +682,10 @@ private:
 
         const SourceLoadResult source_result =
             downloadSourceTile(this->provider_cache_directory, address,
-                               this->allow_remote_fetch);
+                               this->allow_remote_fetch, this->upstream_mutex,
+                               this->upstream_active_replies,
+                               this->upstream_cancel_generation,
+                               this->request_cancel_generation);
         if (source_result.status == SourceLoadStatus::Unavailable)
         {
             this->unavailable_sources.insert(key);
@@ -641,6 +697,12 @@ private:
                 this->unavailable_source_until->insert(
                     key, QDateTime::currentDateTimeUtc().addSecs(3600));
             }
+            return nullptr;
+        }
+        if (source_result.status == SourceLoadStatus::Cancelled)
+        {
+            this->fatal_status = TerrainProviderFetchStatus::Cancelled;
+            this->fatal_error_message = source_result.error_message;
             return nullptr;
         }
         if (source_result.status == SourceLoadStatus::NetworkError)
@@ -714,6 +776,10 @@ private:
     bool downloaded_any_source = false;
     QHash<QString, QDateTime> *unavailable_source_until = nullptr;
     QMutex *unavailable_source_mutex = nullptr;
+    QMutex *upstream_mutex = nullptr;
+    QSet<QNetworkReply *> *upstream_active_replies = nullptr;
+    quint64 *upstream_cancel_generation = nullptr;
+    quint64 request_cancel_generation = 0;
     QHash<QString, CopernicusRaster *> rasters;
     std::vector<std::unique_ptr<CopernicusRaster>> owned_rasters;
     QSet<QString> unavailable_sources;
@@ -777,9 +843,19 @@ TerrainProviderFetchResult CopernicusTerrainProvider::fetchTile(
         return result;
     }
 
+    quint64 request_cancel_generation = 0;
+    {
+        QMutexLocker locker(&this->upstream_mutex);
+        request_cancel_generation = this->upstream_cancel_generation;
+    }
+
     CopernicusRasterSet raster_set(provider_cache_directory, allow_remote_fetch,
                                     &this->unavailable_source_until,
-                                    &this->unavailable_source_mutex);
+                                    &this->unavailable_source_mutex,
+                                    &this->upstream_mutex,
+                                    &this->upstream_active_replies,
+                                    &this->upstream_cancel_generation,
+                                    request_cancel_generation);
     TerrainTile tile;
     tile.address = address;
     tile.dataset = dataset;
@@ -845,6 +921,29 @@ TerrainProviderFetchResult CopernicusTerrainProvider::fetchTile(
         ? TerrainDataOrigin::Remote
         : TerrainDataOrigin::Cache;
     return result;
+}
+
+TerrainUpstreamActivity CopernicusTerrainProvider::upstreamActivity() const
+{
+    QMutexLocker locker(&this->upstream_mutex);
+    TerrainUpstreamActivity activity;
+    activity.active = this->upstream_active_replies.size();
+    return activity;
+}
+
+void CopernicusTerrainProvider::cancelUpstreamDownloads()
+{
+    QMutexLocker locker(&this->upstream_mutex);
+    ++this->upstream_cancel_generation;
+    for (QNetworkReply *raw_reply : this->upstream_active_replies)
+    {
+        QPointer<QNetworkReply> reply(raw_reply);
+        QMetaObject::invokeMethod(raw_reply, [reply]()
+        {
+            if (!reply.isNull() && !reply->isFinished())
+                reply->abort();
+        }, Qt::QueuedConnection);
+    }
 }
 
 } // namespace Aowis::Map

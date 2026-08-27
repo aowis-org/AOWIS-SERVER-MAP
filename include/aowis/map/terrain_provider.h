@@ -18,7 +18,14 @@ enum class TerrainProviderFetchStatus
     SourceUnavailable,
     NetworkError,
     SourceReadError,
-    ConversionError
+    ConversionError,
+    Cancelled
+};
+
+struct TerrainUpstreamActivity
+{
+    int active = 0;
+    int queued = 0;
 };
 
 struct TerrainProviderFetchResult
@@ -44,6 +51,8 @@ public:
                                                  const TerrainTileAddress &address,
                                                  const QString &provider_cache_directory,
                                                  bool allow_remote_fetch) = 0;
+    virtual TerrainUpstreamActivity upstreamActivity() const = 0;
+    virtual void cancelUpstreamDownloads() = 0;
 };
 
 } // namespace Aowis::Map

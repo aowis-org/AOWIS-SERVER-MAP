@@ -327,6 +327,72 @@ void Server::setupRoutes()
         return makeOptionsResponse();
     });
 
+    this->http.route("/upstream/v1/activity", QHttpServerRequest::Method::Get,
+                     [this](const QHttpServerRequest &request)
+    {
+        if (!isReadAuthorized(request))
+            return makeUnauthorizedResponse();
+
+        const MapTiles::UpstreamActivity tile_activity = this->maptiles->upstreamActivity();
+        const Aowis::Map::TerrainUpstreamActivity terrain_activity =
+            this->terrain_data->upstreamActivity();
+
+        QJsonObject map_tiles;
+        map_tiles.insert(QStringLiteral("active"), tile_activity.active);
+        map_tiles.insert(QStringLiteral("queued"), tile_activity.queued);
+
+        QJsonObject terrain;
+        terrain.insert(QStringLiteral("active"), terrain_activity.active);
+        terrain.insert(QStringLiteral("queued"), terrain_activity.queued);
+
+        QJsonObject root;
+        root.insert(QStringLiteral("map_tiles"), map_tiles);
+        root.insert(QStringLiteral("terrain"), terrain);
+        return QHttpServerResponse(
+            QByteArrayLiteral("application/json"),
+            QJsonDocument(root).toJson(QJsonDocument::Compact),
+            QHttpServerResponse::StatusCode::Ok);
+    });
+
+    this->http.route("/upstream/v1/activity", QHttpServerRequest::Method::Options, []()
+    {
+        return makeOptionsResponse();
+    });
+
+    this->http.route("/upstream/v1/map-tiles", QHttpServerRequest::Method::Delete,
+                     [this](const QHttpServerRequest &request)
+    {
+        if (!isDeleteAuthorized(request))
+            return makeUnauthorizedResponse();
+
+        this->maptiles->cancelUpstreamDownloads();
+        return QHttpServerResponse(
+            "Map tile upstream downloads canceled",
+            QHttpServerResponse::StatusCode::Ok);
+    });
+
+    this->http.route("/upstream/v1/map-tiles", QHttpServerRequest::Method::Options, []()
+    {
+        return makeOptionsResponse();
+    });
+
+    this->http.route("/upstream/v1/terrain", QHttpServerRequest::Method::Delete,
+                     [this](const QHttpServerRequest &request)
+    {
+        if (!isDeleteAuthorized(request))
+            return makeUnauthorizedResponse();
+
+        this->terrain_data->cancelUpstreamDownloads();
+        return QHttpServerResponse(
+            "Terrain upstream downloads canceled",
+            QHttpServerResponse::StatusCode::Ok);
+    });
+
+    this->http.route("/upstream/v1/terrain", QHttpServerRequest::Method::Options, []()
+    {
+        return makeOptionsResponse();
+    });
+
     this->http.route("/cache/<arg>/<arg>/<arg>/<arg>/<arg>/<arg>", QHttpServerRequest::Method::Delete,
                      [this](const QString &provider, int zoom, int tile_x_min, int tile_x_max,
                             int tile_y_min, int tile_y_max, const QHttpServerRequest &request)
@@ -587,12 +653,18 @@ void Server::onTileReady(QString key, QByteArray data)
 void Server::onTileFailed(const QString &key, MapTiles::TileFailureReason reason)
 {
     PendingPromises promises = takePendingPromises(key);
-    const QHttpServerResponse::StatusCode status = reason == MapTiles::TileFailureReason::Timeout
-        ? QHttpServerResponse::StatusCode::GatewayTimeout
-        : QHttpServerResponse::StatusCode::BadGateway;
-    const QString message = reason == MapTiles::TileFailureReason::Timeout
-        ? QStringLiteral("Map tile download timed out")
-        : QStringLiteral("Failed to download map tile");
+    QHttpServerResponse::StatusCode status = QHttpServerResponse::StatusCode::BadGateway;
+    QString message = QStringLiteral("Failed to download map tile");
+    if (reason == MapTiles::TileFailureReason::Timeout)
+    {
+        status = QHttpServerResponse::StatusCode::GatewayTimeout;
+        message = QStringLiteral("Map tile download timed out");
+    }
+    else if (reason == MapTiles::TileFailureReason::Cancelled)
+    {
+        status = QHttpServerResponse::StatusCode::ServiceUnavailable;
+        message = QStringLiteral("Map tile upstream download canceled");
+    }
 
     for (const PendingPromise &promise : promises)
     {
