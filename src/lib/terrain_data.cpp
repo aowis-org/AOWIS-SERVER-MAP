@@ -7,6 +7,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QLockFile>
+#include <QMutexLocker>
 #include <QSaveFile>
 #include <QStandardPaths>
 
@@ -365,13 +366,10 @@ TerrainTileLookupResult TerrainData::terrainTile(const QString &dataset,
 
     const QString normalized_path = normalizedTilePath(dataset, address);
     const QFileInfo normalized_file_info(normalized_path);
-    QDir normalized_directory;
-    if (!normalized_directory.mkpath(normalized_file_info.absolutePath()))
+    if (!ensureNormalizedTileDirectory(normalized_file_info.absolutePath(),
+                                       &result.error_message))
     {
         result.status = TerrainTileLookupStatus::TileReadError;
-        result.error_message =
-            QStringLiteral("Failed to create normalized terrain cache directory: %1")
-                .arg(normalized_file_info.absolutePath());
         return result;
     }
 
@@ -544,12 +542,10 @@ TerrainTileLookupResult TerrainData::fetchAndStoreNormalizedTile(
 
         const QString path = normalizedTilePath(dataset, address);
         const QFileInfo file_info(path);
-        QDir directory;
-        if (!directory.mkpath(file_info.absolutePath()))
+        if (!ensureNormalizedTileDirectory(file_info.absolutePath(),
+                                           &result.error_message))
         {
             result.status = TerrainTileLookupStatus::TileReadError;
-            result.error_message = QStringLiteral("Failed to create normalized terrain tile directory: %1")
-                                       .arg(file_info.absolutePath());
             return result;
         }
 
@@ -787,6 +783,46 @@ QString TerrainData::resolveCacheDirectory(const Config &config)
         return QString();
 
     return QDir::cleanPath(QDir(base_directory).filePath(QStringLiteral("terrain")));
+}
+
+bool TerrainData::ensureNormalizedTileDirectory(const QString &path,
+                                                QString *error_message) const
+{
+    QMutexLocker locker(&this->normalized_directory_mutex);
+
+    const QFileInfo existing_info(path);
+    if (existing_info.exists())
+    {
+        if (existing_info.isDir())
+            return true;
+
+        if (error_message != nullptr)
+        {
+            *error_message = QStringLiteral(
+                "Normalized terrain cache path exists but is not a directory: %1")
+                                 .arg(path);
+        }
+        return false;
+    }
+
+    QDir directory;
+    if (directory.mkpath(path))
+        return true;
+
+    // A filesystem watcher, antivirus product or another process may have
+    // created the directory between the existence check and mkpath(). Treat a
+    // directory that exists after the failed call as success.
+    const QFileInfo final_info(path);
+    if (final_info.exists() && final_info.isDir())
+        return true;
+
+    if (error_message != nullptr)
+    {
+        *error_message = QStringLiteral(
+            "Failed to create normalized terrain cache directory: %1")
+                             .arg(path);
+    }
+    return false;
 }
 
 bool TerrainData::ensureStorageDirectory(const QString &path, const QString &description,

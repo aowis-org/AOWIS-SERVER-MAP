@@ -8,6 +8,7 @@
 
 
 #include <QByteArray>
+#include <QMutex>
 #include <QString>
 
 #include <memory>
@@ -120,6 +121,7 @@ private:
     static QString resolveCacheDirectory(const Config &config);
     bool ensureStorageDirectory(const QString &path, const QString &description,
                                 QString *error_message) const;
+    bool ensureNormalizedTileDirectory(const QString &path, QString *error_message) const;
     TerrainTileLookupResult readNormalizedTile(const QString &dataset,
                                                const TerrainTileAddress &address) const;
     TerrainTileLookupResult fetchAndStoreNormalizedTile(const QString &dataset,
@@ -128,6 +130,7 @@ private:
     Config config;
     StoragePaths storage_paths;
     std::vector<std::unique_ptr<TerrainProvider>> providers;
+    mutable QMutex normalized_directory_mutex;
     bool initialized = false;
 };
 
