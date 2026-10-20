@@ -1,6 +1,7 @@
 #include "server.h"
 
 #include <aowis/map/terrain_data.h>
+#include <aowis/map/terrain_dataset.h>
 
 #include <QDebug>
 #include <QDir>
@@ -180,6 +181,37 @@ QHttpServerResponse makeTerrainElevationSuccessResponse(
     }
 
     return makeTerrainElevationJsonResponse(object);
+}
+
+QHttpServerResponse makeTerrainCacheDeletionResponse(
+    const Aowis::Map::TerrainCacheDeletionResult &result)
+{
+    QHttpServerResponse::StatusCode status = QHttpServerResponse::StatusCode::Ok;
+    switch (result.status)
+    {
+        case Aowis::Map::TerrainCacheDeletionStatus::Deleted:
+            // The deleted file count, as the map-tile cache DELETE answers.
+            return QHttpServerResponse(QString::number(result.deleted_count),
+                                       QHttpServerResponse::StatusCode::Ok);
+        case Aowis::Map::TerrainCacheDeletionStatus::Disabled:
+        case Aowis::Map::TerrainCacheDeletionStatus::NotInitialized:
+            status = QHttpServerResponse::StatusCode::ServiceUnavailable;
+            break;
+        case Aowis::Map::TerrainCacheDeletionStatus::InvalidDataset:
+        case Aowis::Map::TerrainCacheDeletionStatus::InvalidRange:
+            status = QHttpServerResponse::StatusCode::BadRequest;
+            break;
+        case Aowis::Map::TerrainCacheDeletionStatus::Failed:
+        default:
+            status = QHttpServerResponse::StatusCode::InternalServerError;
+            break;
+    }
+
+    const QString message = result.error_message.isEmpty()
+        ? QStringLiteral("Terrain cache deletion failed: %1")
+              .arg(Aowis::Map::terrainCacheDeletionStatusId(result.status))
+        : result.error_message;
+    return QHttpServerResponse(message, status);
 }
 
 bool secureEquals(const QByteArray &left, const QByteArray &right)
@@ -420,6 +452,96 @@ void Server::setupRoutes()
 
     this->http.route("/cache/<arg>/<arg>/<arg>/<arg>/<arg>/<arg>", QHttpServerRequest::Method::Options,
                      [](const QString &, int, int, int, int, int)
+    {
+        return makeOptionsResponse();
+    });
+
+    // Terrain cache deletion, the map-tile cache DELETE's shape per zoom
+    // level: the normalized .aowterrain tiles of an XYZ range, or the
+    // provider-native source data (downloaded DEM rasters) covering its
+    // area. Both use the delete API key and run the file work outside the
+    // HTTP event loop (a source file being downloaded is waited for briefly).
+    this->http.route("/terrain/v1/cache/<arg>/<arg>/<arg>/<arg>/<arg>/<arg>",
+                     QHttpServerRequest::Method::Delete,
+                     [this](const QString &dataset, int zoom, int tile_x_min, int tile_x_max,
+                            int tile_y_min, int tile_y_max,
+                            const QHttpServerRequest &request) -> QFuture<QHttpServerResponse>
+    {
+        if (!isDeleteAuthorized(request))
+            return makeReadyResponse(makeUnauthorizedResponse());
+
+        return QtConcurrent::run(
+            [this, dataset, zoom, tile_x_min, tile_x_max, tile_y_min, tile_y_max]()
+        {
+            return makeTerrainCacheDeletionResponse(this->terrain_data->deleteNormalizedTiles(
+                dataset, zoom, tile_x_min, tile_x_max, tile_y_min, tile_y_max));
+        });
+    });
+
+    this->http.route("/terrain/v1/cache/<arg>/<arg>/<arg>/<arg>/<arg>/<arg>",
+                     QHttpServerRequest::Method::Options,
+                     [](const QString &, int, int, int, int, int)
+    {
+        return makeOptionsResponse();
+    });
+
+    this->http.route("/terrain/v1/source/<arg>/<arg>/<arg>/<arg>/<arg>/<arg>",
+                     QHttpServerRequest::Method::Delete,
+                     [this](const QString &dataset, int zoom, int tile_x_min, int tile_x_max,
+                            int tile_y_min, int tile_y_max,
+                            const QHttpServerRequest &request) -> QFuture<QHttpServerResponse>
+    {
+        if (!isDeleteAuthorized(request))
+            return makeReadyResponse(makeUnauthorizedResponse());
+
+        return QtConcurrent::run(
+            [this, dataset, zoom, tile_x_min, tile_x_max, tile_y_min, tile_y_max]()
+        {
+            return makeTerrainCacheDeletionResponse(this->terrain_data->deleteSourceData(
+                dataset, zoom, tile_x_min, tile_x_max, tile_y_min, tile_y_max));
+        });
+    });
+
+    this->http.route("/terrain/v1/source/<arg>/<arg>/<arg>/<arg>/<arg>/<arg>",
+                     QHttpServerRequest::Method::Options,
+                     [](const QString &, int, int, int, int, int)
+    {
+        return makeOptionsResponse();
+    });
+
+    // Static description of the served terrain datasets (native resolution,
+    // generated zoom range, datum) and which one the elevation route and
+    // renderers use by default. Renderers cap their terrain requests at a
+    // dataset's maximum_zoom instead of hardcoding provider knowledge.
+    this->http.route("/terrain/v1/datasets",
+                     QHttpServerRequest::Method::Get,
+                     [this](const QHttpServerRequest &request)
+    {
+        if (!isReadAuthorized(request))
+            return makeUnauthorizedResponse();
+
+        if (!this->terrain_data->isEnabled() || !this->terrain_data->isInitialized())
+        {
+            Aowis::Map::TerrainTileLookupResult unavailable_result;
+            unavailable_result.status = this->terrain_data->isEnabled()
+                ? Aowis::Map::TerrainTileLookupStatus::NotInitialized
+                : Aowis::Map::TerrainTileLookupStatus::Disabled;
+            unavailable_result.error_message = this->terrain_data->isEnabled()
+                ? QStringLiteral("Terrain subsystem is not initialized")
+                : QStringLiteral("Terrain subsystem is disabled");
+            return makeTerrainTileErrorResponse(unavailable_result);
+        }
+
+        return QHttpServerResponse(
+            QByteArrayLiteral("application/json"),
+            Aowis::Map::encodeTerrainDatasetCatalogJson(
+                this->terrain_data->datasets(), this->config.terrain_default_dataset),
+            QHttpServerResponse::StatusCode::Ok);
+    });
+
+    this->http.route("/terrain/v1/datasets",
+                     QHttpServerRequest::Method::Options,
+                     []()
     {
         return makeOptionsResponse();
     });

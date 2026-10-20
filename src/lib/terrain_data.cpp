@@ -154,6 +154,51 @@ std::optional<double> bilinearElevation(const TerrainTile &tile,
         return std::nullopt;
     return weighted_elevation_m;
 }
+
+qint64 positiveModulo(qint64 value, qint64 divisor)
+{
+    const qint64 remainder = value % divisor;
+    return remainder < 0 ? remainder + divisor : remainder;
+}
+
+// MapTiles' column test: the range wraps around the antimeridian, a range
+// at least as wide as the zoom level covers every column.
+bool tileXInsideRange(qint64 tile_x, qint64 tile_count, qint64 tile_x_min, qint64 tile_x_max)
+{
+    const qint64 range_width = tile_x_max - tile_x_min + 1;
+    if (range_width >= tile_count)
+        return true;
+
+    const qint64 first_wrapped_x = positiveModulo(tile_x_min, tile_count);
+    const qint64 offset = positiveModulo(tile_x - first_wrapped_x, tile_count);
+    return offset < range_width;
+}
+
+double tileYToLatitudeDeg(double tile_y, double tile_count)
+{
+    const double mercator_y = std::numbers::pi * (1.0 - 2.0 * tile_y / tile_count);
+    return std::atan(std::sinh(mercator_y)) * 180.0 / std::numbers::pi;
+}
+}
+
+QString terrainCacheDeletionStatusId(TerrainCacheDeletionStatus status)
+{
+    switch (status)
+    {
+        case TerrainCacheDeletionStatus::Deleted:
+            return QStringLiteral("deleted");
+        case TerrainCacheDeletionStatus::Disabled:
+            return QStringLiteral("disabled");
+        case TerrainCacheDeletionStatus::NotInitialized:
+            return QStringLiteral("not-initialized");
+        case TerrainCacheDeletionStatus::InvalidDataset:
+            return QStringLiteral("invalid-dataset");
+        case TerrainCacheDeletionStatus::InvalidRange:
+            return QStringLiteral("invalid-range");
+        case TerrainCacheDeletionStatus::Failed:
+        default:
+            return QStringLiteral("failed");
+    }
 }
 
 QString terrainTileLookupStatusId(TerrainTileLookupStatus status)
@@ -305,6 +350,14 @@ QString TerrainData::normalizedTilePath(const QString &dataset,
     return QDir(this->storage_paths.normalized).filePath(relative_path);
 }
 
+QVector<TerrainDatasetInfo> TerrainData::datasets() const
+{
+    QVector<TerrainDatasetInfo> result;
+    for (const std::unique_ptr<TerrainProvider> &provider : this->providers)
+        result.append(provider->datasets());
+    return result;
+}
+
 TerrainUpstreamActivity TerrainData::upstreamActivity() const
 {
     TerrainUpstreamActivity total;
@@ -321,6 +374,182 @@ void TerrainData::cancelUpstreamDownloads()
 {
     for (const std::unique_ptr<TerrainProvider> &provider : this->providers)
         provider->cancelUpstreamDownloads();
+}
+
+std::optional<TerrainCacheDeletionResult> TerrainData::rejectCacheDeletion(
+    const QString &dataset, int zoom, int tile_x_min, int tile_x_max,
+    int tile_y_min, int tile_y_max) const
+{
+    TerrainCacheDeletionResult result;
+    if (!this->config.enabled)
+    {
+        result.status = TerrainCacheDeletionStatus::Disabled;
+        result.error_message = QStringLiteral("Terrain subsystem is disabled");
+        return result;
+    }
+    if (!this->initialized)
+    {
+        result.status = TerrainCacheDeletionStatus::NotInitialized;
+        result.error_message = QStringLiteral("Terrain subsystem is not initialized");
+        return result;
+    }
+    if (!isValidTerrainDatasetId(dataset))
+    {
+        result.status = TerrainCacheDeletionStatus::InvalidDataset;
+        result.error_message = QStringLiteral("Invalid terrain dataset identifier");
+        return result;
+    }
+    if (zoom < 0 || zoom > TerrainTileMaximumZoom ||
+        tile_x_min > tile_x_max || tile_y_min > tile_y_max)
+    {
+        result.status = TerrainCacheDeletionStatus::InvalidRange;
+        result.error_message = QStringLiteral("Invalid terrain cache deletion range");
+        return result;
+    }
+    return std::nullopt;
+}
+
+TerrainCacheDeletionResult TerrainData::deleteNormalizedTiles(
+    const QString &dataset, int zoom, int tile_x_min, int tile_x_max,
+    int tile_y_min, int tile_y_max) const
+{
+    const std::optional<TerrainCacheDeletionResult> rejected =
+        rejectCacheDeletion(dataset, zoom, tile_x_min, tile_x_max, tile_y_min, tile_y_max);
+    if (rejected.has_value())
+        return rejected.value();
+
+    TerrainCacheDeletionResult result;
+    const qint64 tile_count = qint64(1) << zoom;
+    const qint64 bounded_y_min = std::max<qint64>(0, tile_y_min);
+    const qint64 bounded_y_max = std::min<qint64>(tile_count - 1, tile_y_max);
+    if (bounded_y_min > bounded_y_max)
+        return result;
+
+    // The zoom directory from the canonical tile path (the layout is defined
+    // once, normalizedTerrainTileRelativePath()): <zoom>/<x>/<y>.aowterrain.
+    TerrainTileAddress origin_address;
+    origin_address.zoom = zoom;
+    const QString origin_path = normalizedTilePath(dataset, origin_address);
+    if (origin_path.isEmpty())
+    {
+        result.status = TerrainCacheDeletionStatus::InvalidRange;
+        result.error_message = QStringLiteral("Invalid terrain cache deletion range");
+        return result;
+    }
+    const QString zoom_path = QFileInfo(QFileInfo(origin_path).absolutePath()).absolutePath();
+    QDir zoom_directory(zoom_path);
+    if (!zoom_directory.exists())
+        return result;
+
+    const QString tile_suffix = QStringLiteral(".") + terrainTileFileExtension();
+    const QStringList x_directory_names =
+        zoom_directory.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
+    for (const QString &x_directory_name : x_directory_names)
+    {
+        bool tile_x_valid = false;
+        const qint64 tile_x = x_directory_name.toLongLong(&tile_x_valid);
+        if (!tile_x_valid || tile_x < 0 || tile_x >= tile_count ||
+            !tileXInsideRange(tile_x, tile_count, tile_x_min, tile_x_max))
+        {
+            continue;
+        }
+
+        QDir x_directory(zoom_directory.filePath(x_directory_name));
+        const QStringList tile_file_names = x_directory.entryList(
+            QStringList() << (QStringLiteral("*") + tile_suffix), QDir::Files);
+        for (const QString &tile_file_name : tile_file_names)
+        {
+            bool tile_y_valid = false;
+            const qint64 tile_y =
+                tile_file_name.left(tile_file_name.size() - tile_suffix.size()).toLongLong(&tile_y_valid);
+            if (!tile_y_valid || tile_y < bounded_y_min || tile_y > bounded_y_max)
+                continue;
+
+            // A fill of this tile (terrainTile(), per-tile lock) only runs
+            // while the file is missing or corrupt and replaces it atomically
+            // (QSaveFile): removing it underneath is safe either way.
+            const QString tile_path = x_directory.filePath(tile_file_name);
+            if (QFile::remove(tile_path))
+            {
+                ++result.deleted_count;
+                continue;
+            }
+
+            result.status = TerrainCacheDeletionStatus::Failed;
+            if (result.error_message.isEmpty())
+            {
+                result.error_message =
+                    QStringLiteral("Failed to delete normalized terrain tile: %1").arg(tile_path);
+            }
+        }
+
+        // Only succeeds when nothing is left (lock files of running fills).
+        zoom_directory.rmdir(x_directory_name);
+    }
+
+    QDir(QFileInfo(zoom_path).absolutePath()).rmdir(QString::number(zoom));
+    return result;
+}
+
+TerrainCacheDeletionResult TerrainData::deleteSourceData(
+    const QString &dataset, int zoom, int tile_x_min, int tile_x_max,
+    int tile_y_min, int tile_y_max)
+{
+    const std::optional<TerrainCacheDeletionResult> rejected =
+        rejectCacheDeletion(dataset, zoom, tile_x_min, tile_x_max, tile_y_min, tile_y_max);
+    if (rejected.has_value())
+        return rejected.value();
+
+    TerrainCacheDeletionResult result;
+    const qint64 tile_count = qint64(1) << zoom;
+    const qint64 bounded_y_min = std::max<qint64>(0, tile_y_min);
+    const qint64 bounded_y_max = std::min<qint64>(tile_count - 1, tile_y_max);
+    if (bounded_y_min > bounded_y_max)
+        return result;
+
+    // The range's geographic box: unwrapped longitudes (the x range may
+    // start west of column 0 or end east of the last one), latitudes from
+    // the clamped rows' outer edges.
+    const double tile_count_double = double(tile_count);
+    TerrainGeographicBox box;
+    if (qint64(tile_x_max) - tile_x_min + 1 >= tile_count)
+    {
+        box.west_deg = -180.0;
+        box.east_deg = 180.0;
+    }
+    else
+    {
+        box.west_deg = double(tile_x_min) / tile_count_double * 360.0 - 180.0;
+        box.east_deg = double(qint64(tile_x_max) + 1) / tile_count_double * 360.0 - 180.0;
+    }
+    box.north_deg = tileYToLatitudeDeg(double(bounded_y_min), tile_count_double);
+    box.south_deg = tileYToLatitudeDeg(double(bounded_y_max + 1), tile_count_double);
+
+    bool dataset_supported = false;
+    for (const std::unique_ptr<TerrainProvider> &provider : this->providers)
+    {
+        if (!provider->supportsDataset(dataset))
+            continue;
+
+        dataset_supported = true;
+        const TerrainSourceDeletionResult provider_result =
+            provider->deleteSourceData(dataset, box, this->storage_paths.providers);
+        result.deleted_count += provider_result.deleted_count;
+        if (!provider_result.ok)
+        {
+            result.status = TerrainCacheDeletionStatus::Failed;
+            if (result.error_message.isEmpty())
+                result.error_message = provider_result.error_message;
+        }
+    }
+
+    if (!dataset_supported)
+    {
+        result.status = TerrainCacheDeletionStatus::InvalidDataset;
+        result.error_message = QStringLiteral(
+            "No terrain provider supports dataset '%1'").arg(dataset);
+    }
+    return result;
 }
 
 TerrainTileLookupResult TerrainData::terrainTile(const QString &dataset,

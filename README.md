@@ -168,7 +168,7 @@ or:
 Authorization: Bearer endpoint-specific-key
 ```
 
-Use the normal key for `/status`, raster tiles and terrain tiles. Use the delete key only for the cache DELETE endpoint.
+Use the normal key for `/status`, raster tiles and terrain tiles. Use the delete key only for the cache DELETE endpoints (raster tiles, terrain tiles and terrain source data) and the upstream-download cancel endpoints.
 
 ## User mode and systemd mode
 
@@ -240,6 +240,14 @@ GET /terrain/v1/<dataset>/<z>/<x>/<y>.aowterrain
 
 It returns the canonical cached tile bytes as `application/vnd.aowis.terrain` only after format, CRC and cache-path metadata validation. Terrain is a persistent read-through cache: normalized `.aowterrain` is checked first, then provider-native cached DEM data, then the Internet only on a true miss when remote fetching is enabled. Matching concurrent fills are deduplicated per normalized tile and per provider-native source COG instead of globally serializing unrelated terrain requests. Corrupt normalized tiles are automatically regenerated when source data are available and are never served as valid renderer data. With remote fetching disabled, missing tiles return `404`; cached provider-native data can still be normalized while fully offline. Upstream network failures return `502`.
 
+Renderers learn which terrain to request from the dataset catalog:
+
+```text
+GET /terrain/v1/datasets
+```
+
+It returns `application/json` with `default_dataset` (the configured `terrain/default_dataset`) and one entry per served dataset: `dataset`, `provider`, `nominal_resolution_m`, `vertical_datum`, `surface_model` (`dsm`, `dtm` or `unknown`), the generated zoom range `minimum_zoom`/`maximum_zoom` and `tile_grid_size`. `maximum_zoom` is the provider's native detail; renderers never request finer terrain tiles and subdivide the `maximum_zoom` tile instead, so the drawn surface never claims more detail than the source has. The route uses the read API key and returns `503` while terrain is disabled or not initialized.
+
 The point-elevation endpoint used by GUI inspectors is:
 
 ```text
@@ -247,5 +255,14 @@ GET /terrain/v1/elevation?latitude=<degrees>&longitude=<degrees>[&vertical_datum
 ```
 
 The server selects the dataset via `terrain/default_dataset`, so desktop/WASM clients do not know or bypass the terrain provider. Point sampling uses the same normalized tile retrieval/read-through path as the renderer. Consequently an inspector lookup first uses normalized cache data, can normalize from provider-native cached COGs while offline, and only reaches the Internet on a true miss when remote fetching is enabled. The response includes elevation, dataset, nominal source resolution, vertical datum, vertical-reference kind, authority code when globally defined, source datum, origin and the normalized tile address actually sampled. An omitted/`native` `vertical_datum` returns the source datum. Cross-datum requests are currently rejected explicitly because no geoid transformation model is bundled; AOWIS never applies an implicit constant offset. Both terrain GET routes run provider work outside the main HTTP event loop and use the existing read API key.
+
+Cached terrain is deleted per zoom level and XYZ tile range, with the raster cache DELETE's range semantics (rows are clamped to the zoom level, columns wrap around the antimeridian, a range at least as wide as the zoom level covers every column):
+
+```text
+DELETE /terrain/v1/cache/<dataset>/<z>/<x_min>/<x_max>/<y_min>/<y_max>
+DELETE /terrain/v1/source/<dataset>/<z>/<x_min>/<x_max>/<y_min>/<y_max>
+```
+
+`cache` removes the normalized `.aowterrain` tiles of the range; they are regenerated on the next request, from cached provider-native data when it is still there. `source` removes the provider-native source data (for Copernicus GLO-30 the 1°×1° GeoTIFF cells under `terrain/providers/copernicus/glo30/`) covering the range's geographic area and forgets any "source unavailable" state there, so regenerated tiles come from freshly downloaded source data. A source file that is being downloaded at that moment is kept (it is new data). Source cells can be shared with normalized tiles outside the range; those download the cell again when they are next regenerated. Both answer `200` with the number of deleted files, `400` for an invalid dataset or range, `503` while terrain is disabled or not initialized and `500` when a file could not be deleted. They use the delete API key; the GUI's Map Editor offers them in its *Terrain Cache* section. With `remote_fetch_enabled=false`, deleting source data makes the area unavailable until the data is restored.
 
 See [`docs/terrain-tile-format.md`](docs/terrain-tile-format.md), [`docs/terrain-elevation-contract.md`](docs/terrain-elevation-contract.md), and [`docs/terrain-providers.md`](docs/terrain-providers.md).

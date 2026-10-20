@@ -10,6 +10,7 @@
 #include <QByteArray>
 #include <QMutex>
 #include <QString>
+#include <QVector>
 
 #include <memory>
 #include <optional>
@@ -72,6 +73,26 @@ struct TerrainElevationLookupResult
 
 QString terrainElevationLookupStatusId(TerrainElevationLookupStatus status);
 
+enum class TerrainCacheDeletionStatus
+{
+    Deleted,
+    Disabled,
+    NotInitialized,
+    InvalidDataset,
+    InvalidRange,
+    // At least one file could not be deleted (the others are gone).
+    Failed
+};
+
+struct TerrainCacheDeletionResult
+{
+    TerrainCacheDeletionStatus status = TerrainCacheDeletionStatus::Deleted;
+    int deleted_count = 0;
+    QString error_message;
+};
+
+QString terrainCacheDeletionStatusId(TerrainCacheDeletionStatus status);
+
 class TerrainProvider;
 
 class TerrainData : public QObject
@@ -114,10 +135,39 @@ public:
         double longitude_deg,
         std::optional<TerrainVerticalDatum> requested_vertical_datum = std::nullopt) const;
 
+    // Every dataset of every registered provider, in provider order. Static
+    // provider knowledge: available before initialize() and while the
+    // subsystem is disabled (callers decide whether to expose it).
+    QVector<TerrainDatasetInfo> datasets() const;
+
     TerrainUpstreamActivity upstreamActivity() const;
     void cancelUpstreamDownloads();
 
+    // Cache deletion for one XYZ tile range of one zoom level (the map-tile
+    // cache's DELETE semantics: y is clamped to the zoom's rows, x wraps
+    // around the antimeridian, a range at least as wide as the zoom covers
+    // every column).
+    //
+    // deleteNormalizedTiles(): the normalized .aowterrain tiles of the range.
+    // They are regenerated on the next request, from the provider-native
+    // source data when it is still cached.
+    TerrainCacheDeletionResult deleteNormalizedTiles(const QString &dataset, int zoom,
+                                                     int tile_x_min, int tile_x_max,
+                                                     int tile_y_min, int tile_y_max) const;
+    // deleteSourceData(): the provider-native source data (e.g. Copernicus
+    // GeoTIFF cells) covering the range's geographic area, so regenerated
+    // tiles are built from freshly downloaded source data. Source files can
+    // be shared with normalized tiles outside the range; those simply
+    // download it again when they are next regenerated.
+    TerrainCacheDeletionResult deleteSourceData(const QString &dataset, int zoom,
+                                                int tile_x_min, int tile_x_max,
+                                                int tile_y_min, int tile_y_max);
+
 private:
+    // Shared validation of the deletion entry points; nullopt when valid.
+    std::optional<TerrainCacheDeletionResult> rejectCacheDeletion(
+        const QString &dataset, int zoom, int tile_x_min, int tile_x_max,
+        int tile_y_min, int tile_y_max) const;
     static QString resolveCacheDirectory(const Config &config);
     bool ensureStorageDirectory(const QString &path, const QString &description,
                                 QString *error_message) const;

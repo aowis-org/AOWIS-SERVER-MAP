@@ -25,6 +25,7 @@ add_library(aowis-server-map-core STATIC
     src/lib/terrain_elevation.cpp
     src/lib/terrain_tile.cpp
     src/lib/terrain_provider.cpp
+    src/lib/terrain_dataset.cpp
     src/lib/copernicus_terrain_provider.cpp
     src/lib/copernicus_terrain_provider.h
     src/lib/terrain_data.cpp
@@ -32,6 +33,7 @@ add_library(aowis-server-map-core STATIC
     include/aowis/map/terrain_elevation.h
     include/aowis/map/terrain_tile.h
     include/aowis/map/terrain_provider.h
+    include/aowis/map/terrain_dataset.h
     include/aowis/map/terrain_data.h
 )
 
@@ -145,6 +147,38 @@ if(BUILD_TESTING)
     add_test(
         NAME aowis-server-map-terrain-vertical-datum
         COMMAND aowis-server-map-terrain-vertical-datum-test
+    )
+
+    add_executable(aowis-server-map-terrain-dataset-catalog-test
+        tests/test_terrain_dataset_catalog.cpp
+    )
+    target_link_libraries(aowis-server-map-terrain-dataset-catalog-test
+        PRIVATE
+            AOWIS::Map
+    )
+    target_compile_features(aowis-server-map-terrain-dataset-catalog-test
+        PRIVATE
+            cxx_std_20
+    )
+    add_test(
+        NAME aowis-server-map-terrain-dataset-catalog
+        COMMAND aowis-server-map-terrain-dataset-catalog-test
+    )
+
+    add_executable(aowis-server-map-terrain-cache-deletion-test
+        tests/test_terrain_cache_deletion.cpp
+    )
+    target_link_libraries(aowis-server-map-terrain-cache-deletion-test
+        PRIVATE
+            AOWIS::Map
+    )
+    target_compile_features(aowis-server-map-terrain-cache-deletion-test
+        PRIVATE
+            cxx_std_20
+    )
+    add_test(
+        NAME aowis-server-map-terrain-cache-deletion
+        COMMAND aowis-server-map-terrain-cache-deletion-test
     )
 endif()
 

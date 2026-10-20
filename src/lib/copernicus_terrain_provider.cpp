@@ -808,6 +808,22 @@ QString CopernicusTerrainProvider::providerId() const
     return QStringLiteral("copernicus");
 }
 
+QVector<TerrainDatasetInfo> CopernicusTerrainProvider::datasets() const
+{
+    TerrainDatasetInfo info;
+    info.dataset = CopernicusDataset;
+    info.provider = providerId();
+    info.nominal_resolution_m = CopernicusNominalResolutionM;
+    info.vertical_datum = TerrainVerticalDatum::Egm2008;
+    // Copernicus DEM is a surface model: vegetation and buildings included.
+    info.surface_model = TerrainSurfaceModel::Dsm;
+    info.minimum_zoom = CopernicusMinimumNormalizedZoom;
+    // Zoom 14 spaces the 65x65 grid at about the 30 m source scale
+    // (docs/terrain-providers.md), so it is the native detail.
+    info.maximum_zoom = CopernicusMaximumNormalizedZoom;
+    return QVector<TerrainDatasetInfo>{info};
+}
+
 bool CopernicusTerrainProvider::supportsDataset(const QString &dataset) const
 {
     return dataset == CopernicusDataset;
@@ -944,6 +960,94 @@ void CopernicusTerrainProvider::cancelUpstreamDownloads()
                 reply->abort();
         }, Qt::QueuedConnection);
     }
+}
+
+TerrainSourceDeletionResult CopernicusTerrainProvider::deleteSourceData(
+    const QString &dataset, const TerrainGeographicBox &box,
+    const QString &provider_cache_directory)
+{
+    TerrainSourceDeletionResult result;
+    if (!supportsDataset(dataset))
+    {
+        result.ok = false;
+        result.error_message = QStringLiteral("Copernicus provider does not support dataset: %1")
+                                   .arg(dataset);
+        return result;
+    }
+    if (!std::isfinite(box.west_deg) || !std::isfinite(box.east_deg) ||
+        !std::isfinite(box.south_deg) || !std::isfinite(box.north_deg) ||
+        box.east_deg <= box.west_deg || box.north_deg <= box.south_deg ||
+        provider_cache_directory.trimmed().isEmpty())
+    {
+        result.ok = false;
+        result.error_message = QStringLiteral("Invalid Copernicus source deletion area");
+        return result;
+    }
+
+    // The 1 x 1 degree source cells with a part of positive area inside the
+    // box. A box edge exactly on a cell border does not take the neighbour
+    // cell: floor() of the south/west edge, ceil() - 1 of the north/east one.
+    const int south_first = std::clamp(int(std::floor(box.south_deg)), -90, 89);
+    const int south_last = std::clamp(int(std::ceil(box.north_deg)) - 1, -90, 89);
+    int west_first = int(std::floor(box.west_deg));
+    int west_last = int(std::ceil(box.east_deg)) - 1;
+    if (west_last - west_first + 1 >= 360)
+    {
+        west_first = -180;
+        west_last = 179;
+    }
+
+    for (int south_deg = south_first; south_deg <= south_last; ++south_deg)
+    {
+        for (int unwrapped_west_deg = west_first; unwrapped_west_deg <= west_last; ++unwrapped_west_deg)
+        {
+            // Unwrapped longitudes (antimeridian boxes) back into -180..179.
+            int west_deg = (unwrapped_west_deg + 180) % 360;
+            if (west_deg < 0)
+                west_deg += 360;
+            west_deg -= 180;
+
+            CopernicusSourceAddress address;
+            address.south_deg = south_deg;
+            address.west_deg = west_deg;
+
+            // A confirmed-unavailable cell (ocean, no public tile) is asked
+            // for again after the deletion instead of after its hour.
+            {
+                QMutexLocker unavailable_locker(&this->unavailable_source_mutex);
+                this->unavailable_source_until.remove(sourceAddressKey(address));
+            }
+
+            const QString path = sourceTileCachePath(provider_cache_directory, address);
+            if (!QFileInfo::exists(path))
+                continue;
+
+            // downloadSourceTile() holds this lock while it checks for and
+            // fills the file. Held longer than a moment means a download is
+            // running: that file is new data, keep it.
+            QLockFile source_lock(path + QStringLiteral(".lock"));
+            source_lock.setStaleLockTime(ProviderSourceStaleLockMs);
+            if (!source_lock.tryLock(1000))
+                continue;
+
+            if (QFile::remove(path))
+            {
+                ++result.deleted_count;
+                continue;
+            }
+
+            // Windows: a raster another request is normalizing from right now
+            // is open and cannot be removed. Report it, carry on with the rest.
+            result.ok = false;
+            if (result.error_message.isEmpty())
+            {
+                result.error_message =
+                    QStringLiteral("Failed to delete Copernicus provider cache file: %1").arg(path);
+            }
+        }
+    }
+
+    return result;
 }
 
 } // namespace Aowis::Map

@@ -16,6 +16,7 @@ class CopernicusTerrainProvider final : public TerrainProvider
 {
 public:
     QString providerId() const override;
+    QVector<TerrainDatasetInfo> datasets() const override;
     bool supportsDataset(const QString &dataset) const override;
     bool supportsAddress(const QString &dataset,
                          const TerrainTileAddress &address) const override;
@@ -25,6 +26,9 @@ public:
                                          bool allow_remote_fetch) override;
     TerrainUpstreamActivity upstreamActivity() const override;
     void cancelUpstreamDownloads() override;
+    TerrainSourceDeletionResult deleteSourceData(const QString &dataset,
+                                                 const TerrainGeographicBox &box,
+                                                 const QString &provider_cache_directory) override;
 
 private:
     QHash<QString, QDateTime> unavailable_source_until;

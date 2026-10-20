@@ -61,6 +61,13 @@ not silently substitute GLO-90, because doing so while retaining the `copernicus
 would make source/resolution metadata dishonest. A later provider-selection layer may explicitly
 request `copernicus-glo90` as a separate dataset.
 
+### Dataset catalog
+
+`CopernicusTerrainProvider::datasets()` describes the dataset for `GET /terrain/v1/datasets`:
+nominal resolution 30 m, vertical datum `egm2008`, surface model `dsm`, normalized zooms 8 through
+14. Every provider describes its datasets this way, so a renderer derives its maximum terrain zoom
+from the catalog and a provider with another resolution needs no renderer change.
+
 ### Normalized zoom range
 
 Remote GLO-30 generation currently supports normalized XYZ zooms 8 through 14.
