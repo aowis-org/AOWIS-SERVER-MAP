@@ -1,6 +1,8 @@
 #include "http_client_tilefetch.h"
 
 #include <QMetaObject>
+#include <QDateTime>
+#include <QRegularExpression>
 #include <QPointer>
 #include <QThread>
 #include <QTimer>
@@ -46,16 +48,19 @@ TileHttpClient::TileHttpClient(QNetworkAccessManager *network_manager, const QSt
     Q_ASSERT(this->network_manager != nullptr);
 }
 
-void TileHttpClient::get(const QString &endpoint)
+void TileHttpClient::get(const QString &endpoint, const QByteArray &etag,
+                         const QByteArray &last_modified)
 {
     this->cancel_requested = false;
 #ifdef Q_OS_WIN
-    getAttempt(endpoint, 0);
+    getAttempt(endpoint, 0, etag, last_modified);
 #else
     QNetworkRequest request(this->url_base + endpoint);
     request.setRawHeader("User-Agent", "aowis-server-map/1.0 (https://github.com/aowis-org/AOWIS-SERVER-MAP)");
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/octet-stream");
     request.setRawHeader("Accept", "*/*");
+    if (!etag.isEmpty()) request.setRawHeader("If-None-Match", etag);
+    if (!last_modified.isEmpty()) request.setRawHeader("If-Modified-Since", last_modified);
 
     QNetworkReply *reply = this->network_manager->get(request);
     this->active_reply = reply;
@@ -76,7 +81,8 @@ void TileHttpClient::get(const QString &endpoint)
 }
 
 #ifdef Q_OS_WIN
-void TileHttpClient::getAttempt(const QString &endpoint, int attempt)
+void TileHttpClient::getAttempt(const QString &endpoint, int attempt,
+                                const QByteArray &etag, const QByteArray &last_modified)
 {
     if (this->cancel_requested)
     {
@@ -88,6 +94,8 @@ void TileHttpClient::getAttempt(const QString &endpoint, int attempt)
     request.setRawHeader("User-Agent", "aowis-server-map/1.0 (https://github.com/aowis-org/AOWIS-SERVER-MAP)");
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/octet-stream");
     request.setRawHeader("Accept", "*/*");
+    if (!etag.isEmpty()) request.setRawHeader("If-None-Match", etag);
+    if (!last_modified.isEmpty()) request.setRawHeader("If-Modified-Since", last_modified);
     request.setTransferTimeout(transfer_timeout_ms);
     request.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
 
@@ -103,9 +111,9 @@ void TileHttpClient::getAttempt(const QString &endpoint, int attempt)
     });
 
     connect(reply, &QNetworkReply::finished, this,
-            [this, reply, endpoint, attempt]()
+            [this, reply, endpoint, attempt, etag, last_modified]()
     {
-        handleReply(reply, true, endpoint, attempt);
+        handleReply(reply, true, endpoint, attempt, etag, last_modified);
     });
 }
 #endif
@@ -146,7 +154,8 @@ void TileHttpClient::cancel()
 
 #ifdef Q_OS_WIN
 void TileHttpClient::handleReply(QNetworkReply *reply, bool validate_tile_response,
-                                 const QString &endpoint, int attempt)
+                                 const QString &endpoint, int attempt,
+                                 const QByteArray &etag, const QByteArray &last_modified)
 {
     if (this->active_reply == reply)
         this->active_reply = nullptr;
@@ -165,12 +174,12 @@ void TileHttpClient::handleReply(QNetworkReply *reply, bool validate_tile_respon
         network_error == QNetworkReply::TimeoutError ||
         network_error == QNetworkReply::OperationCanceledError)
     {
-        if (validate_tile_response && attempt < timeout_retry_count && !endpoint.isEmpty())
+        if (validate_tile_response && attempt < timeout_retry_count)
         {
             reply->deleteLater();
-            QTimer::singleShot(timeout_retry_delay_ms, this, [this, endpoint, attempt]()
+            QTimer::singleShot(timeout_retry_delay_ms, this, [this, endpoint, attempt, etag, last_modified]()
             {
-                getAttempt(endpoint, attempt + 1);
+                getAttempt(endpoint, attempt + 1, etag, last_modified);
             });
             return;
         }
@@ -241,6 +250,37 @@ void TileHttpClient::handleReply(QNetworkReply *reply, bool validate_tile_respon
     }
 
     const int status_code = status_attribute.toInt();
+    const QByteArray response_etag = reply->rawHeader("ETag");
+    const QByteArray response_last_modified = reply->rawHeader("Last-Modified");
+    const QByteArray cache_control = reply->rawHeader("Cache-Control").toLower();
+    const bool must_revalidate = cache_control.contains("no-cache") ||
+                                 cache_control.contains("must-revalidate");
+    const bool may_store = !cache_control.contains("no-store") &&
+                           !cache_control.contains("private");
+    qint64 freshness_seconds = 7 * 24 * 60 * 60; // Safe fallback for missing headers.
+    const QRegularExpression max_age(QStringLiteral("(?:^|,)\\s*max-age\\s*=\\s*(\\d+)"));
+    const QRegularExpressionMatch age_match = max_age.match(QString::fromLatin1(cache_control));
+    if (age_match.hasMatch())
+        freshness_seconds = age_match.captured(1).toLongLong();
+    else if (!reply->rawHeader("Expires").isEmpty())
+    {
+        const QDateTime expiry = QDateTime::fromString(
+            QString::fromLatin1(reply->rawHeader("Expires")), Qt::RFC2822Date);
+        if (expiry.isValid()) freshness_seconds = qMax<qint64>(0,
+            QDateTime::currentDateTimeUtc().secsTo(expiry.toUTC()));
+    }
+    if (cache_control.contains("no-cache") || (cache_control.contains("must-revalidate") &&
+        !age_match.hasMatch())) freshness_seconds = 0;
+    // Keep a bounded value; servers can still opt out of storing entirely.
+    freshness_seconds = qBound<qint64>(0, freshness_seconds, 365LL * 24 * 60 * 60);
+    const qint64 fresh_until = QDateTime::currentSecsSinceEpoch() + freshness_seconds;
+    if (status_code == 304 && validate_tile_response)
+    {
+        emit requestNotModified(response_etag, response_last_modified,
+                                fresh_until, must_revalidate);
+        reply->deleteLater();
+        return;
+    }
     if (status_code < 200 || status_code >= 300)
     {
         emit requestError(RequestFailureReason::UpstreamError,
@@ -288,6 +328,7 @@ void TileHttpClient::handleReply(QNetworkReply *reply, bool validate_tile_respon
         }
     }
 
-    emit requestFinished(data);
+    emit requestFinished(data, response_etag, response_last_modified,
+                         fresh_until, may_store, must_revalidate);
     reply->deleteLater();
 }

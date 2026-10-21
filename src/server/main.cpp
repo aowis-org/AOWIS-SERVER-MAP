@@ -5,6 +5,7 @@
 #include <QDebug>
 #include <QFileInfo>
 #include <QHostAddress>
+#include <QTextStream>
 
 #include <cstdlib>
 
@@ -48,6 +49,12 @@ int main(int argc, char *argv[])
         QStringLiteral("write-default-config"),
         QStringLiteral("Write a configuration containing the built-in defaults and exit."),
         QStringLiteral("path"));
+    const QCommandLineOption print_default_config_option(
+        QStringLiteral("print-default-config"),
+        QStringLiteral("Print the complete default INI to standard output without writing files."));
+    const QCommandLineOption check_config_option(
+        QStringLiteral("check-config"),
+        QStringLiteral("Validate the effective configuration (the default file if --config is absent) and exit."));
     const QCommandLineOption overwrite_option(
         QStringLiteral("overwrite"),
         QStringLiteral("Allow --write-default-config to replace an existing file."));
@@ -89,6 +96,8 @@ int main(int argc, char *argv[])
     parser.addOption(config_option);
     parser.addOption(write_default_config_option);
     parser.addOption(overwrite_option);
+    parser.addOption(print_default_config_option);
+    parser.addOption(check_config_option);
     parser.addOption(listen_address_option);
     parser.addOption(port_option);
     parser.addOption(maximum_pending_requests_option);
@@ -100,6 +109,17 @@ int main(int argc, char *argv[])
     parser.addOption(require_delete_api_key_option);
     parser.process(app);
 
+    if (int(parser.isSet(write_default_config_option)) + int(parser.isSet(print_default_config_option)) +
+        int(parser.isSet(check_config_option)) > 1)
+    {
+        qCritical() << "Configuration generation, printing and checking are mutually exclusive";
+        return EXIT_FAILURE;
+    }
+    if (parser.isSet(print_default_config_option))
+    {
+        QTextStream(stdout) << MapServerConfiguration::defaultConfigText();
+        return EXIT_SUCCESS;
+    }
     if (parser.isSet(overwrite_option) && !parser.isSet(write_default_config_option))
     {
         qCritical() << "--overwrite is only valid together with --write-default-config";
@@ -237,6 +257,33 @@ int main(int argc, char *argv[])
 
     config.require_api_key = parser.isSet(require_api_key_option);
     config.require_delete_api_key = parser.isSet(require_delete_api_key_option);
+
+    if (parser.isSet(check_config_option))
+    {
+        QTextStream output(stdout);
+        output << "Configuration valid: " << (QFileInfo::exists(config_path) ?
+            QFileInfo(config_path).absoluteFilePath() : QStringLiteral("built-in defaults")) << '\n';
+        output << "Listen: " << config.listen_address.toString() << ':' << config.port << '\n';
+        output << "2D upstream downloads: " << (config.map_remote_fetch_enabled ? "enabled" : "disabled")
+               << ", coverage: " << (config.map_coverage.isEmpty() ? "world" : config.map_coverage) << '\n';
+        output << "Terrain: " << (config.terrain_enabled ? "enabled" : "disabled")
+               << ", upstream downloads: " << (config.terrain_remote_fetch_enabled ? "enabled" : "disabled")
+               << ", coverage: " << (config.terrain_coverage.isEmpty() ? "world" : config.terrain_coverage) << '\n';
+        output << "Map cache: " << config.cache_directory << '\n';
+        output << "Terrain cache: " << (config.terrain_cache_directory.isEmpty() ?
+            QStringLiteral("<map cache>/terrain") : config.terrain_cache_directory) << '\n';
+        output << "Permanent data: " << (config.permanent_data_directory.isEmpty() ?
+            QStringLiteral("<terrain cache>/offline-packages") : config.permanent_data_directory) << '\n';
+        output << "Map providers:\n";
+        for (const Aowis::Map::MapProvider &provider : config.map_providers)
+            output << "  " << provider.id << " (" << (provider.enabled ? "enabled" : "disabled")
+                   << ", upstream: " << (provider.remote_fetch_enabled ? "enabled" : "disabled")
+                   << ", coverage: " << (provider.coverage.isEmpty() ? "inherit" : provider.coverage)
+                   << ")\n";
+        output << "Copernicus terrain provider: " << (config.copernicus_enabled ? "enabled" : "disabled") << '\n';
+        output << "Coverage profiles: " << config.download_coverage.profileNames().join(", ") << '\n';
+        return EXIT_SUCCESS;
+    }
 
     Server server(config);
     if (!server.start())

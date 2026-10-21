@@ -103,3 +103,33 @@ Authorization: Bearer the-endpoint-specific-key
 ## Configuration upgrades
 
 Re-running `install.sh` never replaces `/etc/aowis-server-map/map-server.ini`. When new configuration keys are introduced, compare the installed file with `configs/systemd/map-server.ini` and add the desired keys manually.
+
+## Configuring providers and download coverage
+
+The running service never rewrites `/etc/aowis-server-map/map-server.ini`.
+Regenerate a **reference example** on standard output rather than replacing
+an installed configuration (which may contain access credentials):
+
+```bash
+aowis-server-map --print-default-config
+```
+
+Check the installed service configuration without opening a listening port:
+
+```bash
+aowis-server-map --check-config --config /etc/aowis-server-map/map-server.ini
+```
+
+The configuration provides independent switches for 2D raster downloads
+(`downloads/remote_fetch_enabled`) and terrain downloads
+(`terrain/remote_fetch_enabled`). Both default to `true`, and either can be
+disabled without preventing the other subsystem from fetching its own data.
+Cached/local data remains available when its upstream download switch is off.
+
+For multiple offices or projects, define named `[region.<id>]` rectangles and
+one `[coverage.<id>]` with `zoom_0=world` and progressively smaller regions at
+higher zooms. A comma-separated list at one zoom tier permits multiple
+geographically separate regions. Each provider can optionally override its
+subsystem's `coverage=` profile. See the main [`README.md`](../../README.md)
+for full examples, map/terrain provider definitions, caching semantics, and
+preparing country-boundary GeoJSON for air-gapped servers.

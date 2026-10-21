@@ -274,8 +274,11 @@ TerrainData::TerrainData(const Config &config, QObject *parent)
     this->storage_paths.root = resolveCacheDirectory(config);
     this->storage_paths.normalized = QDir(this->storage_paths.root).filePath(QStringLiteral("normalized"));
     this->storage_paths.providers = QDir(this->storage_paths.root).filePath(QStringLiteral("providers"));
-    this->storage_paths.offline_packages = QDir(this->storage_paths.root).filePath(QStringLiteral("offline-packages"));
-    this->providers.push_back(std::make_unique<CopernicusTerrainProvider>());
+    this->storage_paths.offline_packages = config.permanent_data_directory.isEmpty()
+        ? QDir(this->storage_paths.root).filePath(QStringLiteral("offline-packages"))
+        : QDir(config.permanent_data_directory).filePath(QStringLiteral("terrain"));
+    if (config.copernicus_enabled)
+        this->providers.push_back(std::make_unique<CopernicusTerrainProvider>());
 }
 
 TerrainData::~TerrainData() = default;
@@ -734,7 +737,10 @@ TerrainTileLookupResult TerrainData::fetchAndStoreNormalizedTile(
         address_supported = true;
         const TerrainProviderFetchResult provider_result =
             provider->fetchTile(dataset, address, this->storage_paths.providers,
-                                this->config.remote_fetch_enabled);
+                                this->config.remote_fetch_enabled &&
+                                this->config.download_coverage.permitsTile(
+                                    this->config.coverage_profile, address.zoom,
+                                    address.x, address.y));
         if (provider_result.status == TerrainProviderFetchStatus::SourceUnavailable ||
             provider_result.status == TerrainProviderFetchStatus::UnsupportedAddress)
         {

@@ -7,6 +7,7 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QJsonDocument>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QMutexLocker>
 #include <QUrlQuery>
@@ -240,11 +241,19 @@ Server::Server(const Config &config, QObject *parent)
               config.terrain_enabled,
               config.terrain_remote_fetch_enabled,
               config.cache_directory,
-              config.terrain_cache_directory
+              config.terrain_cache_directory,
+              config.permanent_data_directory,
+              config.copernicus_enabled,
+              config.terrain_coverage,
+              config.download_coverage
           },
           this)),
       pending_request_count(0)
 {
+    this->maptiles->setRemoteFetchEnabled(config.map_remote_fetch_enabled);
+    this->maptiles->setPermanentDataDirectory(config.permanent_data_directory);
+    this->maptiles->configureProviders(config.map_providers, config.download_coverage,
+                                       config.map_coverage);
     connect(this->maptiles, &MapTiles::tileReady, this, &Server::onTileReady);
     connect(this->maptiles, &MapTiles::tileFailed, this, &Server::onTileFailed);
     setupRoutes();
@@ -508,6 +517,32 @@ void Server::setupRoutes()
     {
         return makeOptionsResponse();
     });
+
+    // Discoverable catalog of map layers. Only server-configured providers
+    // are exposed; URLs and credentials stay on the server.
+    this->http.route("/map/v1/providers", QHttpServerRequest::Method::Get,
+                     [this](const QHttpServerRequest &request)
+    {
+        if (!isReadAuthorized(request)) return makeUnauthorizedResponse();
+        QJsonArray providers;
+        for (const Aowis::Map::MapProvider &provider : this->config.map_providers)
+        {
+            if (!provider.enabled) continue;
+            QJsonObject entry;
+            entry.insert(QStringLiteral("id"), provider.id);
+            entry.insert(QStringLiteral("name"), provider.name);
+            entry.insert(QStringLiteral("minimum_zoom"), provider.minimum_zoom);
+            entry.insert(QStringLiteral("maximum_zoom"), provider.maximum_zoom);
+            providers.append(entry);
+        }
+        QJsonObject root;
+        root.insert(QStringLiteral("providers"), providers);
+        return QHttpServerResponse(QByteArrayLiteral("application/json"),
+            QJsonDocument(root).toJson(QJsonDocument::Compact),
+            QHttpServerResponse::StatusCode::Ok);
+    });
+    this->http.route("/map/v1/providers", QHttpServerRequest::Method::Options,
+                     []() {return makeOptionsResponse();});
 
     // Static description of the served terrain datasets (native resolution,
     // generated zoom range, datum) and which one the elevation route and

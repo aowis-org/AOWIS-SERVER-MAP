@@ -130,3 +130,20 @@ Copernicus GLO-30 Public is distributed for public use under the Copernicus DEM 
 package manifests must eventually retain dataset provenance and required attribution. The normalized
 binary tile itself intentionally does not embed licensing text; attribution belongs to package/server
 metadata, not each 8 KiB heightfield payload.
+
+### Administrative configuration and geographic download policies
+
+The server has separate `downloads/remote_fetch_enabled` (2D maps) and
+`terrain/remote_fetch_enabled` (terrain) switches. The Copernicus implementation
+is selected with `[terrain_provider.copernicus]` (`enabled=true/false`, optional
+`coverage=`). When the terrain subsystem's upstream switch is off, the provider
+cannot override it. When a normalized terrain tile is not in the cache, the
+terrain provider may still normalize existing locally cached native source data.
+Only acquisition of missing Internet source data is blocked. The server does
+not hide cached data based on the requested geographic region.
+
+Named regions and zoom-dependent profiles are documented in the root README.
+A profile's geographic tile intersection is evaluated before the provider is
+allowed to acquire missing source data. Note that one Copernicus COG covers a
+whole degree cell, which may extend beyond the smaller allowed XYZ tile footprint;
+the policy governs the requested normalized tile, not clipping of the upstream COG.

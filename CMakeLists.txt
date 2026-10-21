@@ -20,6 +20,10 @@ find_package(TIFF REQUIRED)
 
 add_library(aowis-server-map-core STATIC
     src/lib/maptiles.cpp
+    src/lib/download_coverage.cpp
+    src/lib/map_provider.cpp
+    include/aowis/map/map_provider.h
+    include/aowis/map/download_coverage.h
     src/lib/http_client_tilefetch.cpp
     src/lib/http_client_tilefetch.h
     src/lib/terrain_elevation.cpp
@@ -68,6 +72,12 @@ target_link_libraries(aowis-server-map
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(aowis-server-map-download-coverage-test
+        tests/test_download_coverage.cpp
+    )
+    target_link_libraries(aowis-server-map-download-coverage-test PRIVATE AOWIS::Map)
+    add_test(NAME aowis-server-map-download-coverage
+             COMMAND aowis-server-map-download-coverage-test)
     add_executable(aowis-server-map-terrain-tile-format-test
         tests/test_terrain_tile_format.cpp
     )

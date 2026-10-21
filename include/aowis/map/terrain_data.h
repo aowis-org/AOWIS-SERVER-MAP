@@ -3,6 +3,7 @@
 
 #include <aowis/map/terrain_tile.h>
 #include <aowis/map/terrain_provider.h>
+#include <aowis/map/download_coverage.h>
 
 #include <QObject>
 
@@ -104,6 +105,10 @@ public:
         bool remote_fetch_enabled = true;
         QString cache_base_directory;
         QString cache_directory;
+        QString permanent_data_directory;
+        bool copernicus_enabled = true;
+        QString coverage_profile;
+        DownloadCoverage download_coverage;
     };
 
     struct StoragePaths

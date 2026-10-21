@@ -3,6 +3,9 @@
 #include "http_client_tilefetch.h"
 
 #include <QDebug>
+#include <QDateTime>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -12,11 +15,62 @@
 #include <QSaveFile>
 #include <QStandardPaths>
 #include <QStringList>
+#include <QUrl>
 
 namespace
 {
 constexpr int TileMemoryCacheMaximumCostKiB = 256 * 1024;
 constexpr int MaximumActiveDownloadsPerOrigin = 6;
+
+QString downloadOrigin(const QString &url)
+{
+    const QUrl parsed(url);
+    return QStringLiteral("%1://%2:%3")
+        .arg(parsed.scheme(), parsed.host(), QString::number(parsed.port(-1)));
+}
+
+struct TileMetadata
+{
+    QByteArray etag;
+    QByteArray last_modified;
+    qint64 fresh_until = 0;
+    bool must_revalidate = false;
+};
+
+TileMetadata readMetadata(const QString &tile_path)
+{
+    TileMetadata result;
+    QFile meta_file(tile_path + QStringLiteral(".http.json"));
+    if (meta_file.open(QIODevice::ReadOnly))
+    {
+        const QJsonObject object = QJsonDocument::fromJson(meta_file.readAll()).object();
+        result.etag = object.value(QStringLiteral("etag")).toString().toLatin1();
+        result.last_modified = object.value(QStringLiteral("last_modified")).toString().toLatin1();
+        result.fresh_until = object.value(QStringLiteral("fresh_until")).toVariant().toLongLong();
+        result.must_revalidate = object.value(QStringLiteral("must_revalidate")).toBool();
+    }
+    else
+    {
+        // Pre-metadata caches are valid and should not immediately hammer upstream.
+        result.fresh_until = QFileInfo(tile_path).lastModified().toSecsSinceEpoch() +
+                             7 * 24 * 60 * 60;
+    }
+    return result;
+}
+
+void saveMetadata(const QString &tile_path, const TileMetadata &meta)
+{
+    QJsonObject object;
+    object.insert(QStringLiteral("etag"), QString::fromLatin1(meta.etag));
+    object.insert(QStringLiteral("last_modified"), QString::fromLatin1(meta.last_modified));
+    object.insert(QStringLiteral("fresh_until"), qint64(meta.fresh_until));
+    object.insert(QStringLiteral("must_revalidate"), meta.must_revalidate);
+    QSaveFile file(tile_path + QStringLiteral(".http.json"));
+    if (!file.open(QIODevice::WriteOnly)) return;
+    const QByteArray bytes = QJsonDocument(object).toJson(QJsonDocument::Compact);
+    if (file.write(bytes) != bytes.size()) {file.cancelWriting(); return;}
+    if (!file.commit()) qWarning() << "Failed to persist map tile freshness" << tile_path;
+}
 
 int tileMemoryCacheCostKiB(const QByteArray &data)
 {
@@ -86,47 +140,54 @@ MapTiles::MapTiles(const QString &cache_base_directory, int maximum_active_downl
       maximum_active_downloads(qMax(1, maximum_active_downloads)),
       maximum_queued_downloads(qMax(0, maximum_queued_downloads))
 {
+    configureProviders(Aowis::Map::defaultMapProviders(), {}, {});
+}
+
+void MapTiles::setPermanentDataDirectory(const QString &directory)
+{
+    this->permanent_data_directory = directory;
+    this->permanent_cached_keys.clear();
+}
+
+void MapTiles::setRemoteFetchEnabled(bool enabled)
+{
+    this->remote_fetch_enabled = enabled;
+}
+
+void MapTiles::configureProviders(const QVector<Aowis::Map::MapProvider> &providers,
+                                  const Aowis::Map::DownloadCoverage &coverage,
+                                  const QString &default_coverage)
+{
+    this->configured_providers.clear();
+    this->permanent_cached_keys.clear();
+    for (const Aowis::Map::MapProvider &provider : providers)
+        if (provider.enabled) this->configured_providers.insert(provider.id, provider);
+    this->download_coverage = coverage;
+    this->default_coverage = default_coverage;
 }
 
 QString MapTiles::domainRandomizer(const QString &url) const
 {
-    static const QStringList subdomains = { "a", "b", "c" };
-
-    const int index = QRandomGenerator::global()->bounded(subdomains.size());
-    return url.arg(subdomains.at(index));
+    static const QStringList subdomains = {QStringLiteral("a"), QStringLiteral("b"), QStringLiteral("c")};
+    return QString(url).replace(QStringLiteral("{s}"),
+          subdomains.at(QRandomGenerator::global()->bounded(subdomains.size())));
 }
 
 QString MapTiles::providerCachePath(const QString &provider) const
 {
-    if (provider == "openstreetmap" || provider == "osmcyclo" ||
-        provider == "opentopomap" || provider == "arcgis")
-    {
-        return this->fscache_base + "/maptiles/" + provider + "/";
-    }
-
-    return QString();
+    if (!this->configured_providers.contains(provider)) return {};
+    return QDir(this->fscache_base).filePath(QStringLiteral("maptiles/%1").arg(provider));
 }
 
-QString MapTiles::providerUrl(const QString &provider) const
+QString MapTiles::providerUrl(const QString &provider, int zoom, int x, int y) const
 {
-    if (provider == "openstreetmap")
-        return QStringLiteral("https://tile.openstreetmap.org/");
-    if (provider == "osmcyclo")
-        return domainRandomizer(QStringLiteral("https://%1.tile-cyclosm.openstreetmap.fr/cyclosm/"));
-    if (provider == "opentopomap")
-        return QStringLiteral("https://tile.opentopomap.org/");
-    if (provider == "arcgis")
-        return QStringLiteral("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/");
-
-    return QString();
-}
-
-QString MapTiles::providerTilePath(const QString &provider, int zoom, int x, int y) const
-{
-    if (provider == "arcgis")
-        return QString("%1/%2/%3").arg(zoom).arg(y).arg(x);
-
-    return QString("%1/%2/%3.png").arg(zoom).arg(x).arg(y);
+    const auto it = this->configured_providers.constFind(provider);
+    if (it == this->configured_providers.cend()) return {};
+    QString url = domainRandomizer(it->url_template);
+    url.replace(QStringLiteral("{z}"), QString::number(zoom));
+    url.replace(QStringLiteral("{x}"), QString::number(x));
+    url.replace(QStringLiteral("{y}"), QString::number(y));
+    return url;
 }
 
 QString MapTiles::canonicalTileKey(const QString &provider, int zoom, int x, int y) const
@@ -138,8 +199,7 @@ MapTiles::TileRequestResult MapTiles::getTile(const QString &provider, int z, in
                                               const QString &key)
 {
     const QString cache_path = providerCachePath(provider);
-    const QString url = providerUrl(provider);
-    if (cache_path.isEmpty() || url.isEmpty() || z < 0 || z > 30)
+    if (cache_path.isEmpty() || z < 0 || z > 30)
     {
         qWarning() << "Invalid map tile request:" << provider << z << x << y;
         return { TileRequestStatus::InvalidRequest, {} };
@@ -155,12 +215,45 @@ MapTiles::TileRequestResult MapTiles::getTile(const QString &provider, int z, in
 
     const QString file_name = QString("%1/%2/%3.png").arg(z).arg(wrapped_x).arg(y);
     const QString tile_path = QDir(cache_path).filePath(file_name);
-    const QString remote_path = providerTilePath(provider, z, wrapped_x, y);
+    const auto selected_provider = this->configured_providers.value(provider);
+    const QString url = providerUrl(provider, z, wrapped_x, y);
     const QString canonical_key = canonicalTileKey(provider, z, wrapped_x, y);
 
+    if (!this->permanent_data_directory.isEmpty())
+    {
+        if (this->permanent_cached_keys.contains(canonical_key))
+        {
+            const QByteArray *cached = this->tile_memory_cache.object(canonical_key);
+            if (cached != nullptr) return { TileRequestStatus::Ready, *cached };
+        }
+        QFile permanent_tile(QDir(this->permanent_data_directory).filePath(
+            QStringLiteral("maptiles/%1/%2").arg(provider, file_name)));
+        if (permanent_tile.open(QIODevice::ReadOnly))
+        {
+            const QByteArray permanent_bytes = permanent_tile.readAll();
+            if (!permanent_bytes.isEmpty())
+            {
+                this->tile_memory_cache.insert(canonical_key,
+                    new QByteArray(permanent_bytes), tileMemoryCacheCostKiB(permanent_bytes));
+                this->permanent_cached_keys.insert(canonical_key);
+                return {TileRequestStatus::Ready, permanent_bytes};
+            }
+        }
+    }
+
     const QByteArray *memory_tile = this->tile_memory_cache.object(canonical_key);
+    const QString policy = selected_provider.coverage.isEmpty() ? this->default_coverage
+                                                                   : selected_provider.coverage;
+    const bool may_fetch = this->remote_fetch_enabled && selected_provider.remote_fetch_enabled &&
+        z >= selected_provider.minimum_zoom && z <= selected_provider.maximum_zoom &&
+        this->download_coverage.permitsTile(policy, z, wrapped_x, y);
+    const QueuedDownload download = {url, {}, tile_path, canonical_key, key};
     if (memory_tile != nullptr && !memory_tile->isEmpty())
+    {
+        if (may_fetch && refreshCachedTile(download))
+            return {TileRequestStatus::Pending, {}};
         return { TileRequestStatus::Ready, *memory_tile };
+    }
 
     QFile file(tile_path);
     if (file.open(QIODevice::ReadOnly))
@@ -170,11 +263,15 @@ MapTiles::TileRequestResult MapTiles::getTile(const QString &provider, int z, in
         {
             this->tile_memory_cache.insert(
                 canonical_key, new QByteArray(data), tileMemoryCacheCostKiB(data));
+            if (may_fetch && refreshCachedTile(download))
+                return {TileRequestStatus::Pending, {}};
             return { TileRequestStatus::Ready, data };
         }
     }
 
-    const QueuedDownload download = { url, remote_path, tile_path, canonical_key, key };
+    if (!may_fetch)
+        return { TileRequestStatus::InvalidRequest, {} };
+
     if (scheduleMapTileDownload(download) == DownloadScheduleStatus::QueueFull)
         return { TileRequestStatus::ServerBusy, {} };
 
@@ -275,6 +372,11 @@ int MapTiles::deleteTiles(const QString &provider, int zoom, int tile_x_min, int
                 return -2;
             }
 
+            QFile::remove(tile_path + QStringLiteral(".http.json"));
+            const QString removed_key = canonicalTileKey(provider, zoom, tile_x, tile_y);
+            this->next_refresh_attempt.remove(removed_key);
+            this->next_freshness_check.remove(removed_key);
+            this->permanent_cached_keys.remove(removed_key);
             ++deleted_count;
         }
 
@@ -323,6 +425,36 @@ void MapTiles::cancelUpstreamDownloads()
     emit upstreamActivityChanged(activity.active, activity.queued);
 }
 
+bool MapTiles::refreshCachedTile(const QueuedDownload &download)
+{
+    const qint64 now = QDateTime::currentSecsSinceEpoch();
+    const bool too_soon = this->next_refresh_attempt.value(download.canonical_key, 0) > now ||
+                          this->next_freshness_check.value(download.canonical_key, 0) > now;
+    if (too_soon) return false;
+    const TileMetadata metadata = readMetadata(download.tile_path);
+    if (metadata.fresh_until > now)
+    {
+        this->next_freshness_check.insert(download.canonical_key,
+            qMin(now + 30, metadata.fresh_until));
+        return false;
+    }
+    QueuedDownload refresh = download;
+    refresh.etag = metadata.etag;
+    refresh.last_modified = metadata.last_modified;
+    refresh.revalidation = true;
+    if (metadata.must_revalidate)
+    {
+        // A no-cache/must-revalidate response must be revalidated before
+        // delivering stale bytes while upstream access is permitted.
+        return scheduleMapTileDownload(refresh) == DownloadScheduleStatus::Scheduled;
+    }
+    refresh.response_key.clear(); // Stale-while-revalidate for ordinary expirations.
+    this->next_freshness_check.insert(download.canonical_key, now + 30);
+    this->next_refresh_attempt.insert(download.canonical_key, now + 300);
+    scheduleMapTileDownload(refresh);
+    return false;
+}
+
 MapTiles::DownloadScheduleStatus MapTiles::scheduleMapTileDownload(const QueuedDownload &download)
 {
     bool start_immediately = false;
@@ -362,26 +494,28 @@ bool MapTiles::canStartDownloadLocked(const QueuedDownload &download) const
     if (this->downloads_active.size() >= this->maximum_active_downloads)
         return false;
 
-    return this->downloads_active_per_origin.value(download.url, 0) <
+    return this->downloads_active_per_origin.value(downloadOrigin(download.url), 0) <
            MaximumActiveDownloadsPerOrigin;
 }
 
 void MapTiles::markDownloadStartedLocked(const QueuedDownload &download)
 {
     this->downloads_active.insert(download.canonical_key);
+    const QString origin = downloadOrigin(download.url);
     this->downloads_active_per_origin.insert(
-        download.url, this->downloads_active_per_origin.value(download.url, 0) + 1);
+        origin, this->downloads_active_per_origin.value(origin, 0) + 1);
 }
 
 void MapTiles::markDownloadFinishedLocked(const QueuedDownload &download)
 {
     this->downloads_active.remove(download.canonical_key);
 
-    const int remaining = this->downloads_active_per_origin.value(download.url, 0) - 1;
+    const QString origin = downloadOrigin(download.url);
+    const int remaining = this->downloads_active_per_origin.value(origin, 0) - 1;
     if (remaining > 0)
-        this->downloads_active_per_origin.insert(download.url, remaining);
+        this->downloads_active_per_origin.insert(origin, remaining);
     else
-        this->downloads_active_per_origin.remove(download.url);
+        this->downloads_active_per_origin.remove(origin);
 }
 
 void MapTiles::startMapTileDownload(const QueuedDownload &download)
@@ -392,7 +526,9 @@ void MapTiles::startMapTileDownload(const QueuedDownload &download)
         this->downloads_active_clients.insert(download.canonical_key, rest);
     }
     connect(rest, &TileHttpClient::requestFinished, this,
-            [this, rest, download](const QByteArray &data)
+            [this, rest, download](const QByteArray &data, const QByteArray &etag,
+                                   const QByteArray &last_modified, qint64 fresh_until,
+                                   bool may_store, bool must_revalidate)
     {
         bool invalidated = false;
         {
@@ -404,15 +540,57 @@ void MapTiles::startMapTileDownload(const QueuedDownload &download)
 
         if (!invalidated)
         {
-            saveMapTile(data, download.tile_path);
-            if (!data.isEmpty())
+            if (may_store)
+            {
+                if (saveMapTile(data, download.tile_path))
+                    saveMetadata(download.tile_path,
+                        {etag, last_modified, fresh_until, must_revalidate});
+            }
+            if (!may_store)
+            {
+                this->tile_memory_cache.remove(download.canonical_key);
+                QFile::remove(download.tile_path);
+                QFile::remove(download.tile_path + QStringLiteral(".http.json"));
+            }
+            if (!data.isEmpty() && may_store)
             {
                 this->tile_memory_cache.insert(
                     download.canonical_key, new QByteArray(data), tileMemoryCacheCostKiB(data));
             }
         }
 
-        emit tileReady(download.response_key, data);
+        if (!download.response_key.isEmpty()) emit tileReady(download.response_key, data);
+        rest->deleteLater();
+        startQueuedDownloads();
+        const UpstreamActivity activity = upstreamActivity();
+        emit upstreamActivityChanged(activity.active, activity.queued);
+    });
+    connect(rest, &TileHttpClient::requestNotModified, this,
+            [this, rest, download](const QByteArray &etag,
+                                   const QByteArray &last_modified, qint64 fresh_until,
+                                   bool must_revalidate)
+    {
+        bool invalidated = false;
+        {
+            QMutexLocker locker(&this->downloads_mutex);
+            markDownloadFinishedLocked(download);
+            this->downloads_active_clients.remove(download.canonical_key);
+            invalidated = this->downloads_invalidated.remove(download.canonical_key);
+        }
+        if (!invalidated && QFileInfo::exists(download.tile_path))
+        {
+            const TileMetadata old = readMetadata(download.tile_path);
+            saveMetadata(download.tile_path,
+                {etag.isEmpty() ? old.etag : etag,
+                 last_modified.isEmpty() ? old.last_modified : last_modified,
+                 fresh_until, must_revalidate || old.must_revalidate});
+        }
+        if (!download.response_key.isEmpty())
+        {
+            QFile cached(download.tile_path);
+            if (cached.open(QIODevice::ReadOnly)) emit tileReady(download.response_key, cached.readAll());
+            else emit tileFailed(download.response_key, TileFailureReason::UpstreamError);
+        }
         rest->deleteLater();
         startQueuedDownloads();
         const UpstreamActivity activity = upstreamActivity();
@@ -438,13 +616,13 @@ void MapTiles::startMapTileDownload(const QueuedDownload &download)
             failure_reason = TileFailureReason::Timeout;
         else if (reason == TileHttpClient::RequestFailureReason::Cancelled)
             failure_reason = TileFailureReason::Cancelled;
-        emit tileFailed(download.response_key, failure_reason);
+        if (!download.response_key.isEmpty()) emit tileFailed(download.response_key, failure_reason);
         rest->deleteLater();
         startQueuedDownloads();
         const UpstreamActivity activity = upstreamActivity();
         emit upstreamActivityChanged(activity.active, activity.queued);
     });
-    rest->get(download.path);
+    rest->get(download.path, download.etag, download.last_modified);
 }
 
 void MapTiles::startQueuedDownloads()

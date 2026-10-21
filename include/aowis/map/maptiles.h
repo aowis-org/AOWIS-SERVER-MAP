@@ -2,6 +2,8 @@
 #define MAPTILES_H
 
 #include <QObject>
+#include <aowis/map/map_provider.h>
+#include <aowis/map/download_coverage.h>
 
 #include <QByteArray>
 #include <QCache>
@@ -53,6 +55,12 @@ public:
     MapTiles(const QString &cache_base_directory, int maximum_active_downloads,
              int maximum_queued_downloads, QObject *parent = nullptr);
 
+    void setRemoteFetchEnabled(bool enabled);
+    void setPermanentDataDirectory(const QString &directory);
+    void configureProviders(const QVector<Aowis::Map::MapProvider> &providers,
+                            const Aowis::Map::DownloadCoverage &coverage,
+                            const QString &default_coverage);
+
     TileRequestResult getTile(const QString &provider, int z, int x, int y, const QString &key);
     int deleteTiles(const QString &provider, int zoom, int tile_x_min, int tile_x_max,
                     int tile_y_min, int tile_y_max);
@@ -67,6 +75,9 @@ private:
         QString tile_path;
         QString canonical_key;
         QString response_key;
+        QByteArray etag;
+        QByteArray last_modified;
+        bool revalidation = false;
     };
 
     enum class DownloadScheduleStatus
@@ -76,8 +87,7 @@ private:
     };
 
     QString providerCachePath(const QString &provider) const;
-    QString providerUrl(const QString &provider) const;
-    QString providerTilePath(const QString &provider, int zoom, int x, int y) const;
+    QString providerUrl(const QString &provider, int z, int x, int y) const;
     QString canonicalTileKey(const QString &provider, int zoom, int x, int y) const;
 
     DownloadScheduleStatus scheduleMapTileDownload(const QueuedDownload &download);
@@ -87,10 +97,16 @@ private:
     void markDownloadStartedLocked(const QueuedDownload &download);
     void markDownloadFinishedLocked(const QueuedDownload &download);
     bool saveMapTile(const QByteArray &data, const QString &tile_path);
+    bool refreshCachedTile(const QueuedDownload &download);
 
     QString domainRandomizer(const QString &url) const;
 
     QString fscache_base;
+    QString permanent_data_directory;
+    bool remote_fetch_enabled = true;
+    QHash<QString, Aowis::Map::MapProvider> configured_providers;
+    Aowis::Map::DownloadCoverage download_coverage;
+    QString default_coverage;
     QNetworkAccessManager *network_manager;
     QCache<QString, QByteArray> tile_memory_cache;
     int maximum_active_downloads;
@@ -101,6 +117,9 @@ private:
     QHash<QString, TileHttpClient *> downloads_active_clients;
     QHash<QString, int> downloads_active_per_origin;
     QSet<QString> downloads_invalidated;
+    QHash<QString, qint64> next_refresh_attempt;
+    QHash<QString, qint64> next_freshness_check;
+    QSet<QString> permanent_cached_keys;
     QQueue<QueuedDownload> downloads_queued;
     QSet<QString> downloads_queued_keys;
 

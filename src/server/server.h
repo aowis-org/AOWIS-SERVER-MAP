@@ -18,6 +18,8 @@
 #include <QTcpServer>
 
 #include <aowis/map/maptiles.h>
+#include <aowis/map/map_provider.h>
+#include <aowis/map/download_coverage.h>
 
 namespace Aowis::Map
 {
@@ -35,11 +37,18 @@ public:
         quint16 port = 8122;
         int maximum_pending_requests = 2048;
         int maximum_active_downloads = 32;
+        bool map_remote_fetch_enabled = true;
         QString cache_directory;
+        QString permanent_data_directory;
+        QString map_coverage;
+        Aowis::Map::DownloadCoverage download_coverage;
+        QVector<Aowis::Map::MapProvider> map_providers = Aowis::Map::defaultMapProviders();
         bool terrain_enabled = true;
         bool terrain_remote_fetch_enabled = true;
         QString terrain_default_dataset = QStringLiteral("copernicus-glo30");
         QString terrain_cache_directory;
+        QString terrain_coverage;
+        bool copernicus_enabled = true;
         QByteArray api_key;
         QByteArray delete_api_key;
         bool require_api_key = false;
