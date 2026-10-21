@@ -1,22 +1,12 @@
 # Terrain and elevation contract
 
-AOWIS uses terrain elevation for two different consumers:
+AOWIS Server Map provides one terrain/elevation subsystem for point sampling
+and normalized terrain heightfields. This document defines the existing HTTP
+and C++ sampling contract. Both uses share the same cache and source-dataset
+metadata; clients need not implement provider-specific elevation lookups.
 
-- point elevation lookup in hydraulic entity inspectors;
-- terrain heightfields for the native RHI 3D map.
-
-These consumers must use one terrain/elevation subsystem and one normalized dataset contract. They must not perform independent provider-specific Internet lookups.
-
-## Current GUI behavior being replaced
-
-The GUI currently resolves the inspector action `Terrain Elevation from GIS` directly against public Internet services:
-
-- native desktop: OpenTopoData `srtm30m,aster30m`;
-- WebAssembly: Open-Meteo elevation, currently identified by the GUI as Copernicus DEM GLO-90.
-
-The retrieved numeric value is written directly to `terrain_elevation_m` for junctions, reservoirs and tanks. The current flow has no shared offline cache and no explicit vertical-datum metadata. It can therefore return different terrain values for the same coordinate on desktop and WebAssembly.
-
-The future map-server terrain subsystem replaces both direct lookups.
+See [terrain providers](terrain-providers.md) for supported data sources and
+[the normalized format](terrain-tile-format.md) for `.aowterrain` encoding.
 
 ## Coordinate contract
 
@@ -64,7 +54,7 @@ Data-origin identifiers:
 - `offline-package`
 - `local-dataset`
 
-The string identifiers are part of the future HTTP contract and must remain stable. New values may be added later without changing existing meanings.
+These string identifiers are part of the HTTP contract and must remain stable. New values may be added later without changing existing meanings.
 
 ## Cached point lookup statuses
 
@@ -83,7 +73,8 @@ The string identifiers are part of the future HTTP contract and must remain stab
 - `corrupt-tile`
 - `no-data`
 
-This distinction is intentional so the later HTTP/provider layer can decide whether a request is invalid, genuinely unavailable, eligible for remote fetch, or requires cache repair.
+This distinction lets the server report invalid requests, unavailable data,
+remote-fetch problems and cache-integrity failures separately.
 
 ## Point-elevation HTTP representation
 
@@ -129,7 +120,9 @@ A point lookup must therefore follow the same availability rules as terrain rend
 2. if data is absent and remote fetching is enabled, fetch and normalize provider data;
 3. if data is absent and remote fetching is disabled/unavailable, report terrain data as unavailable.
 
-No GUI platform may bypass this policy by calling a public elevation service directly once the map-server terrain endpoint is implemented.
+Clients using this API receive the server's configured elevation dataset and
+its download policy. A client that instead calls a third-party elevation API
+is not subject to this server's restrictions.
 
 ## Vertical datum rule
 
@@ -145,24 +138,26 @@ The `local` datum class is intentionally not requestable as an output datum beca
 
 `Aowis::Map::TerrainData` is the dedicated terrain/elevation subsystem owned by `AOWIS-SERVER-MAP`. It is a sibling of the raster `MapTiles` subsystem; terrain behavior must not be added to `MapTiles`.
 
-The subsystem currently owns terrain lifecycle and storage policy:
+The subsystem owns terrain lifecycle and storage policy:
 
 - terrain can be enabled or disabled independently of raster map tiles;
 - remote fetching policy is recorded independently so an installation can operate in offline-only mode;
 - a dedicated terrain cache root is resolved either from `terrain/cache_directory` or `<downloads cache>/terrain`;
-- storage namespaces are reserved for normalized AOWIS terrain, provider-native cache data and offline packages.
+- storage separates normalized AOWIS terrain, provider-native cached data and the offline-package directory.
 
-The normalized terrain binary format is defined separately in [`terrain-tile-format.md`](terrain-tile-format.md). `TerrainData::sampleElevation()` now samples those normalized cached tiles directly. It selects the finest cached tile containing the requested WGS84 coordinate, maps the point into the 65×65 heightfield and performs bilinear interpolation. If a contributing heightfield sample is no-data, sampling falls back to a coarser cached tile when one is available. Corrupt or unreadable normalized tiles are reported explicitly rather than silently skipped.
+The normalized terrain binary format is defined separately in [`terrain-tile-format.md`](terrain-tile-format.md). `TerrainData::sampleElevation()` samples those normalized cached tiles directly. It selects the finest cached tile containing the requested WGS84 coordinate, maps the point into the 65×65 heightfield and performs bilinear interpolation. If a contributing heightfield sample is no-data, sampling falls back to a coarser cached tile when one is available. Corrupt or unreadable normalized tiles are reported explicitly rather than silently skipped.
 
-The sampler accepts an explicit dataset identifier. A normalized cache hit reports `TerrainDataOrigin::Cache`; a tile generated by the remote provider during the current request reports `TerrainDataOrigin::Remote`. Provider-native formats remain hidden behind `TerrainProvider`. Offline-package mounting remains a later layer on the same subsystem. The HTTP point-elevation endpoint is now implemented on top of this sampler.
+The sampler accepts an explicit dataset identifier. A normalized cache hit reports `TerrainDataOrigin::Cache`; a tile generated by the remote provider during the current request reports `TerrainDataOrigin::Remote`. Provider-native formats remain hidden behind `TerrainProvider`. Offline-package mounting is not implemented in the current retrieval path. The HTTP point-elevation endpoint uses this sampler.
 
 ## Shared tile retrieval path
 
 Point sampling and renderer tile delivery use the same normalized terrain retrieval boundary. `TerrainData::sampleElevation()` resolves each candidate XYZ tile through `TerrainData::terrainTile()` before decoding/interpolating it.
 
-This is intentional: future provider read-through fetching, offline-package lookup and cache repair belong in the tile-retrieval path once, so both inspector elevation queries and the 3D renderer receive identical availability and source behavior.
+The shared path performs read-through retrieval and cache-integrity handling,
+so point elevation queries and 3D tile consumers share the same availability
+and source behavior. Offline-package mounting is not implemented here.
 
 
-## First remote dataset
+## Supported remote dataset
 
-`copernicus-glo30` is the first Internet-backed terrain dataset. It is normalized from the public Copernicus GLO-30 COG distribution, records EGM2008 as its vertical datum and 30 m as nominal source resolution, and is a DSM rather than a guaranteed bare-earth DTM. See [`terrain-providers.md`](terrain-providers.md).
+`copernicus-glo30` is the Internet-backed terrain dataset currently supported. It is normalized from the public Copernicus GLO-30 COG distribution, records EGM2008 as its vertical datum and 30 m as nominal source resolution, and is a DSM rather than a guaranteed bare-earth DTM. See [`terrain-providers.md`](terrain-providers.md).

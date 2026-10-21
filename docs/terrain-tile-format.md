@@ -5,7 +5,7 @@
 AOWIS terrain providers normalize their source data into one provider-neutral binary heightfield format before the data is used by either:
 
 - point-elevation sampling for entity inspectors;
-- terrain geometry in the native RHI 3D map;
+- terrain geometry in AOWIS 3D map renderers;
 - offline terrain packages.
 
 Provider-native formats such as HGT, GeoTIFF/COG or a future local DEM importer must not leak into these consumers.

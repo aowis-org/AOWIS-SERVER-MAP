@@ -38,6 +38,7 @@ public:
         int maximum_pending_requests = 2048;
         int maximum_active_downloads = 32;
         bool map_remote_fetch_enabled = true;
+        QString provider_state_file;
         QString cache_directory;
         QString permanent_data_directory;
         QString map_coverage;

@@ -8,6 +8,11 @@
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonArray>
+#include <QUuid>
+#include <QSet>
+#include <QUrl>
+#include <QRegularExpression>
+#include "configuration.h"
 #include <QJsonObject>
 #include <QMutexLocker>
 #include <QUrlQuery>
@@ -527,12 +532,15 @@ void Server::setupRoutes()
         QJsonArray providers;
         for (const Aowis::Map::MapProvider &provider : this->config.map_providers)
         {
-            if (!provider.enabled) continue;
             QJsonObject entry;
             entry.insert(QStringLiteral("id"), provider.id);
             entry.insert(QStringLiteral("name"), provider.name);
+            entry.insert(QStringLiteral("url"), provider.url_template);
             entry.insert(QStringLiteral("minimum_zoom"), provider.minimum_zoom);
             entry.insert(QStringLiteral("maximum_zoom"), provider.maximum_zoom);
+            entry.insert(QStringLiteral("enabled"), provider.enabled);
+            entry.insert(QStringLiteral("remote_fetch_enabled"), provider.remote_fetch_enabled);
+            entry.insert(QStringLiteral("coverage"), provider.coverage);
             providers.append(entry);
         }
         QJsonObject root;
@@ -540,6 +548,73 @@ void Server::setupRoutes()
         return QHttpServerResponse(QByteArrayLiteral("application/json"),
             QJsonDocument(root).toJson(QJsonDocument::Compact),
             QHttpServerResponse::StatusCode::Ok);
+    });
+    // As requested, provider editing currently has no authentication. Only
+    // application-managed state is writable; administrator /etc is untouched.
+    this->http.route("/map/v1/providers", QHttpServerRequest::Method::Put,
+                     [this](const QHttpServerRequest &request)
+    {
+        const QJsonDocument document = QJsonDocument::fromJson(request.body());
+        if (!document.isObject() || !document.object().value(QStringLiteral("providers")).isArray())
+            return QHttpServerResponse("Expected {\"providers\": [...]}",
+                                       QHttpServerResponse::StatusCode::BadRequest);
+        const QJsonArray entries = document.object().value(QStringLiteral("providers")).toArray();
+        if (entries.size() > 100)
+            return QHttpServerResponse("Too many map providers",
+                                       QHttpServerResponse::StatusCode::BadRequest);
+        QVector<Aowis::Map::MapProvider> proposed;
+        QSet<QString> ids;
+        for (const QJsonValue &value : entries)
+        {
+            if (!value.isObject())
+                return QHttpServerResponse("Provider must be an object",
+                                           QHttpServerResponse::StatusCode::BadRequest);
+            const QJsonObject entry = value.toObject();
+            Aowis::Map::MapProvider provider;
+            provider.id = entry.value(QStringLiteral("id")).toString().trimmed().toLower();
+            provider.name = entry.value(QStringLiteral("name")).toString().trimmed();
+            provider.url_template = entry.value(QStringLiteral("url")).toString().trimmed();
+            provider.coverage = entry.value(QStringLiteral("coverage")).toString().trimmed();
+            provider.minimum_zoom = entry.value(QStringLiteral("minimum_zoom")).toInt(-1);
+            provider.maximum_zoom = entry.value(QStringLiteral("maximum_zoom")).toInt(-1);
+            provider.enabled = entry.value(QStringLiteral("enabled")).toBool(true);
+            provider.remote_fetch_enabled = entry.value(QStringLiteral("remote_fetch_enabled")).toBool(true);
+            const QUrl parsed(provider.url_template);
+            if (QUuid(provider.id).isNull() || provider.id.contains(QLatin1Char('{')) ||
+                ids.contains(provider.id) || provider.name.isEmpty() ||
+                provider.name.contains(QLatin1Char('\n')) || provider.name.contains(QLatin1Char('\r')) ||
+                provider.url_template.contains(QLatin1Char('\n')) ||
+                provider.url_template.contains(QLatin1Char('\r')) ||
+                provider.coverage.contains(QLatin1Char('\n')) ||
+                provider.minimum_zoom < 0 || provider.maximum_zoom > 30 ||
+                provider.minimum_zoom > provider.maximum_zoom ||
+                !this->config.download_coverage.hasProfile(provider.coverage) ||
+                !(parsed.scheme() == QStringLiteral("http") || parsed.scheme() == QStringLiteral("https")) ||
+                parsed.host().isEmpty() ||
+                !provider.url_template.contains(QStringLiteral("{z}")) ||
+                !provider.url_template.contains(QStringLiteral("{x}")) ||
+                !provider.url_template.contains(QStringLiteral("{y}")))
+            {
+                return QHttpServerResponse("Invalid provider UUID, name, URL, coverage or zoom range",
+                                           QHttpServerResponse::StatusCode::BadRequest);
+            }
+            ids.insert(provider.id);
+            proposed.append(provider);
+        }
+        QString error_message;
+        if (!MapServerConfiguration::saveMapProvidersToState(
+                this->config.provider_state_file, proposed, &error_message))
+        {
+            return QHttpServerResponse(error_message,
+                                       QHttpServerResponse::StatusCode::InternalServerError);
+        }
+        this->maptiles->cancelUpstreamDownloads();
+        this->config.map_providers = proposed;
+        this->maptiles->configureProviders(this->config.map_providers,
+                                           this->config.download_coverage,
+                                           this->config.map_coverage);
+        return QHttpServerResponse("Map providers saved and applied",
+                                   QHttpServerResponse::StatusCode::Ok);
     });
     this->http.route("/map/v1/providers", QHttpServerRequest::Method::Options,
                      []() {return makeOptionsResponse();});

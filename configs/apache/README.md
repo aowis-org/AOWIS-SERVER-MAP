@@ -1,39 +1,46 @@
-# Apache reverse-proxy configurations
+# Apache reverse proxy for AOWIS Server Map
+
+AOWIS Server Map listens on `127.0.0.1:8122` by default. Its Qt HTTP server
+should be reached through a reverse proxy rather than exposed directly to the
+public Internet. The supplied Apache templates are **alternatives**: select
+one based on where the GUI, proxy and backend run.
+
+| Template | Use case |
+| --- | --- |
+| `aowis-map.localhost.conf` | Same-host HTTP proxy for local GUI/development |
+| `aowis-server-map.conf` | Internet-facing HTTPS proxy, bootstrapped with Certbot |
+
+Both templates forward the map/terrain API (including provider catalog,
+upstream activity and cache-management routes). Their CORS response headers
+are intended for a configured browser GUI origin; **CORS is not authentication**.
+In particular, the map-provider editing `PUT /map/v1/providers` route currently
+has no API-key check. Only trusted clients should be able to reach it.
 
 ## Debian package installation
 
-The Debian package installs both templates directly into `/etc/apache2/sites-available/` and enables the required Apache modules. Neither site is enabled automatically because the templates are alternatives and the Internet-facing template requires deployment-specific values.
+The Debian package places both templates under
+`/etc/apache2/sites-available/` and enables the required Apache modules. It
+does **not** enable either site. Administrators should edit the installed
+site in place with `sudoedit`; do not blindly copy a repository template over
+an existing customized site.
 
-For a same-host installation, edit and enable:
+For the same-host configuration:
 
 ```bash
 sudoedit /etc/apache2/sites-available/aowis-map.localhost.conf
 sudo a2ensite aowis-map.localhost.conf
-```
-
-For an Internet-facing proxy, edit and enable:
-
-```bash
-sudoedit /etc/apache2/sites-available/aowis-server-map.conf
-sudo a2ensite aowis-server-map.conf
-```
-
-Then validate and reload Apache:
-
-```bash
 sudo apache2ctl configtest
 sudo systemctl reload apache2
 ```
 
-## Available configurations
-
-Two separate templates are provided. They are alternatives; enable the one matching the deployment.
+For an Internet-facing configuration, use
+`/etc/apache2/sites-available/aowis-server-map.conf` and follow the Certbot
+steps below.
 
 ## Same-host HTTP setup
 
-Use `aowis-map.localhost.conf` when the GUI-facing Apache server and `aowis-server-map` run on the same machine and HTTPS is not needed.
-
-Edit these values first:
+`configs/apache/aowis-map.localhost.conf` is intended for Apache and the map
+server on the same host, when HTTPS is not needed. Review these definitions:
 
 ```apache
 Define AOWIS_MAP_SERVER_NAME aowis-server-map.localhost
@@ -41,25 +48,30 @@ Define AOWIS_MAP_BACKEND http://127.0.0.1:8122
 Define AOWIS_MAP_ALLOWED_ORIGIN http://aowis-server-gui.localhost
 ```
 
-`AOWIS_MAP_ALLOWED_ORIGIN` must be the exact scheme, host and optional port from which the browser GUI is served.
+The allowed origin is the **exact** browser GUI scheme, hostname and optional
+port. Configure local DNS or `/etc/hosts` entries as appropriate.
 
-Install it on Debian:
+For a manual deployment (without the Debian package), install the example
+only if the destination does not already exist, then edit it:
 
 ```bash
 sudo a2enmod headers proxy proxy_http reqtimeout
-sudo install -m 0644 configs/apache/aowis-map.localhost.conf /etc/apache2/sites-available/aowis-map.localhost.conf
+sudo install -m 0644 configs/apache/aowis-map.localhost.conf \
+    /etc/apache2/sites-available/aowis-map.localhost.conf
+sudoedit /etc/apache2/sites-available/aowis-map.localhost.conf
 sudo a2ensite aowis-map.localhost.conf
 sudo apache2ctl configtest
 sudo systemctl reload apache2
 ```
 
-Add the selected local names to DNS or `/etc/hosts` as appropriate.
+Do not run the `install` step over an existing customized site without first
+reviewing it. Keep the backend on loopback if Apache is on the same machine.
 
-## Internet-facing HTTPS setup with Certbot
+## Public HTTPS setup with Certbot
 
-Use `aowis-server-map.conf` on the public reverse-proxy machine. The repository template intentionally contains only an initial port-80 virtual host: it can pass Apache configuration validation before a certificate exists. Certbot then obtains the Let's Encrypt certificate, creates/enables the HTTPS virtual host and changes HTTP to an HTTPS redirect.
-
-The public template uses literal values rather than Apache `Define` variables so that Certbot can reliably discover and modify the virtual host. Replace all occurrences of these three examples before enabling the site:
+The `aowis-server-map.conf` template initially defines a port-80 virtual host
+so Apache can validate and load it **before** a TLS certificate exists.
+Replace all occurrences of the following placeholders:
 
 ```text
 maps.example.com
@@ -67,14 +79,19 @@ http://127.0.0.1:8122
 https://app.example.com
 ```
 
-The backend may be on the same machine or directly on a private-network host. For a remote backend, replace both `ProxyPass` backend URLs, for example:
+They represent the public map hostname, map-server backend, and allowed browser
+GUI origin respectively. The public template uses literal values so Certbot
+can discover and edit the Apache virtual host.
+
+If the backend runs on another host, point the proxy at its *private* IP,
+for example:
 
 ```apache
 ProxyPass / http://10.20.0.15:8122/ connectiontimeout=5 timeout=65 retry=0
 ProxyPassReverse / http://10.20.0.15:8122/
 ```
 
-No reverse proxy is needed on the map-server host. Configure the map server to listen on its private address and allow TCP port 8122 only from the public proxy host:
+The map server on that host must bind to its private address:
 
 ```ini
 [server]
@@ -82,37 +99,35 @@ listen_address=10.20.0.15
 port=8122
 ```
 
-Before requesting the certificate:
+Restrict TCP port 8122 to the proxy host at the backend firewall. No second
+reverse proxy is required on the map-server machine.
 
-- Point the public DNS name at the Apache proxy.
-- Permit inbound TCP ports 80 and 443.
-- Keep the map-server backend itself off the public Internet.
-- Set `AOWIS_MAP_ALLOWED_ORIGIN` to the exact HTTPS origin of the browser GUI.
-
-Install the Apache site and Certbot on Debian:
+Before requesting a certificate, ensure public DNS resolves to Apache and
+ports 80 and 443 reach the proxy. Then:
 
 ```bash
 sudo apt update
 sudo apt install certbot python3-certbot-apache
 sudo a2enmod headers proxy proxy_http reqtimeout rewrite ssl
-sudo install -m 0644 configs/apache/aowis-server-map.conf /etc/apache2/sites-available/aowis-server-map.conf
+sudoedit /etc/apache2/sites-available/aowis-server-map.conf
 sudo a2ensite aowis-server-map.conf
 sudo apache2ctl configtest
 sudo systemctl reload apache2
-```
-
-Obtain and install the certificate, and enable the HTTP-to-HTTPS redirect:
-
-```bash
 sudo certbot --apache --redirect -d maps.example.com
-```
-
-Replace `maps.example.com` with the literal `ServerName` configured in the installed virtual host. Certbot edits the installed Apache configuration under `/etc/apache2`; do not add certificate paths to the repository template before the certificate exists.
-
-Verify renewal afterwards:
-
-```bash
 sudo certbot renew --dry-run
 ```
 
-The proxy passes `Authorization` and `X-API-Key` to the backend. Use the normal API key for `/status` and tile GET requests, and the separate delete API key for cache DELETE requests.
+Use the real configured `ServerName` in the Certbot command. Certbot installs
+the HTTPS virtual host and HTTP-to-HTTPS redirect; administrators should
+manage the resulting files under `/etc/apache2` as local configuration.
+
+For a first-time **manual** install, copy the repository template to
+`/etc/apache2/sites-available/aowis-server-map.conf` before `sudoedit`, but
+do not overwrite an existing file. When using the Debian package the file
+already exists.
+
+The reverse proxy passes `Authorization` and `X-API-Key` headers through to the
+backend. Read endpoints use `authentication/api_key`, while cache DELETE and
+upstream cancellation use `authentication/delete_api_key`. The provider-edit
+PUT endpoint is currently unauthenticated; network-level access restrictions
+remain essential. See [the API reference](../../README.md#http-api).

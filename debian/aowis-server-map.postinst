@@ -22,7 +22,9 @@ if [ "$1" = "configure" ]; then
             "$service_user" >/dev/null
     fi
 
-    install -d -o root -g "$service_group" -m 0750 "$config_directory"
+    if [ ! -d "$config_directory" ]; then
+        install -d -o root -g "$service_group" -m 0750 "$config_directory"
+    fi
 
     if [ ! -e "$config_file" ]; then
         api_key="$(openssl rand -hex 32)"
@@ -42,8 +44,8 @@ if [ "$1" = "configure" ]; then
         trap - EXIT HUP INT TERM
         created_config=true
     else
-        chown root:"$service_group" "$config_file"
-        chmod 0640 "$config_file"
+        # Admin-owned configuration and its permissions are not package state.
+        echo "Preserving existing configuration and permissions: $config_file"
     fi
 
     if command -v a2enmod >/dev/null 2>&1; then

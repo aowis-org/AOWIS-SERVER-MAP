@@ -72,6 +72,12 @@ target_link_libraries(aowis-server-map
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(aowis-server-map-provider-limits-test
+        tests/test_map_provider_limits.cpp
+    )
+    target_link_libraries(aowis-server-map-provider-limits-test PRIVATE AOWIS::Map)
+    add_test(NAME aowis-server-map-provider-limits
+             COMMAND aowis-server-map-provider-limits-test)
     add_executable(aowis-server-map-download-coverage-test
         tests/test_download_coverage.cpp
     )
@@ -221,4 +227,18 @@ if(AOWIS_SERVER_MAP_BUILD_SERVER)
         PRIVATE
             cxx_std_20
     )
+
+    if(BUILD_TESTING)
+        add_executable(aowis-server-map-provider-state-test
+            tests/test_provider_state.cpp
+            src/server/configuration.cpp
+            src/server/configuration.h
+        )
+        target_link_libraries(aowis-server-map-provider-state-test
+            PRIVATE AOWIS::Map Qt6::HttpServer)
+        target_compile_features(aowis-server-map-provider-state-test
+            PRIVATE cxx_std_20)
+        add_test(NAME aowis-server-map-provider-state
+                 COMMAND aowis-server-map-provider-state-test)
+    endif()
 endif()

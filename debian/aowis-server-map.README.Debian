@@ -1,34 +1,57 @@
-AOWIS Server Map for Debian
-===========================
+AOWIS Server Map — Debian installation
+======================================
 
-The package creates and starts aowis-server-map.service on first installation.
-Its configuration is stored at:
+Service:       aowis-server-map.service
+Binary:        /usr/bin/aowis-server-map
+Vendor unit:   /usr/lib/systemd/system/aowis-server-map.service
+Configuration: /etc/aowis-server-map/map-server.ini
+Provider state: /var/lib/aowis-server-map/providers.ini
+Cache root:    /var/cache/aowis-server-map/
 
-  /etc/aowis-server-map/map-server.ini
+On first installation, the package creates a service account and an
+administrator INI containing independent, randomly generated read and delete
+API keys. If the INI exists, the package preserves its content and permissions.
+It does not merge or replace administrator configuration during upgrades.
 
-The package generates separate read and delete API keys when this file does not
-already exist. Existing configuration is preserved during upgrades and ordinary
-package removal. It is deleted only when the package is purged.
+The service runs as the unprivileged aowis-server-map user and provisions
+/var/lib and /var/cache using systemd StateDirectory= and CacheDirectory=.
+ProtectSystem=strict prevents the running service from writing to /etc.
 
-Apache reverse-proxy templates are installed directly as disabled sites:
+The GUI/map provider API can replace the raster provider catalog at runtime.
+It writes only /var/lib/aowis-server-map/providers.ini; /etc still controls
+all other server configuration. The provider state is created on the first
+successful save and persists across restarts and upgrades. To return to the
+provider list in /etc, stop the service and back up/remove providers.ini.
+
+Validate the installed configuration without starting a listener:
+
+  sudo aowis-server-map --check-config --config /etc/aowis-server-map/map-server.ini
+
+See the complete built-in defaults without changing configuration:
+
+  aowis-server-map --print-default-config
+
+Use administrator-managed systemd drop-ins rather than editing the vendor unit:
+
+  sudo systemctl edit aowis-server-map
+  sudo systemctl cat aowis-server-map
+
+Administration:
+
+  sudo systemctl status aowis-server-map
+  sudo journalctl -u aowis-server-map -f
+  sudo systemctl restart aowis-server-map
+
+The package installs two Apache reverse-proxy templates disabled:
 
   /etc/apache2/sites-available/aowis-map.localhost.conf
   /etc/apache2/sites-available/aowis-server-map.conf
 
-Edit and enable exactly one template. For example:
+Enable only the template appropriate for the installation, after replacing its
+sample domain/backend/origin values. Internet-facing deployments must terminate
+HTTPS at the proxy and restrict direct network access to the map-server port.
+The map-provider PUT API currently has no authentication; only trusted clients
+may reach it.
 
-  sudoedit /etc/apache2/sites-available/aowis-map.localhost.conf
-  sudo a2ensite aowis-map.localhost.conf
-  sudo apache2ctl configtest
-  sudo systemctl reload apache2
-
-The Internet-facing template contains placeholder domain and origin values and
-must be edited before it is enabled. It is intended to be completed with:
-
-  sudo certbot --apache --redirect -d maps.example.com
-
-Service administration:
-
-  sudo systemctl status aowis-server-map.service
-  sudo journalctl -u aowis-server-map.service -f
-  sudo systemctl restart aowis-server-map.service
+More instructions: /usr/share/doc/aowis-server-map/ or the source repository's
+README.md and configs/systemd/README.md.

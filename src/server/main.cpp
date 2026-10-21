@@ -144,6 +144,7 @@ int main(int argc, char *argv[])
 
     Server::Config config;
     config.cache_directory = MapServerConfiguration::defaultCacheDirectory();
+    config.provider_state_file = MapServerConfiguration::defaultProviderStateFilePath();
     QString config_path;
     if (parser.isSet(config_option))
     {
@@ -154,6 +155,15 @@ int main(int argc, char *argv[])
             return EXIT_FAILURE;
         }
 
+        // A manual --check-config --config /etc/... runs outside systemd,
+        // where STATE_DIRECTORY is unavailable. Inspect the same persistent
+        // provider state the packaged service normally uses.
+        if (qEnvironmentVariableIsEmpty("STATE_DIRECTORY") &&
+            QFileInfo(config_path).absoluteFilePath() ==
+                QStringLiteral("/etc/aowis-server-map/map-server.ini"))
+        {
+            config.provider_state_file = QStringLiteral("/var/lib/aowis-server-map/providers.ini");
+        }
         QString error_message;
         if (!MapServerConfiguration::loadConfigFile(config_path, &config, &error_message))
         {
@@ -182,6 +192,19 @@ int main(int argc, char *argv[])
                                      .arg(config_path);
         }
     }
+
+    // A GUI-edited provider catalog overrides only providers from the admin
+    // file, never its download permissions, coverage regions, or other keys.
+    {
+        QString error_message;
+        if (!MapServerConfiguration::loadProviderStateFile(
+                config.provider_state_file, &config, &error_message))
+        {
+            qCritical().noquote() << error_message;
+            return EXIT_FAILURE;
+        }
+    }
+
 
     if (parser.isSet(listen_address_option))
     {
@@ -274,6 +297,8 @@ int main(int argc, char *argv[])
             QStringLiteral("<map cache>/terrain") : config.terrain_cache_directory) << '\n';
         output << "Permanent data: " << (config.permanent_data_directory.isEmpty() ?
             QStringLiteral("<terrain cache>/offline-packages") : config.permanent_data_directory) << '\n';
+        output << "Provider state: " << config.provider_state_file
+               << (QFileInfo::exists(config.provider_state_file) ? " (loaded)\n" : " (not present)\n");
         output << "Map providers:\n";
         for (const Aowis::Map::MapProvider &provider : config.map_providers)
             output << "  " << provider.id << " (" << (provider.enabled ? "enabled" : "disabled")

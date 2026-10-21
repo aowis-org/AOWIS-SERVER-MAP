@@ -105,6 +105,9 @@ private:
     QString permanent_data_directory;
     bool remote_fetch_enabled = true;
     QHash<QString, Aowis::Map::MapProvider> configured_providers;
+    // First-use URL fingerprint selection. Separates cache contents when an
+    // administrator changes the upstream URL without changing the UUID.
+    mutable QHash<QString, QString> provider_cache_paths;
     Aowis::Map::DownloadCoverage download_coverage;
     QString default_coverage;
     QNetworkAccessManager *network_manager;

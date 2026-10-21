@@ -11,8 +11,10 @@ ExecStart=/usr/bin/aowis-server-map --config /etc/aowis-server-map/map-server.in
 Restart=on-failure
 RestartSec=3s
 
-# Creates /var/cache/aowis-server-map with ownership for the service account.
-# systemd also exports CACHE_DIRECTORY=/var/cache/aowis-server-map.
+# systemd owns these writable locations; /etc and /usr remain read-only.
+# STATE_DIRECTORY and CACHE_DIRECTORY are exported to the process.
+StateDirectory=aowis-server-map
+StateDirectoryMode=0750
 CacheDirectory=aowis-server-map
 CacheDirectoryMode=0750
 UMask=0027

@@ -4,6 +4,7 @@
 
 #include <QDebug>
 #include <QDateTime>
+#include <QCryptographicHash>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QDir>
@@ -160,6 +161,8 @@ void MapTiles::configureProviders(const QVector<Aowis::Map::MapProvider> &provid
 {
     this->configured_providers.clear();
     this->permanent_cached_keys.clear();
+    this->provider_cache_paths.clear();
+    this->tile_memory_cache.clear();
     for (const Aowis::Map::MapProvider &provider : providers)
         if (provider.enabled) this->configured_providers.insert(provider.id, provider);
     this->download_coverage = coverage;
@@ -175,8 +178,41 @@ QString MapTiles::domainRandomizer(const QString &url) const
 
 QString MapTiles::providerCachePath(const QString &provider) const
 {
-    if (!this->configured_providers.contains(provider)) return {};
-    return QDir(this->fscache_base).filePath(QStringLiteral("maptiles/%1").arg(provider));
+    const QHash<QString, Aowis::Map::MapProvider>::const_iterator source =
+        this->configured_providers.constFind(provider);
+    if (source == this->configured_providers.cend()) return {};
+    const QHash<QString, QString>::const_iterator existing =
+        this->provider_cache_paths.constFind(provider);
+    if (existing != this->provider_cache_paths.cend()) return existing.value();
+
+    const QString base_path = QDir(this->fscache_base).filePath(
+        QStringLiteral("maptiles/%1").arg(provider));
+    const QByteArray fingerprint = QCryptographicHash::hash(
+        source->url_template.toUtf8(), QCryptographicHash::Sha256).toHex();
+    QFile marker(QDir(base_path).filePath(QStringLiteral(".upstream-url.sha256")));
+    QByteArray recorded;
+    if (marker.open(QIODevice::ReadOnly)) recorded = marker.readAll().trimmed();
+    QString selected_path = base_path;
+    if (!recorded.isEmpty() && recorded != fingerprint)
+    {
+        // Old tiles must not be silently treated as tiles of the new URL.
+        selected_path = QDir(base_path).filePath(
+            QStringLiteral("variants/%1").arg(QString::fromLatin1(fingerprint.left(16))));
+    }
+    else if (recorded.isEmpty() && QDir().mkpath(base_path))
+    {
+        // Existing pre-fingerprint caches are kept as the initial variant.
+        QSaveFile new_marker(marker.fileName());
+        if (new_marker.open(QIODevice::WriteOnly))
+        {
+            if (new_marker.write(fingerprint) != fingerprint.size())
+                new_marker.cancelWriting();
+            else
+                new_marker.commit();
+        }
+    }
+    this->provider_cache_paths.insert(provider, selected_path);
+    return selected_path;
 }
 
 QString MapTiles::providerUrl(const QString &provider, int zoom, int x, int y) const

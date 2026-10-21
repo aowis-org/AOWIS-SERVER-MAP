@@ -7,7 +7,8 @@ service_group="aowis-server-map"
 install_binary="/usr/bin/aowis-server-map"
 config_directory="/etc/aowis-server-map"
 config_file="$config_directory/map-server.ini"
-unit_file="/etc/systemd/system/$service_name.service"
+unit_file="/usr/local/lib/systemd/system/$service_name.service"
+legacy_unit_file="/etc/systemd/system/$service_name.service"
 script_directory="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 project_directory="$(cd -- "$script_directory/../.." && pwd)"
 source_binary="$project_directory/build-linux/aowis-server-map"
@@ -35,7 +36,8 @@ Options:
 
 On first installation, the installer creates $config_file with separate random
 read and delete API keys and prints both keys. Existing configuration files are
-never overwritten and existing keys are never changed.
+never overwritten and existing keys are never changed. The vendor service unit
+is installed under /usr/local/lib/systemd/system; /etc unit overrides are preserved.
 EOF_USAGE
 }
 
@@ -99,7 +101,9 @@ if ! getent passwd "$service_user" >/dev/null; then
 fi
 
 install -m 0755 "$source_binary" "$install_binary"
-install -d -o root -g "$service_group" -m 0750 "$config_directory"
+if [[ ! -d "$config_directory" ]]; then
+    install -d -o root -g "$service_group" -m 0750 "$config_directory"
+fi
 
 created_config=false
 api_key=""
@@ -139,7 +143,16 @@ else
     echo "Installed configuration with generated API keys: $config_file"
 fi
 
-install -m 0644 "$script_directory/$service_name.service" "$unit_file"
+install -D -m 0644 "$script_directory/$service_name.service" "$unit_file"
+if [[ -e "$legacy_unit_file" || -L "$legacy_unit_file" ]]; then
+    cat >&2 <<EOF_WARNING
+Warning: an administrator/legacy unit exists at $legacy_unit_file.
+This installer has preserved it. /etc takes precedence over $unit_file,
+so the new StateDirectory= directive may not be active until the old unit is
+reviewed and migrated to a systemd drop-in (systemctl edit $service_name).
+Do not delete a customized unit without first reviewing its contents.
+EOF_WARNING
+fi
 systemctl daemon-reload
 
 echo "Installed binary: $install_binary"

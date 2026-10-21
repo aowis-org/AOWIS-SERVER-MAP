@@ -4,7 +4,9 @@ set -e
 #DEBHELPER#
 
 if [ "$1" = "purge" ]; then
-    rm -rf -- /etc/aowis-server-map
+    # Purge only the known AOWIS config. Preserve other administrator files.
+    rm -f -- /etc/aowis-server-map/map-server.ini
+    rmdir -- /etc/aowis-server-map 2>/dev/null || true
 fi
 
 exit 0

@@ -21,7 +21,7 @@ normalized XYZ address, fetches/opens its native source material, and returns a 
 
 ## Copernicus GLO-30
 
-The first Internet provider is `copernicus` with dataset identifier:
+The supported Internet-backed provider is `copernicus`, with dataset identifier:
 
 ```text
 copernicus-glo30
@@ -56,10 +56,9 @@ Copernicus DEM is a **digital surface model (DSM)**. Heights may therefore repre
 buildings and infrastructure as well as bare ground. AOWIS must not present these values as surveyed
 hydraulic elevations or a guaranteed bare-earth DTM.
 
-GLO-30 Public is not complete in a small number of areas/countries. Version 1 of the provider does
-not silently substitute GLO-90, because doing so while retaining the `copernicus-glo30` dataset ID
-would make source/resolution metadata dishonest. A later provider-selection layer may explicitly
-request `copernicus-glo90` as a separate dataset.
+GLO-30 Public is not complete in a small number of areas/countries. The provider does not silently substitute GLO-90: retaining the
+`copernicus-glo30` dataset identifier would misrepresent the resolution and
+source metadata. GLO-90 is not a configured dataset in this implementation.
 
 ### Dataset catalog
 
@@ -126,8 +125,8 @@ serializing unrelated terrain generation.
 
 ## Licensing and attribution
 
-Copernicus GLO-30 Public is distributed for public use under the Copernicus DEM licence. Offline
-package manifests must eventually retain dataset provenance and required attribution. The normalized
+Copernicus GLO-30 Public is distributed for public use under the Copernicus DEM licence. Any externally assembled offline package must retain appropriate dataset
+provenance and attribution. The normalized
 binary tile itself intentionally does not embed licensing text; attribution belongs to package/server
 metadata, not each 8 KiB heightfield payload.
 
