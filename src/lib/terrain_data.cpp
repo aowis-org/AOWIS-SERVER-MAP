@@ -555,6 +555,33 @@ TerrainCacheDeletionResult TerrainData::deleteSourceData(
     return result;
 }
 
+TerrainAnalysisGridResult TerrainData::analysisGrid(
+    const TerrainAnalysisGridRequest &request) const
+{
+    TerrainAnalysisGridResult result;
+    if (!this->config.enabled || !this->initialized)
+    {
+        result.status = TerrainProviderFetchStatus::SourceUnavailable;
+        result.error_message = QStringLiteral("Terrain subsystem disabled or not initialized");
+        return result;
+    }
+    if (!isValidTerrainDatasetId(request.dataset))
+    {
+        result.status = TerrainProviderFetchStatus::UnsupportedDataset;
+        result.error_message = QStringLiteral("Invalid terrain dataset identifier");
+        return result;
+    }
+    for (const std::unique_ptr<TerrainProvider> &provider : this->providers)
+    {
+        if (provider->supportsDataset(request.dataset))
+            return provider->fetchAnalysisGrid(request, this->storage_paths.providers,
+                                              this->config.remote_fetch_enabled);
+    }
+    result.status = TerrainProviderFetchStatus::UnsupportedDataset;
+    result.error_message = QStringLiteral("Unrecognized terrain dataset");
+    return result;
+}
+
 TerrainTileLookupResult TerrainData::terrainTile(const QString &dataset,
                                                   const TerrainTileAddress &address) const
 {

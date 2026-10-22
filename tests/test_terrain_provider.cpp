@@ -175,6 +175,42 @@ int main()
         return 1;
     }
 
+    // Hydrology requests native source-precision samples without creating
+    // quantized Web-Mercator renderer tiles. Cell centres are at 8.125/50.875,
+    // etc. The synthetic cached source has 128 pixels per axis.
+    TerrainAnalysisGridRequest grid_request;
+    grid_request.dataset = QStringLiteral("copernicus-glo30");
+    grid_request.bounds = {8.0, 50.75, 8.25, 51.0};
+    grid_request.columns = 4;
+    grid_request.rows = 4;
+    const TerrainAnalysisGridResult grid_result = terrain_data.analysisGrid(grid_request);
+    if (!require(grid_result.status == TerrainProviderFetchStatus::Ready &&
+                 grid_result.elevations_m.size() == 16 &&
+                 grid_result.vertical_datum == TerrainVerticalDatum::Egm2008 &&
+                 grid_result.origin == TerrainDataOrigin::Cache,
+                 "Native DEM window status, dimensions or datum incorrect"))
+    {
+        std::cerr << grid_result.error_message.toStdString() << '\n';
+        return 1;
+    }
+    for (int row = 0; row < 4; ++row)
+    {
+        for (int column = 0; column < 4; ++column)
+        {
+            const float expected = 1000.0f + float(row * 8 + 4) * 2.0f +
+                                   float(column * 8 + 4) * 0.5f;
+            if (!require(grid_result.elevations_m.at(row * 4 + column) == expected,
+                         "Native DEM window interpolated or misaligned source samples"))
+                return 1;
+        }
+    }
+    grid_request.columns = 513;
+    if (!require(terrain_data.analysisGrid(grid_request).status ==
+                     TerrainProviderFetchStatus::UnsupportedAddress,
+                 "Oversized source DEM window must be rejected"))
+        return 1;
+    grid_request.columns = 4;
+
     const TerrainTileAddress address = addressForCoordinate(50.5, 8.5, 14);
     TerrainTileLookupResult result =
         terrain_data.terrainTile(QStringLiteral("copernicus-glo30"), address);
@@ -332,6 +368,17 @@ int main()
     {
         return 1;
     }
+
+    TerrainAnalysisGridRequest offline_grid;
+    offline_grid.dataset = QStringLiteral("copernicus-glo30");
+    offline_grid.bounds = {8.0, 50.9, 8.1, 51.0};
+    offline_grid.columns = 2;
+    offline_grid.rows = 2;
+    const TerrainAnalysisGridResult offline_result =
+        empty_offline_terrain_data.analysisGrid(offline_grid);
+    if (!require(offline_result.status == TerrainProviderFetchStatus::SourceUnavailable,
+                 "Missing source DEM must not trigger downloads in offline mode"))
+        return 1;
 
     result = empty_offline_terrain_data.terrainTile(
         QStringLiteral("copernicus-glo30"), address);

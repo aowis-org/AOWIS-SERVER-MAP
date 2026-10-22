@@ -131,6 +131,10 @@ public:
     QString normalizedTilePath(const QString &dataset,
                                const TerrainTileAddress &address) const;
 
+    // Bulk DEM access for Hydrology. Shared between Map's HTTP and in-process
+    // clients. Never creates a separate provider instance/cache in Hydrology.
+    TerrainAnalysisGridResult analysisGrid(const TerrainAnalysisGridRequest &request) const;
+
     TerrainTileLookupResult terrainTile(const QString &dataset,
                                         const TerrainTileAddress &address) const;
 

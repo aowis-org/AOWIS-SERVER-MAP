@@ -359,17 +359,24 @@ not geographic clipping of provider-native source rasters.
 
 ### Raster cache
 
-On a local cache hit, the server can respond without an upstream request. When
-raster fetching is enabled and a cached tile has become stale, it can perform
-conditional HTTP revalidation using `ETag` or `Last-Modified`; HTTP 304 refreshes
-metadata without downloading the image again. Cache freshness accounts for
-`Cache-Control`, `Expires` and a seven-day fallback when no lifetime is supplied.
-Metadata is stored alongside image tiles as `.http.json` files. Cache entries
-remain usable across transient upstream failures.
+Raster map tiles are **retained indefinitely** once successfully cached. Memory,
+disk, and permanent-data hits are served immediately, including while online;
+there is no time-based invalidation, background refresh, HTTP conditional
+revalidation, or expiration-driven download. Upstream requests occur **only
+for missing tiles**, when 2D downloads are enabled and the provider's zoom and
+geographic download policy permits the request. Existing `.http.json` freshness
+sidecars from older installations are ignored; cached image files remain valid
+and do not need conversion or deletion. The explicit cache-delete API is how
+administrators remove cached tiles to allow fresh copies to be fetched.
 
-**With raster downloading disabled, stale entries are not revalidated** and
-remain servable. Terrain uses separate native-source and normalized-heightfield
-caches; it does not use raster HTTP freshness metadata. Missing tiles outside a
+Responses carrying explicit `Cache-Control: no-store` or `private` directives
+are delivered to the requesting client but are not persisted in the shared
+cache. Check the licensing and caching requirements of your chosen providers;
+retaining cached tiles indefinitely may not be suitable for every third-party
+service. Terrain continues to use separate native-source and normalized-heightfield
+caches and has its own independent upstream download switch.
+
+Missing tiles outside a
 provider's zoom range or allowed coverage are not downloaded. A successful
 HTTP response containing an image of an upstream error cannot always be
 identified automatically, which makes accurate provider zoom limits important.
@@ -456,6 +463,7 @@ not provider UUIDs.
 | `GET /terrain/v1/datasets` | Terrain catalog with zoom, datum and source metadata |
 | `GET /terrain/v1/<dataset>/<z>/<x>/<y>.aowterrain` | Validated normalized terrain tile |
 | `GET /terrain/v1/elevation?latitude=…&longitude=…` | Point elevation; optional `vertical_datum` query |
+| `GET /terrain/v1/analysis/grid?dataset=…&west=…&south=…&east=…&north=…&columns=…&rows=…` | Native-precision elevation window for Hydrology |
 | `DELETE /terrain/v1/cache/<dataset>/<z>/<x-min>/<x-max>/<y-min>/<y-max>` | Delete normalized terrain tiles |
 | `DELETE /terrain/v1/source/<dataset>/<z>/<x-min>/<x-max>/<y-min>/<y-max>` | Delete corresponding provider-native terrain source cells |
 
@@ -508,3 +516,54 @@ reverse proxy and restrict direct backend access. In particular, the
 unauthenticated provider-editing PUT route must not be reachable by untrusted
 clients. Apache examples provide CORS response headers but do not constitute
 API authorization or network isolation.
+
+## Hydrology integration: analysis-grade DEM windows
+
+Map is the single authority for terrain providers, native Copernicus source
+files, cache policy and dataset metadata. Hydrology should **not** maintain a
+separate directory of Copernicus files or reimplement source downloading.
+
+The Map C++ library now exposes:
+
+```cpp
+Aowis::Map::TerrainAnalysisGridRequest request;
+request.dataset = QStringLiteral("copernicus-glo30");
+request.bounds = {8.0, 50.0, 8.01, 50.01}; // west, south, east, north (WGS84)
+request.columns = 32;
+request.rows = 32;
+const Aowis::Map::TerrainAnalysisGridResult grid = map_terrain.analysisGrid(request);
+```
+
+An HTTP deployment uses the equivalent read endpoint:
+
+```text
+GET /terrain/v1/analysis/grid?dataset=copernicus-glo30&west=8&south=50&east=8.01&north=50.01&columns=32&rows=32
+```
+
+For successful requests, the response is `application/vnd.aowis.dem-f32le`,
+containing `rows * columns` **little-endian IEEE754 float32** samples in
+row-major north-to-south order. Each sample is taken from the **original
+Copernicus GeoTIFF pixel containing its cell centre**; neither the 65×65
+renderer format nor bilinear interpolation is used. The requested grid may
+be different from the native GeoTIFF resolution (nearest source-pixel
+sampling); use an analysis grid aligned to the source where possible.
+
+A request covers WGS84 longitude [-180,180], latitude [-85,85], does not cross
+the antimeridian, and is limited to **512 columns × 512 rows**. For larger
+regions, clients request adjacent subwindows whose cell centres exactly match
+a common full-grid geometry. Missing/NoData source cells are quiet NaNs in
+otherwise successful windows; a completely unavailable window returns HTTP
+404. Hydrology detects incomplete input before running its flow algorithms.
+
+Map's normal read-access policy applies to the endpoint, as it does to other
+terrain reads. `TerrainData::analysisGrid()` and HTTP use the **same provider
+implementation**. Copernicus GLO-30 elevations are EGM2008-referenced;
+consult `/terrain/v1/datasets` for vertical-datum metadata. No datum
+conversion is performed by this endpoint. Existing imagery/terrain download
+controls remain independent; `terrain/remote_fetch_enabled=false` prevents
+remote source retrieval while continuing to serve cached GeoTIFFs.
+
+The in-process route is intended for [AOWIS Server Standalone](https://github.com/aowis-org/aowis-server-standalone): it should pass its existing `TerrainData`
+instance to the Hydrology library, not instantiate a second Map server or use
+localhost HTTP. Hydrology's analysis results and job persistence remain
+Hydrology-owned. See the Hydrology repository for its REST and C++ API.

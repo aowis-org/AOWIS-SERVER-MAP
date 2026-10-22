@@ -75,9 +75,6 @@ private:
         QString tile_path;
         QString canonical_key;
         QString response_key;
-        QByteArray etag;
-        QByteArray last_modified;
-        bool revalidation = false;
     };
 
     enum class DownloadScheduleStatus
@@ -97,7 +94,6 @@ private:
     void markDownloadStartedLocked(const QueuedDownload &download);
     void markDownloadFinishedLocked(const QueuedDownload &download);
     bool saveMapTile(const QByteArray &data, const QString &tile_path);
-    bool refreshCachedTile(const QueuedDownload &download);
 
     QString domainRandomizer(const QString &url) const;
 
@@ -120,8 +116,6 @@ private:
     QHash<QString, TileHttpClient *> downloads_active_clients;
     QHash<QString, int> downloads_active_per_origin;
     QSet<QString> downloads_invalidated;
-    QHash<QString, qint64> next_refresh_attempt;
-    QHash<QString, qint64> next_freshness_check;
     QSet<QString> permanent_cached_keys;
     QQueue<QueuedDownload> downloads_queued;
     QSet<QString> downloads_queued_keys;

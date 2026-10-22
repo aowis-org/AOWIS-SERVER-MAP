@@ -78,6 +78,12 @@ if(BUILD_TESTING)
     target_link_libraries(aowis-server-map-provider-limits-test PRIVATE AOWIS::Map)
     add_test(NAME aowis-server-map-provider-limits
              COMMAND aowis-server-map-provider-limits-test)
+    add_executable(aowis-server-map-cache-reuse-test
+        tests/test_map_cache_reuse.cpp
+    )
+    target_link_libraries(aowis-server-map-cache-reuse-test PRIVATE AOWIS::Map)
+    add_test(NAME aowis-server-map-cache-reuse
+             COMMAND aowis-server-map-cache-reuse-test)
     add_executable(aowis-server-map-download-coverage-test
         tests/test_download_coverage.cpp
     )

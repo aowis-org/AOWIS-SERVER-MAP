@@ -51,6 +51,25 @@ struct TerrainGeographicBox
     double north_deg = 0.0;
 };
 
+// Source-precision DEM window sampled at georeferenced cell centres. Map owns
+// providers/cache; clients own their analysis grids. No renderer heightfields.
+struct TerrainAnalysisGridRequest
+{
+    QString dataset;
+    TerrainGeographicBox bounds;
+    int columns = 0;
+    int rows = 0;
+};
+
+struct TerrainAnalysisGridResult
+{
+    TerrainProviderFetchStatus status = TerrainProviderFetchStatus::SourceUnavailable;
+    QVector<float> elevations_m; // north-to-south, row-major; missing samples are NaN
+    TerrainVerticalDatum vertical_datum = TerrainVerticalDatum::Unknown;
+    TerrainDataOrigin origin = TerrainDataOrigin::Unknown;
+    QString error_message;
+};
+
 struct TerrainSourceDeletionResult
 {
     // False when at least one covered source file could not be deleted; the
@@ -76,6 +95,9 @@ public:
                                                  const TerrainTileAddress &address,
                                                  const QString &provider_cache_directory,
                                                  bool allow_remote_fetch) = 0;
+    virtual TerrainAnalysisGridResult fetchAnalysisGrid(
+        const TerrainAnalysisGridRequest &request,
+        const QString &provider_cache_directory, bool allow_remote_fetch) = 0;
     virtual TerrainUpstreamActivity upstreamActivity() const = 0;
     virtual void cancelUpstreamDownloads() = 0;
     // Deletes the provider-native source files of `dataset` (downloaded

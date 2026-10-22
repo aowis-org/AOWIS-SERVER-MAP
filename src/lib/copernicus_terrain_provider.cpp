@@ -641,6 +641,36 @@ public:
         return float(weighted_value);
     }
 
+    // Sample the original GeoTIFF pixel containing this coordinate without
+    // bilinear interpolation. Conditioning/storage analyses must not operate
+    // on elevations interpolated by the renderer's terrain normalization.
+    std::optional<float> sampleNative(double latitude_deg, double longitude_deg)
+    {
+        if (this->fatal_status.has_value())
+            return std::nullopt;
+        const CopernicusSourceAddress address =
+            sourceAddressForCoordinate(latitude_deg, longitude_deg);
+        CopernicusRaster *source_raster = raster(address);
+        if (source_raster == nullptr)
+            return std::nullopt;
+        const int column = std::clamp(
+            int(std::floor((longitude_deg - double(address.west_deg)) *
+                           double(source_raster->pixelWidth()))), 0,
+            source_raster->pixelWidth() - 1);
+        const int row = std::clamp(
+            int(std::floor((double(address.south_deg + 1) - latitude_deg) *
+                           double(source_raster->pixelHeight()))), 0,
+            source_raster->pixelHeight() - 1);
+        QString pixel_error;
+        const std::optional<float> value = source_raster->pixel(column, row, &pixel_error);
+        if (!value.has_value() && !pixel_error.isEmpty())
+        {
+            this->fatal_status = TerrainProviderFetchStatus::SourceReadError;
+            this->fatal_error_message = pixel_error;
+        }
+        return value;
+    }
+
     std::optional<TerrainProviderFetchStatus> fatalStatus() const
     {
         return this->fatal_status;
@@ -936,6 +966,80 @@ TerrainProviderFetchResult CopernicusTerrainProvider::fetchTile(
     result.origin = raster_set.downloadedAnySource()
         ? TerrainDataOrigin::Remote
         : TerrainDataOrigin::Cache;
+    return result;
+}
+
+TerrainAnalysisGridResult CopernicusTerrainProvider::fetchAnalysisGrid(
+    const TerrainAnalysisGridRequest &request,
+    const QString &provider_cache_directory, bool allow_remote_fetch)
+{
+    TerrainAnalysisGridResult result;
+    const TerrainGeographicBox &box = request.bounds;
+    if (!supportsDataset(request.dataset))
+    {
+        result.status = TerrainProviderFetchStatus::UnsupportedDataset;
+        result.error_message = QStringLiteral("Unknown Copernicus terrain dataset");
+        return result;
+    }
+    if (request.columns < 1 || request.columns > 512 ||
+        request.rows < 1 || request.rows > 512 ||
+        !std::isfinite(box.west_deg) || !std::isfinite(box.east_deg) ||
+        !std::isfinite(box.south_deg) || !std::isfinite(box.north_deg) ||
+        box.west_deg < -180.0 || box.east_deg > 180.0 ||
+        box.south_deg < -85.0 || box.north_deg > 85.0 ||
+        box.west_deg >= box.east_deg || box.south_deg >= box.north_deg)
+    {
+        result.status = TerrainProviderFetchStatus::UnsupportedAddress;
+        result.error_message = QStringLiteral("Invalid source raster window (1..512 cells per axis)");
+        return result;
+    }
+    quint64 request_generation = 0;
+    {
+        QMutexLocker locker(&this->upstream_mutex);
+        request_generation = this->upstream_cancel_generation;
+    }
+    CopernicusRasterSet rasters(provider_cache_directory, allow_remote_fetch,
+                               &this->unavailable_source_until,
+                               &this->unavailable_source_mutex,
+                               &this->upstream_mutex,
+                               &this->upstream_active_replies,
+                               &this->upstream_cancel_generation,
+                               request_generation);
+    const double longitude_step = (box.east_deg - box.west_deg) / double(request.columns);
+    const double latitude_step = (box.north_deg - box.south_deg) / double(request.rows);
+    result.elevations_m.resize(request.columns * request.rows);
+    std::size_t valid_cells = 0;
+    for (int row = 0; row < request.rows; ++row)
+    {
+        const double latitude = box.north_deg - (double(row) + 0.5) * latitude_step;
+        for (int column = 0; column < request.columns; ++column)
+        {
+            const double longitude = box.west_deg + (double(column) + 0.5) * longitude_step;
+            const std::optional<float> elevation = rasters.sampleNative(latitude, longitude);
+            result.elevations_m[row * request.columns + column] = elevation.value_or(
+                std::numeric_limits<float>::quiet_NaN());
+            if (elevation.has_value())
+                ++valid_cells;
+            if (rasters.fatalStatus().has_value())
+            {
+                result.status = rasters.fatalStatus().value();
+                result.error_message = rasters.fatalErrorMessage();
+                result.elevations_m.clear();
+                return result;
+            }
+        }
+    }
+    if (valid_cells == 0)
+    {
+        result.status = TerrainProviderFetchStatus::SourceUnavailable;
+        result.error_message = QStringLiteral("No Copernicus DEM coverage for the requested window");
+        result.elevations_m.clear();
+        return result;
+    }
+    result.status = TerrainProviderFetchStatus::Ready;
+    result.vertical_datum = TerrainVerticalDatum::Egm2008;
+    result.origin = rasters.downloadedAnySource()
+        ? TerrainDataOrigin::Remote : TerrainDataOrigin::Cache;
     return result;
 }
 

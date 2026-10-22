@@ -24,6 +24,9 @@ public:
                                          const TerrainTileAddress &address,
                                          const QString &provider_cache_directory,
                                          bool allow_remote_fetch) override;
+    TerrainAnalysisGridResult fetchAnalysisGrid(
+        const TerrainAnalysisGridRequest &request,
+        const QString &provider_cache_directory, bool allow_remote_fetch) override;
     TerrainUpstreamActivity upstreamActivity() const override;
     void cancelUpstreamDownloads() override;
     TerrainSourceDeletionResult deleteSourceData(const QString &dataset,

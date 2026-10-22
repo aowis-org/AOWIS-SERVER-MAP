@@ -16,6 +16,9 @@
 #include <QJsonObject>
 #include <QMutexLocker>
 #include <QUrlQuery>
+#include <QtEndian>
+#include <cstring>
+#include <cmath>
 #include <QtConcurrentRun>
 
 #include <optional>
@@ -655,6 +658,83 @@ void Server::setupRoutes()
     {
         return makeOptionsResponse();
     });
+
+    // Source-grade DEM windows: identical values/semantics to TerrainData::analysisGrid().
+    // No .aowterrain normalization or rendered-tile quantization is involved.
+    this->http.route("/terrain/v1/analysis/grid",
+                     QHttpServerRequest::Method::Get,
+                     [this](const QHttpServerRequest &request) -> QFuture<QHttpServerResponse>
+    {
+        if (!isReadAuthorized(request))
+            return makeReadyResponse(makeUnauthorizedResponse());
+        const QUrlQuery query(request.url());
+        const QStringList names = { QStringLiteral("west"), QStringLiteral("south"),
+                                    QStringLiteral("east"), QStringLiteral("north") };
+        double values[4] = {0.0, 0.0, 0.0, 0.0};
+        bool valid = true;
+        for (int index = 0; index < 4; ++index)
+        {
+            const QString text = query.queryItemValue(names[index]);
+            bool ok = false;
+            values[index] = text.toDouble(&ok);
+            valid = valid && ok && !text.isEmpty() && std::isfinite(values[index]);
+        }
+        bool columns_ok = false;
+        bool rows_ok = false;
+        const int columns = query.queryItemValue(QStringLiteral("columns")).toInt(&columns_ok);
+        const int rows = query.queryItemValue(QStringLiteral("rows")).toInt(&rows_ok);
+        valid = valid && columns_ok && rows_ok &&
+            columns >= 1 && columns <= 512 && rows >= 1 && rows <= 512 &&
+            values[0] >= -180.0 && values[2] <= 180.0 && values[0] < values[2] &&
+            values[1] >= -85.0 && values[3] <= 85.0 && values[1] < values[3];
+        if (!valid)
+        {
+            return makeReadyResponse(QHttpServerResponse(
+                "Invalid grid request; supply WGS84 west,south,east,north and 1..512 columns,rows",
+                QHttpServerResponse::StatusCode::BadRequest));
+        }
+        Aowis::Map::TerrainAnalysisGridRequest grid_request;
+        grid_request.dataset = query.queryItemValue(QStringLiteral("dataset"));
+        if (grid_request.dataset.isEmpty())
+            grid_request.dataset = this->config.terrain_default_dataset;
+        grid_request.bounds = {values[0], values[1], values[2], values[3]};
+        grid_request.columns = columns;
+        grid_request.rows = rows;
+        return QtConcurrent::run([this, grid_request]()
+        {
+            const Aowis::Map::TerrainAnalysisGridResult result =
+                this->terrain_data->analysisGrid(grid_request);
+            if (result.status != Aowis::Map::TerrainProviderFetchStatus::Ready)
+            {
+                const QHttpServerResponse::StatusCode status =
+                    result.status == Aowis::Map::TerrainProviderFetchStatus::UnsupportedDataset ||
+                    result.status == Aowis::Map::TerrainProviderFetchStatus::UnsupportedAddress
+                    ? QHttpServerResponse::StatusCode::BadRequest :
+                    result.status == Aowis::Map::TerrainProviderFetchStatus::SourceUnavailable
+                    ? QHttpServerResponse::StatusCode::NotFound :
+                    result.status == Aowis::Map::TerrainProviderFetchStatus::NetworkError
+                    ? QHttpServerResponse::StatusCode::BadGateway :
+                    QHttpServerResponse::StatusCode::ServiceUnavailable;
+                return QHttpServerResponse(result.error_message, status);
+            }
+            QByteArray bytes;
+            bytes.resize(result.elevations_m.size() * qsizetype(sizeof(float)));
+            for (qsizetype index = 0; index < result.elevations_m.size(); ++index)
+            {
+                const float value = result.elevations_m.at(index);
+                quint32 bits = 0;
+                static_assert(sizeof(value) == sizeof(bits));
+                std::memcpy(&bits, &value, sizeof(bits));
+                qToLittleEndian(bits, bytes.data() + index * qsizetype(sizeof(float)));
+            }
+            return QHttpServerResponse(
+                QByteArrayLiteral("application/vnd.aowis.dem-f32le"), bytes);
+        });
+    });
+
+    this->http.route("/terrain/v1/analysis/grid",
+                     QHttpServerRequest::Method::Options,
+                     []() { return makeOptionsResponse(); });
 
     this->http.route("/terrain/v1/elevation",
                      QHttpServerRequest::Method::Get,
