@@ -22,6 +22,7 @@ namespace
 constexpr int TileMemoryCacheMaximumCostKiB = 256 * 1024;
 constexpr int MaximumActiveDownloadsPerOrigin = 6;
 constexpr int MaximumPendingCacheWrites = 64;
+constexpr qint64 MaximumPendingCacheWriteBytes = 64LL * 1024 * 1024;
 
 QString downloadOrigin(const QString &url)
 {
@@ -532,7 +533,8 @@ void MapTiles::startMapTileDownload(const QueuedDownload &download)
             return;
         }
 
-        if (this->pending_cache_writes >= MaximumPendingCacheWrites)
+        if (this->pending_cache_writes >= MaximumPendingCacheWrites ||
+            qint64(data.size()) > MaximumPendingCacheWriteBytes - this->pending_cache_write_bytes)
         {
             // Bounded overload: return the tile rather than grow an unlimited
             // write backlog. The tile is returned without persistence when saturated.
@@ -547,12 +549,14 @@ void MapTiles::startMapTileDownload(const QueuedDownload &download)
         this->tile_memory_cache.insert(download.canonical_key,
             new QByteArray(data), tileMemoryCacheCostKiB(data));
         ++this->pending_cache_writes;
+        this->pending_cache_write_bytes += qint64(data.size());
         this->cache_writes_pending_keys.insert(download.canonical_key);
         QFutureWatcher<bool> *watcher = new QFutureWatcher<bool>(this);
         connect(watcher, &QFutureWatcher<bool>::finished, this,
                 [this, watcher, download, data]()
         {
             --this->pending_cache_writes;
+            this->pending_cache_write_bytes -= qint64(data.size());
             this->cache_writes_pending_keys.remove(download.canonical_key);
             // Cache deletion may have invalidated the write while it ran.
             // The deleting code waits for writers before removing disk files.

@@ -127,3 +127,12 @@ handlers, even when no HTTP integration test exercises them. The cache-reuse
 test also checks that `tileReady` is not emitted before an admitted asynchronous
 cache write has published its complete file. This is a correctness gate for the
 cache-I/O work; asynchronous cold-cache reads remain a subsequent milestone.
+
+### Phase 03: bounded cache-write memory
+
+Asynchronous map cache persistence is limited to 64 outstanding writes **and**
+64 MiB of queued/in-flight payload bytes. When either budget is exhausted,
+the tile is returned without persistent storage; this protects the HTTP
+event loop against an oversized cache-write backlog. These are independent
+of the 256 MiB memory-tile cache budget. Cold disk cache reads remain
+synchronous and are the next separate migration step.

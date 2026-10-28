@@ -112,6 +112,7 @@ private:
     QNetworkAccessManager *network_manager;
     QThreadPool cache_write_pool;
     int pending_cache_writes = 0;
+    qint64 pending_cache_write_bytes = 0;
     QSet<QString> cache_writes_pending_keys;
     QCache<QString, QByteArray> tile_memory_cache;
     int maximum_active_downloads;
