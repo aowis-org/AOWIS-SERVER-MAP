@@ -22,6 +22,7 @@ namespace
 constexpr int TileMemoryCacheMaximumCostKiB = 256 * 1024;
 constexpr int MaximumActiveDownloadsPerOrigin = 6;
 constexpr int MaximumPendingCacheWrites = 64;
+constexpr int MaximumPendingCacheReads = 64;
 constexpr qint64 MaximumPendingCacheWriteBytes = 64LL * 1024 * 1024;
 
 QString downloadOrigin(const QString &url)
@@ -100,16 +101,19 @@ MapTiles::MapTiles(const QString &cache_base_directory, int maximum_active_downl
       maximum_queued_downloads(qMax(0, maximum_queued_downloads))
 {
     this->cache_write_pool.setMaxThreadCount(2);
+    this->cache_read_pool.setMaxThreadCount(2);
     configureProviders(Aowis::Map::defaultMapProviders(), {}, {});
 }
 
 MapTiles::~MapTiles()
 {
+    this->cache_read_pool.waitForDone();
     this->cache_write_pool.waitForDone();
 }
 
 void MapTiles::setPermanentDataDirectory(const QString &directory)
 {
+    ++this->cache_generation;
     this->permanent_data_directory = directory;
     this->permanent_cached_keys.clear();
 }
@@ -123,6 +127,7 @@ void MapTiles::configureProviders(const QVector<Aowis::Map::MapProvider> &provid
                                   const Aowis::Map::DownloadCoverage &coverage,
                                   const QString &default_coverage)
 {
+    ++this->cache_generation;
     this->configured_providers.clear();
     this->permanent_cached_keys.clear();
     this->provider_cache_paths.clear();
@@ -289,9 +294,106 @@ MapTiles::TileRequestResult MapTiles::getTile(const QString &provider, int z, in
     return { TileRequestStatus::Pending, {} };
 }
 
+MapTiles::TileRequestResult MapTiles::getTileForHttp(
+    const QString &provider, int z, int x, int y, const QString &key)
+{
+    if (!this->configured_providers.contains(provider) || z < 0 || z > 30)
+        return { TileRequestStatus::InvalidRequest, {} };
+    const int tile_count = 1 << z;
+    if (y < 0 || y >= tile_count)
+        return { TileRequestStatus::InvalidRequest, {} };
+    const int wrapped_x = positiveModulo(x, tile_count);
+    const QString canonical_key = canonicalTileKey(provider, z, wrapped_x, y);
+
+    // Known permanent tiles and ordinary RAM hits can return immediately.
+    if (this->permanent_data_directory.isEmpty() ||
+        this->permanent_cached_keys.contains(canonical_key))
+    {
+        const QByteArray *cached = this->tile_memory_cache.object(canonical_key);
+        if (cached != nullptr && !cached->isEmpty())
+            return { TileRequestStatus::Ready, *cached };
+    }
+
+    const QString file_name = QStringLiteral("%1/%2/%3.png").arg(z).arg(wrapped_x).arg(y);
+    QString read_path;
+    bool permanent = false;
+    if (!this->permanent_data_directory.isEmpty())
+    {
+        const QString path = QDir(this->permanent_data_directory).filePath(
+            QStringLiteral("maptiles/%1/%2").arg(provider, file_name));
+        if (QFile::exists(path))
+        {
+            read_path = path;
+            permanent = true;
+        }
+    }
+    if (read_path.isEmpty())
+    {
+        const QByteArray *cached = this->tile_memory_cache.object(canonical_key);
+        if (cached != nullptr && !cached->isEmpty())
+            return { TileRequestStatus::Ready, *cached };
+        const QString path = QDir(providerCachePath(provider)).filePath(file_name);
+        if (QFile::exists(path)) read_path = path;
+    }
+
+    // Missing files follow the established download/coverage path unchanged.
+    if (read_path.isEmpty()) return getTile(provider, z, x, y, key);
+
+    // Coalesce disk reads for the same tile. Each HTTP request retains its own
+    // response key; the first worker fans out completion to all requesters.
+    const QString read_key = canonical_key + QLatin1Char(':') +
+        QString::number(this->cache_generation);
+    QHash<QString, QStringList>::iterator existing = this->cache_reads_pending.find(read_key);
+    if (existing != this->cache_reads_pending.end())
+    {
+        existing.value().append(key);
+        return { TileRequestStatus::Pending, {} };
+    }
+    if (this->cache_reads_pending.size() >= MaximumPendingCacheReads)
+        return { TileRequestStatus::ServerBusy, {} };
+
+    this->cache_reads_pending.insert(read_key, QStringList{key});
+    const quint64 generation = this->cache_generation;
+    QFutureWatcher<QByteArray> *watcher = new QFutureWatcher<QByteArray>(this);
+    connect(watcher, &QFutureWatcher<QByteArray>::finished, this,
+            [this, watcher, read_key, canonical_key, generation, permanent, provider, z, wrapped_x, y]()
+    {
+        const QStringList request_keys = this->cache_reads_pending.take(read_key);
+        const QByteArray data = watcher->result();
+        watcher->deleteLater();
+        if (generation == this->cache_generation && !data.isEmpty())
+        {
+            this->tile_memory_cache.insert(canonical_key,
+                new QByteArray(data), tileMemoryCacheCostKiB(data));
+            if (permanent) this->permanent_cached_keys.insert(canonical_key);
+            for (const QString &response_key : request_keys) emit tileReady(response_key, data);
+            return;
+        }
+        // A file disappeared, was empty, or provider/cache configuration changed.
+        // Re-evaluate the request on the owning thread; never publish stale bytes.
+        for (const QString &response_key : request_keys)
+        {
+            const TileRequestResult result = getTile(provider, z, wrapped_x, y, response_key);
+            if (result.status == TileRequestStatus::Ready)
+                emit tileReady(response_key, result.data);
+            else if (result.status == TileRequestStatus::InvalidRequest ||
+                     result.status == TileRequestStatus::ServerBusy)
+                emit tileFailed(response_key, TileFailureReason::UpstreamError);
+        }
+    });
+    watcher->setFuture(QtConcurrent::run(&this->cache_read_pool, [read_path]()
+    {
+        QFile file(read_path);
+        return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
+    }));
+    return { TileRequestStatus::Pending, {} };
+}
+
 int MapTiles::deleteTiles(const QString &provider, int zoom, int tile_x_min, int tile_x_max,
                           int tile_y_min, int tile_y_max)
 {
+    ++this->cache_generation;
+    this->cache_read_pool.waitForDone();
     // Serialize destructive cache maintenance against outstanding atomic writes.
     // Cache deletion is an administrative operation, not a tile hot path.
     this->cache_write_pool.waitForDone();

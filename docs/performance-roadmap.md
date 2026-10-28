@@ -136,3 +136,21 @@ the tile is returned without persistent storage; this protects the HTTP
 event loop against an oversized cache-write backlog. These are independent
 of the 256 MiB memory-tile cache budget. Cold disk cache reads remain
 synchronous and are the next separate migration step.
+
+### Phase 03: asynchronous cold HTTP cache reads
+
+The HTTP tile endpoint now calls `MapTiles::getTileForHttp()`. Warm RAM
+hits return immediately; established cold disk hits use a dedicated two-worker
+read pool. Up to 64 unique cold reads can be outstanding; simultaneous
+requests for the same canonical tile share one disk read. The original
+`getTile()` API remains synchronous for existing native callers and tests.
+
+Files are read in a worker, but cache publication, signal delivery and network
+fallback remain in the owning Qt event-loop thread. A configuration/deletion
+generation prevents publishing file contents obtained from an obsolete cache
+configuration. When the read queue is saturated the HTTP route returns its
+existing busy response. Missing paths still follow the existing download path.
+
+**Follow-up:** move provider cache-path metadata initialization and permanent
+cache existence probes off the event loop as well, and evaluate byte-budgeted
+read admission under representative large-file workloads.

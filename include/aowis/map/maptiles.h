@@ -14,6 +14,7 @@
 #include <QSet>
 #include <QThreadPool>
 #include <QString>
+#include <QStringList>
 
 class TileHttpClient;
 
@@ -65,6 +66,8 @@ public:
                             const QString &default_coverage);
 
     TileRequestResult getTile(const QString &provider, int z, int x, int y, const QString &key);
+    // HTTP path: offload established cold disk hits without occupying the event loop.
+    TileRequestResult getTileForHttp(const QString &provider, int z, int x, int y, const QString &key);
     int deleteTiles(const QString &provider, int zoom, int tile_x_min, int tile_x_max,
                     int tile_y_min, int tile_y_max);
     UpstreamActivity upstreamActivity() const;
@@ -111,6 +114,9 @@ private:
     QString default_coverage;
     QNetworkAccessManager *network_manager;
     QThreadPool cache_write_pool;
+    QThreadPool cache_read_pool;
+    QHash<QString, QStringList> cache_reads_pending;
+    quint64 cache_generation = 0;
     int pending_cache_writes = 0;
     qint64 pending_cache_write_bytes = 0;
     QSet<QString> cache_writes_pending_keys;

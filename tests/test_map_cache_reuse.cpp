@@ -62,6 +62,44 @@ int main(int argc, char **argv)
     // contact public tile servers.
     providers.first().url_template = QStringLiteral("http://127.0.0.1:1/{z}/{x}/{y}.png");
 
+    // HTTP cold-cache path must complete asynchronously, coalescing concurrent
+    // disk reads and preserving each request's response key.
+    {
+        MapTiles async_reader(cache.path(), 2, 8);
+        async_reader.configureProviders(providers, {}, {});
+        QByteArray first_result;
+        QByteArray second_result;
+        QEventLoop read_loop;
+        QTimer read_timeout;
+        read_timeout.setSingleShot(true);
+        QObject::connect(&read_timeout, &QTimer::timeout, &read_loop, &QEventLoop::quit);
+        QObject::connect(&async_reader, &MapTiles::tileReady, &read_loop,
+            [&read_loop, &first_result, &second_result](const QString &key, const QByteArray &data)
+        {
+            if (key == QStringLiteral("async-one")) first_result = data;
+            if (key == QStringLiteral("async-two")) second_result = data;
+            if (!first_result.isEmpty() && !second_result.isEmpty()) read_loop.quit();
+        });
+        const MapTiles::TileRequestResult first_async =
+            async_reader.getTileForHttp(provider_id, 6, 31, 20, QStringLiteral("async-one"));
+        const MapTiles::TileRequestResult second_async =
+            async_reader.getTileForHttp(provider_id, 6, 31, 20, QStringLiteral("async-two"));
+        require(first_async.status == MapTiles::TileRequestStatus::Pending &&
+                second_async.status == MapTiles::TileRequestStatus::Pending,
+                "HTTP cold disk reads should be pending without blocking the caller");
+        read_timeout.start(5000);
+        read_loop.exec();
+        require(first_result == old_bytes && second_result == old_bytes,
+                "Asynchronous cold disk read did not complete both requests");
+        const MapTiles::TileRequestResult warm =
+            async_reader.getTileForHttp(provider_id, 6, 31, 20, QStringLiteral("async-warm"));
+        require(warm.status == MapTiles::TileRequestStatus::Ready && warm.data == old_bytes,
+                "Asynchronous disk completion did not warm the RAM cache");
+        require(async_reader.upstreamActivity().active == 0 &&
+                async_reader.upstreamActivity().queued == 0,
+                "Asynchronous disk hit unexpectedly contacted upstream");
+    }
+
     // A cold disk hit with expired metadata must not even schedule a download.
     MapTiles existing(cache.path(), 2, 8);
     existing.configureProviders(providers, {}, {});

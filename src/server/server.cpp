@@ -922,7 +922,7 @@ void Server::setupRoutes()
                 QStringLiteral("cache-first"), Qt::CaseInsensitive) == 0
             || request.value("x-aowis-tile-delivery").compare(
                 QByteArrayLiteral("cache-first"), Qt::CaseInsensitive) == 0;
-        const MapTiles::TileRequestResult tile_result = this->maptiles->getTile(provider, z, x, y, key);
+        const MapTiles::TileRequestResult tile_result = this->maptiles->getTileForHttp(provider, z, x, y, key);
 
         if (tile_result.status == MapTiles::TileRequestStatus::Ready)
             return makeReadyResponse(QHttpServerResponse("image/png", tile_result.data));
