@@ -192,3 +192,16 @@ write-pool drain before filesystem removal to prevent a deleted tile from
 reappearing. This is a limited optimization rather than fully asynchronous
 delete handling: overlapping deletion may still block while unrelated
 workers finish, and the filesystem traversal itself remains synchronous.
+
+## Cache write/delete coordination
+
+Cache writes now carry independent synchronization states. Deletion marks only
+writes overlapping the requested tile range as invalidated and synchronizes
+with their per-write mutexes before deleting the files. In-flight writes that
+have already begun publishing complete before deletion removes their files;
+queued invalidated writes skip publication. This replaces the global cache
+write-pool `waitForDone()` barrier, avoiding waits on unrelated writes.
+Deletion may still wait for an *overlapping* write in progress; making that
+operation fully nonblocking requires an asynchronous deletion API and distinct
+HTTP completion semantics. Test this behavior under heavy write/delete traffic
+before considering it production-qualified.

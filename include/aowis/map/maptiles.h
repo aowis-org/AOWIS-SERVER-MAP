@@ -11,6 +11,8 @@
 #include <QMutex>
 #include <QNetworkAccessManager>
 #include <QQueue>
+#include <QSharedPointer>
+#include <atomic>
 #include <QSet>
 #include <QThreadPool>
 #include <QString>
@@ -74,6 +76,12 @@ public:
     void cancelUpstreamDownloads();
 
 private:
+    struct CacheWriteState
+    {
+        QMutex mutex;
+        std::atomic_bool invalidated{false};
+    };
+
     struct QueuedDownload
     {
         QString url;
@@ -121,6 +129,7 @@ private:
     int pending_cache_writes = 0;
     qint64 pending_cache_write_bytes = 0;
     QSet<QString> cache_writes_pending_keys;
+    QHash<QString, QSharedPointer<CacheWriteState>> cache_write_states;
     QCache<QString, QByteArray> tile_memory_cache;
     int maximum_active_downloads;
     int maximum_queued_downloads;

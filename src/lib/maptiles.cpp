@@ -434,33 +434,36 @@ int MapTiles::deleteTiles(const QString &provider, int zoom, int tile_x_min, int
     // They only read independent file paths; their completion callback checks
     // this generation before publishing bytes or retrying a remote request.
     ++this->cache_generation;
-    // Only overlapping writes can recreate files inside the deletion range.
-    // Writes to unrelated tiles must not stall this administrative request.
-    // The pending-key set is maintained on the owning Qt thread, so the
-    // decision cannot race a newly scheduled write until this method returns.
-    bool overlapping_write = false;
-    for (const QString &write_key : this->cache_writes_pending_keys)
+    // Invalidate only overlapping writes. A worker holds its tile's mutex
+    // while publishing with QSaveFile; once we acquire and release that
+    // mutex, an already-running write has finished. Queued workers see the
+    // invalidation marker and must not publish after deletion.
+    QList<QSharedPointer<CacheWriteState>> overlapping_writes;
+    for (QHash<QString, QSharedPointer<CacheWriteState>>::const_iterator it =
+             this->cache_write_states.cbegin();
+         it != this->cache_write_states.cend(); ++it)
     {
         QString write_provider;
         int write_zoom = 0;
         int write_x = 0;
         int write_y = 0;
-        if (!parseCanonicalTileKey(write_key, &write_provider, &write_zoom,
+        if (!parseCanonicalTileKey(it.key(), &write_provider, &write_zoom,
                                    &write_x, &write_y))
             continue;
         if (write_provider == provider && write_zoom == zoom &&
             write_y >= bounded_y_min && write_y <= bounded_y_max &&
             tileXInsideRange(write_x, tile_count, tile_x_min, tile_x_max))
         {
-            overlapping_write = true;
-            break;
+            it.value()->invalidated.store(true, std::memory_order_release);
+            overlapping_writes.append(it.value());
         }
     }
-    // Preserve the strict write-before-delete guarantee for overlapping
-    // tiles. This remaining wait will be removed when writes and deletion
-    // have a per-tile coordination mechanism.
-    if (overlapping_write)
-        this->cache_write_pool.waitForDone();
+    // This waits only for writes that actually overlap the requested tiles,
+    // never for unrelated queued work. New workers skip invalidated writes.
+    for (const QSharedPointer<CacheWriteState> &state : overlapping_writes)
+    {
+        QMutexLocker locker(&state->mutex);
+    }
 
     {
         QMutexLocker locker(&this->downloads_mutex);
@@ -705,13 +708,17 @@ void MapTiles::startMapTileDownload(const QueuedDownload &download)
         ++this->pending_cache_writes;
         this->pending_cache_write_bytes += qint64(data.size());
         this->cache_writes_pending_keys.insert(download.canonical_key);
+        const QSharedPointer<CacheWriteState> write_state =
+            QSharedPointer<CacheWriteState>::create();
+        this->cache_write_states.insert(download.canonical_key, write_state);
         QFutureWatcher<bool> *watcher = new QFutureWatcher<bool>(this);
         connect(watcher, &QFutureWatcher<bool>::finished, this,
-                [this, watcher, download, data]()
+                [this, watcher, download, data, write_state]()
         {
             --this->pending_cache_writes;
             this->pending_cache_write_bytes -= qint64(data.size());
             this->cache_writes_pending_keys.remove(download.canonical_key);
+            this->cache_write_states.remove(download.canonical_key);
             // Cache deletion may have invalidated the write while it ran.
             // The deleting code waits for writers before removing disk files.
             {
@@ -724,8 +731,11 @@ void MapTiles::startMapTileDownload(const QueuedDownload &download)
             watcher->deleteLater();
         });
         watcher->setFuture(QtConcurrent::run(&this->cache_write_pool,
-            [data, tile_path = download.tile_path]()
+            [data, tile_path = download.tile_path, write_state]()
         {
+            QMutexLocker locker(&write_state->mutex);
+            if (write_state->invalidated.load(std::memory_order_acquire))
+                return true; // deletion intentionally discarded persistence
             return MapTiles::saveMapTile(data, tile_path);
         }));
     });
