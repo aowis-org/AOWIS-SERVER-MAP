@@ -23,6 +23,9 @@ public:
     bool supportsDataset(const QString &dataset) const override;
     bool supportsAddress(const QString &dataset,
                          const TerrainTileAddress &address) const override;
+    TerrainProviderFetchResult acquireTileSources(
+        const QString &dataset, const TerrainTileAddress &address,
+        const QString &provider_cache_directory, bool allow_remote_fetch) override;
     TerrainProviderFetchResult fetchTile(const QString &dataset,
                                          const TerrainTileAddress &address,
                                          const QString &provider_cache_directory,

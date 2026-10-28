@@ -429,17 +429,14 @@ QFuture<QHttpServerResponse> Server::submitTerrainTile(
     if (existing)
         return future;
 
-    // A normalized cache hit never waits behind slow upstream transfers.
-    // A cache miss runs on the separately bounded remote-capable pool.
-    // This is workload isolation, not yet a split acquisition/CPU pipeline.
-    QThreadPool *execution_pool = remote_job
-        ? &this->terrain_remote_pool : &this->terrain_worker_pool;
-    execution_pool->start([this, key, dataset, address, remote_job]()
+    // Split missing-source acquisition from CPU normalization. The remote
+    // worker *enqueues* CPU processing and returns; it never waits on it.
+    const std::function<void()> process_tile = [this, key, dataset, address, remote_job]()
     {
         Aowis::Map::TerrainTileLookupResult result;
         try
         {
-            result = this->terrain_data->terrainTile(dataset, address);
+            result = this->terrain_data->terrainTile(dataset, address, !remote_job);
         }
         catch (...)
         {
@@ -447,8 +444,6 @@ QFuture<QHttpServerResponse> Server::submitTerrainTile(
             result.error_message = QStringLiteral("Terrain processing failed");
         }
         this->terrain_admission.release();
-        if (remote_job)
-            this->terrain_remote_admission.release();
         QMetaObject::invokeMethod(this, [this, key, result = std::move(result)]() mutable
         {
             const PendingPromises waiters = this->pending_terrain_tiles.take(key);
@@ -456,14 +451,51 @@ QFuture<QHttpServerResponse> Server::submitTerrainTile(
             for (const PendingPromise &waiter : waiters)
             {
                 if (result.status == Aowis::Map::TerrainTileLookupStatus::Ready)
-                {
                     waiter->addResult(QHttpServerResponse(
                         Aowis::Map::terrainTileMimeType().toUtf8(), result.data));
-                }
                 else
-                {
                     waiter->addResult(makeTerrainTileErrorResponse(result));
-                }
+                waiter->finish();
+            }
+        }, Qt::QueuedConnection);
+    };
+    if (!remote_job)
+    {
+        this->terrain_worker_pool.start(process_tile);
+        return future;
+    }
+    this->terrain_remote_pool.start([this, key, dataset, address, process_tile]()
+    {
+        Aowis::Map::TerrainProviderFetchResult acquired;
+        try
+        {
+            acquired = this->terrain_data->acquireTileSources(dataset, address);
+        }
+        catch (...)
+        {
+            acquired.status = Aowis::Map::TerrainProviderFetchStatus::NetworkError;
+            acquired.error_message = QStringLiteral("Terrain source acquisition failed");
+        }
+        this->terrain_remote_admission.release();
+        if (acquired.status == Aowis::Map::TerrainProviderFetchStatus::Ready)
+        {
+            this->terrain_worker_pool.start(process_tile);
+            return;
+        }
+        this->terrain_admission.release();
+        Aowis::Map::TerrainTileLookupResult result;
+        result.status = acquired.status == Aowis::Map::TerrainProviderFetchStatus::Cancelled ||
+                        acquired.status == Aowis::Map::TerrainProviderFetchStatus::NetworkError
+            ? Aowis::Map::TerrainTileLookupStatus::RemoteFetchError
+            : Aowis::Map::TerrainTileLookupStatus::ProviderError;
+        result.error_message = acquired.error_message;
+        QMetaObject::invokeMethod(this, [this, key, result = std::move(result)]() mutable
+        {
+            const PendingPromises waiters = this->pending_terrain_tiles.take(key);
+            this->pending_terrain_tile_count -= waiters.size();
+            for (const PendingPromise &waiter : waiters)
+            {
+                waiter->addResult(makeTerrainTileErrorResponse(result));
                 waiter->finish();
             }
         }, Qt::QueuedConnection);

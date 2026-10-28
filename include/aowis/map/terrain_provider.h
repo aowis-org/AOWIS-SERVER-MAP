@@ -91,6 +91,20 @@ public:
     virtual bool supportsDataset(const QString &dataset) const = 0;
     virtual bool supportsAddress(const QString &dataset,
                                  const TerrainTileAddress &address) const = 0;
+    // Acquisition-only stage for a normalized tile. Implementations may fetch
+    // provider-native sources but must not normalize the tile here.
+    virtual TerrainProviderFetchResult acquireTileSources(
+        const QString &dataset, const TerrainTileAddress &address,
+        const QString &provider_cache_directory, bool allow_remote_fetch)
+    {
+        Q_UNUSED(dataset);
+        Q_UNUSED(address);
+        Q_UNUSED(provider_cache_directory);
+        Q_UNUSED(allow_remote_fetch);
+        TerrainProviderFetchResult result;
+        result.status = TerrainProviderFetchStatus::Ready;
+        return result;
+    }
     virtual TerrainProviderFetchResult fetchTile(const QString &dataset,
                                                  const TerrainTileAddress &address,
                                                  const QString &provider_cache_directory,

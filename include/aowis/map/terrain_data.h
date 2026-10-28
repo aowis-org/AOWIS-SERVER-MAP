@@ -139,7 +139,11 @@ public:
     TerrainAnalysisGridResult analysisGrid(const TerrainAnalysisGridRequest &request) const;
 
     TerrainTileLookupResult terrainTile(const QString &dataset,
-                                        const TerrainTileAddress &address) const;
+                                        const TerrainTileAddress &address,
+                                        bool allow_remote_fetch = true) const;
+    // Network-only stage used before CPU normalization for uncached tiles.
+    TerrainProviderFetchResult acquireTileSources(
+        const QString &dataset, const TerrainTileAddress &address) const;
 
     TerrainElevationLookupResult sampleElevation(
         const QString &dataset,
@@ -187,7 +191,8 @@ private:
     TerrainTileLookupResult readNormalizedTile(const QString &dataset,
                                                const TerrainTileAddress &address) const;
     TerrainTileLookupResult fetchAndStoreNormalizedTile(const QString &dataset,
-                                                        const TerrainTileAddress &address) const;
+                                                        const TerrainTileAddress &address,
+                                                        bool allow_remote_fetch) const;
 
     Config config;
     StoragePaths storage_paths;

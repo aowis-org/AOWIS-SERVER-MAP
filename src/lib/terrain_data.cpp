@@ -584,8 +584,30 @@ TerrainAnalysisGridResult TerrainData::analysisGrid(
     return result;
 }
 
+TerrainProviderFetchResult TerrainData::acquireTileSources(
+    const QString &dataset, const TerrainTileAddress &address) const
+{
+    TerrainProviderFetchResult result;
+    result.status = TerrainProviderFetchStatus::Ready;
+    if (!this->initialized || !this->config.remote_fetch_enabled ||
+        !this->config.download_coverage.permitsTile(
+            this->config.coverage_profile, address.zoom, address.x, address.y))
+        return result;
+    // A normalized cache hit requires no provider-native acquisition.
+    if (QFileInfo::exists(normalizedTilePath(dataset, address)))
+        return result;
+    for (const std::unique_ptr<TerrainProvider> &provider : this->providers)
+    {
+        if (provider->supportsDataset(dataset) && provider->supportsAddress(dataset, address))
+            return provider->acquireTileSources(dataset, address,
+                                                this->storage_paths.providers, true);
+    }
+    return result;
+}
+
 TerrainTileLookupResult TerrainData::terrainTile(const QString &dataset,
-                                                  const TerrainTileAddress &address) const
+                                                  const TerrainTileAddress &address,
+                                                  bool allow_remote_fetch) const
 {
     TerrainTileLookupResult result;
 
@@ -659,7 +681,7 @@ TerrainTileLookupResult TerrainData::terrainTile(const QString &dataset,
     const TerrainTileLookupResult locked_corrupt_result = result;
 
     const TerrainTileLookupResult fetched_result =
-        fetchAndStoreNormalizedTile(dataset, address);
+        fetchAndStoreNormalizedTile(dataset, address, allow_remote_fetch);
     if (fetched_result.status == TerrainTileLookupStatus::Ready)
         return fetched_result;
 
@@ -748,7 +770,8 @@ TerrainTileLookupResult TerrainData::readNormalizedTile(
 }
 
 TerrainTileLookupResult TerrainData::fetchAndStoreNormalizedTile(
-    const QString &dataset, const TerrainTileAddress &address) const
+    const QString &dataset, const TerrainTileAddress &address,
+    bool allow_remote_fetch) const
 {
     TerrainTileLookupResult result;
     bool dataset_supported = false;
@@ -766,7 +789,7 @@ TerrainTileLookupResult TerrainData::fetchAndStoreNormalizedTile(
         address_supported = true;
         const TerrainProviderFetchResult provider_result =
             provider->fetchTile(dataset, address, this->storage_paths.providers,
-                                this->config.remote_fetch_enabled &&
+                                allow_remote_fetch && this->config.remote_fetch_enabled &&
                                 this->config.download_coverage.permitsTile(
                                     this->config.coverage_profile, address.zoom,
                                     address.x, address.y));

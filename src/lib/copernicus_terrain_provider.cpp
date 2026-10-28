@@ -1094,6 +1094,72 @@ bool CopernicusTerrainProvider::supportsAddress(const QString &dataset,
            address.zoom <= CopernicusMaximumNormalizedZoom;
 }
 
+TerrainProviderFetchResult CopernicusTerrainProvider::acquireTileSources(
+    const QString &dataset, const TerrainTileAddress &address,
+    const QString &provider_cache_directory, bool allow_remote_fetch)
+{
+    TerrainProviderFetchResult result;
+    result.status = TerrainProviderFetchStatus::Ready;
+    if (!supportsAddress(dataset, address) || !allow_remote_fetch)
+        return result;
+
+    quint64 request_generation = 0;
+    {
+        QMutexLocker locker(&this->upstream_mutex);
+        request_generation = this->upstream_cancel_generation;
+    }
+    // The tile spans a monotonic geographic rectangle. A one-pixel margin
+    // conservatively includes neighbouring source cells for interpolation.
+    double north_deg = 0.0;
+    double west_deg = 0.0;
+    double south_deg = 0.0;
+    double east_deg = 0.0;
+    coordinateForNormalizedGridSample(address, 0, 0, &north_deg, &west_deg);
+    coordinateForNormalizedGridSample(address, TerrainTileCellCount,
+                                      TerrainTileCellCount, &south_deg, &east_deg);
+    constexpr double pixel_margin_deg = 1.0 / 3600.0;
+    QHash<QString, CopernicusSourceAddress> source_addresses;
+    const int south = sourceSouthForLatitude(
+        std::max(-90.0, south_deg - pixel_margin_deg));
+    const int north = sourceSouthForLatitude(
+        std::min(90.0, north_deg + pixel_margin_deg));
+    const int west = sourceWestForLongitude(
+        std::max(-180.0, west_deg - pixel_margin_deg));
+    const int east = sourceWestForLongitude(
+        std::min(180.0, east_deg + pixel_margin_deg));
+    for (int latitude = south; latitude <= north; ++latitude)
+    {
+        for (int longitude = west; longitude <= east; ++longitude)
+        {
+            const CopernicusSourceAddress source { latitude, longitude };
+            source_addresses.insert(sourceAddressKey(source), source);
+        }
+    }
+    for (const CopernicusSourceAddress &source : std::as_const(source_addresses))
+    {
+        const SourceLoadResult acquired = downloadSourceTile(
+            provider_cache_directory, source, true, &this->upstream_mutex,
+            &this->upstream_active_replies, &this->upstream_cancel_generation,
+            request_generation, this->connect_timeout_ms, this->inactivity_timeout_ms,
+            this->download_deadline_ms);
+        if (acquired.status == SourceLoadStatus::Cancelled ||
+            acquired.status == SourceLoadStatus::NetworkError ||
+            acquired.status == SourceLoadStatus::ReadError)
+        {
+            result.status = acquired.status == SourceLoadStatus::Cancelled
+                ? TerrainProviderFetchStatus::Cancelled
+                : acquired.status == SourceLoadStatus::NetworkError
+                    ? TerrainProviderFetchStatus::NetworkError
+                    : TerrainProviderFetchStatus::SourceReadError;
+            result.error_message = acquired.error_message;
+            return result;
+        }
+        // Missing upstream cells are allowed: the CPU stage produces NoData
+        // where necessary, just as the original synchronous provider did.
+    }
+    return result;
+}
+
 TerrainProviderFetchResult CopernicusTerrainProvider::fetchTile(
     const QString &dataset, const TerrainTileAddress &address,
     const QString &provider_cache_directory, bool allow_remote_fetch)
