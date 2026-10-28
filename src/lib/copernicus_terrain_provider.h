@@ -15,6 +15,9 @@ namespace Aowis::Map
 class CopernicusTerrainProvider final : public TerrainProvider
 {
 public:
+    explicit CopernicusTerrainProvider(int connect_timeout_seconds = 30,
+                                      int inactivity_timeout_seconds = 120,
+                                      int download_deadline_seconds = 1800);
     QString providerId() const override;
     QVector<TerrainDatasetInfo> datasets() const override;
     bool supportsDataset(const QString &dataset) const override;
@@ -34,6 +37,9 @@ public:
                                                  const QString &provider_cache_directory) override;
 
 private:
+    const int connect_timeout_ms;
+    const int inactivity_timeout_ms;
+    const int download_deadline_ms;
     QHash<QString, QDateTime> unavailable_source_until;
     QMutex unavailable_source_mutex;
     mutable QMutex upstream_mutex;

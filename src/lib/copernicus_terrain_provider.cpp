@@ -35,9 +35,7 @@ namespace
 constexpr int CopernicusMinimumNormalizedZoom = 8;
 constexpr int CopernicusMaximumNormalizedZoom = 14;
 constexpr double CopernicusNominalResolutionM = 30.0;
-constexpr int RemoteTransferTimeoutMs = 120000;
-// Absolute bound even when a peer sends data often enough to reset Qt's inactivity timer.
-constexpr int RemoteDownloadDeadlineMs = 120000;
+// Timeouts are configured per provider instance to accommodate slow connections.
 constexpr int ProviderSourceLockTimeoutMs = 180000;
 constexpr int ProviderSourceStaleLockMs = 10 * 60 * 1000;
 constexpr qint64 MaximumSourceDownloadBytes = 256LL * 1024LL * 1024LL;
@@ -159,7 +157,9 @@ SourceLoadResult downloadSourceTile(const QString &provider_cache_directory,
                                     QMutex *upstream_mutex,
                                     QSet<QNetworkReply *> *upstream_active_replies,
                                     quint64 *upstream_cancel_generation,
-                                    quint64 request_cancel_generation)
+                                    quint64 request_cancel_generation,
+                                    int connect_timeout_ms, int inactivity_timeout_ms,
+                                    int download_deadline_ms)
 {
     SourceLoadResult result;
     result.path = sourceTileCachePath(provider_cache_directory, address);
@@ -270,7 +270,7 @@ SourceLoadResult downloadSourceTile(const QString &provider_cache_directory,
     QNetworkRequest request(sourceTileUrl(address));
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
                          QNetworkRequest::NoLessSafeRedirectPolicy);
-    request.setTransferTimeout(RemoteTransferTimeoutMs);
+    request.setTransferTimeout(inactivity_timeout_ms);
 #ifdef Q_OS_WIN
     // Keep the Qt 6.7.0 Windows network path on HTTP/1.1 for the same reason
     // as raster tile fetching: avoid HTTP/2 replies that can remain unfinished
@@ -291,6 +291,19 @@ SourceLoadResult downloadSourceTile(const QString &provider_cache_directory,
         }
     }
     QEventLoop event_loop;
+    QTimer connection_deadline;
+    connection_deadline.setSingleShot(true);
+    bool connection_expired = false;
+    QObject::connect(&connection_deadline, &QTimer::timeout, &event_loop,
+                     [&connection_expired, reply]()
+    {
+        connection_expired = true;
+        reply->abort();
+    });
+    QObject::connect(reply, &QNetworkReply::metaDataChanged, &connection_deadline,
+                     &QTimer::stop);
+    QObject::connect(reply, &QNetworkReply::downloadProgress, &connection_deadline,
+                     &QTimer::stop);
     QTimer download_deadline;
     download_deadline.setSingleShot(true);
     bool deadline_expired = false;
@@ -323,9 +336,11 @@ SourceLoadResult downloadSourceTile(const QString &provider_cache_directory,
         }
     });
     QObject::connect(reply, &QNetworkReply::finished, &event_loop, &QEventLoop::quit);
-    download_deadline.start(RemoteDownloadDeadlineMs);
+    connection_deadline.start(connect_timeout_ms);
+    download_deadline.start(download_deadline_ms);
     if (!reply->isFinished())
         event_loop.exec();
+    connection_deadline.stop();
     download_deadline.stop();
 
     bool canceled = false;
@@ -364,12 +379,14 @@ SourceLoadResult downloadSourceTile(const QString &provider_cache_directory,
     const QUrl request_url = reply->url();
     reply->deleteLater();
 
-    if (deadline_expired)
+    if (connection_expired || deadline_expired)
     {
         output.cancelWriting();
         result.status = SourceLoadStatus::NetworkError;
-        result.error_message = QStringLiteral("Copernicus upstream download exceeded the %1-second deadline: %2")
-                                   .arg(RemoteDownloadDeadlineMs / 1000)
+        result.error_message = QStringLiteral("Copernicus upstream download exceeded the %1-second %2 timeout: %3")
+                                   .arg((connection_expired ? connect_timeout_ms : download_deadline_ms) / 1000)
+                                   .arg(connection_expired ? QStringLiteral("connection")
+                                                           : QStringLiteral("overall"))
                                    .arg(request_url.toString());
         return result;
     }
@@ -642,7 +659,9 @@ public:
                         QHash<QString, QDateTime> *unavailable_source_until,
                         QMutex *unavailable_source_mutex, QMutex *upstream_mutex,
                         QSet<QNetworkReply *> *upstream_active_replies,
-                        quint64 *upstream_cancel_generation, quint64 request_cancel_generation)
+                        quint64 *upstream_cancel_generation, quint64 request_cancel_generation,
+                        int connect_timeout_ms, int inactivity_timeout_ms,
+                        int download_deadline_ms)
         : provider_cache_directory(provider_cache_directory),
           allow_remote_fetch(allow_remote_fetch),
           unavailable_source_until(unavailable_source_until),
@@ -650,7 +669,10 @@ public:
           upstream_mutex(upstream_mutex),
           upstream_active_replies(upstream_active_replies),
           upstream_cancel_generation(upstream_cancel_generation),
-          request_cancel_generation(request_cancel_generation)
+          request_cancel_generation(request_cancel_generation),
+          connect_timeout_ms(connect_timeout_ms),
+          inactivity_timeout_ms(inactivity_timeout_ms),
+          download_deadline_ms(download_deadline_ms)
     {
     }
 
@@ -779,7 +801,9 @@ private:
                                this->allow_remote_fetch, this->upstream_mutex,
                                this->upstream_active_replies,
                                this->upstream_cancel_generation,
-                               this->request_cancel_generation);
+                               this->request_cancel_generation,
+                               this->connect_timeout_ms, this->inactivity_timeout_ms,
+                               this->download_deadline_ms);
         if (source_result.status == SourceLoadStatus::Unavailable)
         {
             this->unavailable_sources.insert(key);
@@ -874,6 +898,9 @@ private:
     QSet<QNetworkReply *> *upstream_active_replies = nullptr;
     quint64 *upstream_cancel_generation = nullptr;
     quint64 request_cancel_generation = 0;
+    int connect_timeout_ms = 30000;
+    int inactivity_timeout_ms = 120000;
+    int download_deadline_ms = 1800000;
     QHash<QString, CopernicusRaster *> rasters;
     std::vector<std::unique_ptr<CopernicusRaster>> owned_rasters;
     QSet<QString> unavailable_sources;
@@ -895,6 +922,15 @@ void coordinateForNormalizedGridSample(const TerrainTileAddress &address,
     const double mercator_y = std::numbers::pi * (1.0 - 2.0 * tile_y / tile_count);
     *latitude_deg = std::atan(std::sinh(mercator_y)) * 180.0 / std::numbers::pi;
 }
+}
+
+CopernicusTerrainProvider::CopernicusTerrainProvider(
+    int connect_timeout_seconds, int inactivity_timeout_seconds,
+    int download_deadline_seconds)
+    : connect_timeout_ms(std::max(1, connect_timeout_seconds) * 1000),
+      inactivity_timeout_ms(std::max(1, inactivity_timeout_seconds) * 1000),
+      download_deadline_ms(std::max(1, download_deadline_seconds) * 1000)
+{
 }
 
 QString CopernicusTerrainProvider::providerId() const
@@ -965,7 +1001,9 @@ TerrainProviderFetchResult CopernicusTerrainProvider::fetchTile(
                                     &this->upstream_mutex,
                                     &this->upstream_active_replies,
                                     &this->upstream_cancel_generation,
-                                    request_cancel_generation);
+                                    request_cancel_generation,
+                                    this->connect_timeout_ms, this->inactivity_timeout_ms,
+                                    this->download_deadline_ms);
     TerrainTile tile;
     tile.address = address;
     tile.dataset = dataset;
@@ -1068,7 +1106,9 @@ TerrainAnalysisGridResult CopernicusTerrainProvider::fetchAnalysisGrid(
                                &this->upstream_mutex,
                                &this->upstream_active_replies,
                                &this->upstream_cancel_generation,
-                               request_generation);
+                               request_generation,
+                               this->connect_timeout_ms, this->inactivity_timeout_ms,
+                               this->download_deadline_ms);
     const double longitude_step = (box.east_deg - box.west_deg) / double(request.columns);
     const double latitude_step = (box.north_deg - box.south_deg) / double(request.rows);
     result.elevations_m.resize(request.columns * request.rows);

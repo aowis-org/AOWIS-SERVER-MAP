@@ -278,7 +278,9 @@ TerrainData::TerrainData(const Config &config, QObject *parent)
         ? QDir(this->storage_paths.root).filePath(QStringLiteral("offline-packages"))
         : QDir(config.permanent_data_directory).filePath(QStringLiteral("terrain"));
     if (config.copernicus_enabled)
-        this->providers.push_back(std::make_unique<CopernicusTerrainProvider>());
+        this->providers.push_back(std::make_unique<CopernicusTerrainProvider>(
+            config.connect_timeout_seconds, config.inactivity_timeout_seconds,
+            config.download_deadline_seconds));
 }
 
 TerrainData::~TerrainData() = default;

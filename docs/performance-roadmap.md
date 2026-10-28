@@ -326,3 +326,6 @@ content is discarded, and the provider reports a network error. Explicit
 shutdown cancellation still takes precedence. The worker-local event loop and
 terrain CPU/I/O isolation remain separate future work. Test against a controlled
 slow upstream before relying on this for production recovery guarantees.
+
+### Slow-network terrain downloads
+Copernicus source downloads now have independent configurable connect, inactivity and total timeouts (30 / 120 / 1800 seconds by default). Already cached sources remain usable offline. Incomplete transfers are discarded atomically. Resumable Range downloads are not yet implemented.

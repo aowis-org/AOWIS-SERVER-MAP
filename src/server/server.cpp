@@ -258,6 +258,9 @@ Server::Server(const Config &config, QObject *parent)
               config.terrain_cache_directory,
               config.permanent_data_directory,
               config.copernicus_enabled,
+              config.terrain_connect_timeout_seconds,
+              config.terrain_inactivity_timeout_seconds,
+              config.terrain_download_deadline_seconds,
               config.terrain_coverage,
               config.download_coverage
           },

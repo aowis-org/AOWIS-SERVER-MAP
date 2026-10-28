@@ -323,6 +323,14 @@ bool MapServerConfiguration::loadConfigFile(const QString &path, Server::Config 
                          256, &config->maximum_terrain_workers, error_message))
         return false;
 
+    if (!readPositiveInt(&settings, QStringLiteral("terrain/connect_timeout_seconds"),
+                         3600, &config->terrain_connect_timeout_seconds, error_message) ||
+        !readPositiveInt(&settings, QStringLiteral("terrain/inactivity_timeout_seconds"),
+                         3600, &config->terrain_inactivity_timeout_seconds, error_message) ||
+        !readPositiveInt(&settings, QStringLiteral("terrain/download_deadline_seconds"),
+                         86400, &config->terrain_download_deadline_seconds, error_message))
+        return false;
+
     if (!readPositiveInt(&settings, QStringLiteral("downloads/max_active_downloads"),
                          std::numeric_limits<int>::max(), &config->maximum_active_downloads, error_message))
     {
@@ -591,7 +599,9 @@ QByteArray MapServerConfiguration::defaultConfigText()
         "coverage=\n\n"
         "[terrain]\n"
         "enabled=true\nremote_fetch_enabled=true\n"
-        "default_dataset=%5\nmaximum_jobs=%6\nmaximum_workers=%7\ncache_directory=\ncoverage=\n\n"
+        "default_dataset=%5\nmaximum_jobs=%6\nmaximum_workers=%7\n"
+        "connect_timeout_seconds=30\ninactivity_timeout_seconds=120\n"
+        "download_deadline_seconds=1800\ncache_directory=\ncoverage=\n\n"
         "[storage]\n"
         "; Permanent imported tiles and terrain packages; not a disposable cache.\n"
         "; Empty means <terrain cache>/offline-packages for legacy terrain packages.\n"
