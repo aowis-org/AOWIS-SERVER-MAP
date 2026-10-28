@@ -95,6 +95,11 @@ public:
         return server.pending_terrain_elevations.size();
     }
 
+    static int remoteAdmittedJobs(const Server &server)
+    {
+        return server.terrain_remote_admission.count();
+    }
+
     static int admittedJobs(const Server &server)
     {
         return server.terrain_admission.count();
@@ -537,6 +542,82 @@ int main(int argc, char **argv)
             std::cerr << "Remote overload did not preserve cached terrain admission: "
                       << "cached=" << isolation_passed
                       << " rejected=" << remote_rejected << '\n';
+            return 1;
+        }
+    }
+    // A completed acquisition must release its remote slot before a blocked
+    // CPU continuation runs, while retaining global admission until completion.
+    // Disable providers to make acquisition deterministic and fully offline.
+    {
+        QTemporaryDir handoff_cache;
+        if (!handoff_cache.isValid())
+        {
+            std::cerr << "Failed to create handoff test cache\n";
+            return 1;
+        }
+        Server::Config handoff_config;
+        handoff_config.port = 0;
+        handoff_config.cache_directory = handoff_cache.path();
+        handoff_config.terrain_cache_directory = handoff_cache.path() + "/terrain";
+        handoff_config.map_remote_fetch_enabled = false;
+        handoff_config.terrain_remote_fetch_enabled = true;
+        handoff_config.copernicus_enabled = false;
+        handoff_config.maximum_terrain_workers = 1;
+        handoff_config.maximum_terrain_remote_workers = 1;
+        handoff_config.maximum_terrain_jobs = 2;
+        Server handoff_server(handoff_config);
+        if (!handoff_server.start())
+        {
+            std::cerr << "Failed to start handoff test server\n";
+            return 1;
+        }
+        QSemaphore cpu_entered;
+        QSemaphore cpu_release;
+        TerrainSingleFlightTestAccess::blockWorker(handoff_server, cpu_entered, cpu_release);
+        if (!cpu_entered.tryAcquire(1, 3000))
+        {
+            cpu_release.release();
+            std::cerr << "Failed to block CPU worker for handoff test\n";
+            return 1;
+        }
+        QNetworkAccessManager handoff_network;
+        const QUrl handoff_url(QStringLiteral(
+            "http://127.0.0.1:%1/terrain/v1/copernicus-glo30/5/11/12.aowterrain")
+            .arg(TerrainSingleFlightTestAccess::port(handoff_server)));
+        QNetworkReply *handoff_reply = handoff_network.get(QNetworkRequest(handoff_url));
+        timer.restart();
+        bool acquired_and_queued = false;
+        while (timer.elapsed() < 3000)
+        {
+            app.processEvents(QEventLoop::AllEvents, 20);
+            acquired_and_queued = TerrainSingleFlightTestAccess::waiterCount(handoff_server) == 1 &&
+                TerrainSingleFlightTestAccess::remoteAdmittedJobs(handoff_server) == 0 &&
+                TerrainSingleFlightTestAccess::admittedJobs(handoff_server) == 1 &&
+                !handoff_reply->isFinished();
+            if (acquired_and_queued)
+                break;
+            QThread::msleep(1);
+        }
+        cpu_release.release();
+        timer.restart();
+        while (!handoff_reply->isFinished() && timer.elapsed() < 3000)
+        {
+            app.processEvents(QEventLoop::AllEvents, 20);
+            QThread::msleep(1);
+        }
+        const bool finished = handoff_reply->isFinished();
+        const int response_code = finished
+            ? handoff_reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() : 0;
+        handoff_reply->deleteLater();
+        app.processEvents(QEventLoop::AllEvents, 20);
+        if (!acquired_and_queued || !finished || response_code == 200 ||
+            TerrainSingleFlightTestAccess::admittedJobs(handoff_server) != 0 ||
+            TerrainSingleFlightTestAccess::remoteAdmittedJobs(handoff_server) != 0)
+        {
+            std::cerr << "Terrain acquisition-to-CPU handoff did not release budgets correctly: "
+                      << "queued=" << acquired_and_queued
+                      << " finished=" << finished
+                      << " status=" << response_code << '\n';
             return 1;
         }
     }
