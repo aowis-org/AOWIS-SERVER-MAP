@@ -1,0 +1,659 @@
+{
+  "pid": 446800,
+  "sample_interval_s": 0.02,
+  "recovery_s": 1.0,
+  "endurance_rounds": 10,
+  "grid_jitter_degrees": 0.001,
+  "seed": 12345,
+  "stages": [
+    {
+      "name": "grid",
+      "url": "http://127.0.0.1:8122/terrain/v1/analysis/grid?dataset=copernicus-glo30&west=8&south=50&east=8.01&north=50.01&columns=512&rows=512",
+      "requests": 200,
+      "concurrency": 4,
+      "round": 1,
+      "distinct_request_urls": 200,
+      "elapsed_s": 24.234,
+      "throughput_requests_per_s": 8.25,
+      "latency_ms": {
+        "mean": 482.264,
+        "p50": 458.098,
+        "p95": 675.187,
+        "p99": 710.552,
+        "max": 813.482
+      },
+      "statuses": {
+        "200": 200
+      },
+      "errors": {},
+      "unexpected_http_statuses": {},
+      "passed": true,
+      "received_bytes": 209715200,
+      "rss_kib": {
+        "before": 50500,
+        "peak_observed": 131788,
+        "immediately_after": 96800,
+        "after_recovery": 96800,
+        "recovery_delta_from_before": 46300
+      }
+    },
+    {
+      "name": "grid",
+      "url": "http://127.0.0.1:8122/terrain/v1/analysis/grid?dataset=copernicus-glo30&west=8&south=50&east=8.01&north=50.01&columns=512&rows=512",
+      "requests": 200,
+      "concurrency": 4,
+      "round": 2,
+      "distinct_request_urls": 200,
+      "elapsed_s": 22.014,
+      "throughput_requests_per_s": 9.09,
+      "latency_ms": {
+        "mean": 437.419,
+        "p50": 432.135,
+        "p95": 544.206,
+        "p99": 629.505,
+        "max": 637.122
+      },
+      "statuses": {
+        "200": 200
+      },
+      "errors": {},
+      "unexpected_http_statuses": {},
+      "passed": true,
+      "received_bytes": 209715200,
+      "rss_kib": {
+        "before": 96800,
+        "peak_observed": 131112,
+        "immediately_after": 94596,
+        "after_recovery": 94596,
+        "recovery_delta_from_before": -2204
+      }
+    },
+    {
+      "name": "grid",
+      "url": "http://127.0.0.1:8122/terrain/v1/analysis/grid?dataset=copernicus-glo30&west=8&south=50&east=8.01&north=50.01&columns=512&rows=512",
+      "requests": 200,
+      "concurrency": 4,
+      "round": 3,
+      "distinct_request_urls": 200,
+      "elapsed_s": 24.018,
+      "throughput_requests_per_s": 8.33,
+      "latency_ms": {
+        "mean": 477.977,
+        "p50": 429.505,
+        "p95": 768.168,
+        "p99": 893.145,
+        "max": 1009.998
+      },
+      "statuses": {
+        "200": 200
+      },
+      "errors": {},
+      "unexpected_http_statuses": {},
+      "passed": true,
+      "received_bytes": 209715200,
+      "rss_kib": {
+        "before": 94596,
+        "peak_observed": 135616,
+        "immediately_after": 94596,
+        "after_recovery": 94596,
+        "recovery_delta_from_before": 0
+      }
+    },
+    {
+      "name": "grid",
+      "url": "http://127.0.0.1:8122/terrain/v1/analysis/grid?dataset=copernicus-glo30&west=8&south=50&east=8.01&north=50.01&columns=512&rows=512",
+      "requests": 200,
+      "concurrency": 4,
+      "round": 4,
+      "distinct_request_urls": 200,
+      "elapsed_s": 24.666,
+      "throughput_requests_per_s": 8.11,
+      "latency_ms": {
+        "mean": 486.319,
+        "p50": 443.584,
+        "p95": 824.882,
+        "p99": 1180.58,
+        "max": 1257.991
+      },
+      "statuses": {
+        "200": 200
+      },
+      "errors": {},
+      "unexpected_http_statuses": {},
+      "passed": true,
+      "received_bytes": 209715200,
+      "rss_kib": {
+        "before": 94596,
+        "peak_observed": 131588,
+        "immediately_after": 97684,
+        "after_recovery": 97684,
+        "recovery_delta_from_before": 3088
+      }
+    },
+    {
+      "name": "grid",
+      "url": "http://127.0.0.1:8122/terrain/v1/analysis/grid?dataset=copernicus-glo30&west=8&south=50&east=8.01&north=50.01&columns=512&rows=512",
+      "requests": 200,
+      "concurrency": 4,
+      "round": 5,
+      "distinct_request_urls": 200,
+      "elapsed_s": 34.743,
+      "throughput_requests_per_s": 5.76,
+      "latency_ms": {
+        "mean": 690.975,
+        "p50": 687.441,
+        "p95": 866.65,
+        "p99": 994.724,
+        "max": 1089.771
+      },
+      "statuses": {
+        "200": 200
+      },
+      "errors": {},
+      "unexpected_http_statuses": {},
+      "passed": true,
+      "received_bytes": 209715200,
+      "rss_kib": {
+        "before": 97684,
+        "peak_observed": 129840,
+        "immediately_after": 96832,
+        "after_recovery": 96832,
+        "recovery_delta_from_before": -852
+      }
+    },
+    {
+      "name": "grid",
+      "url": "http://127.0.0.1:8122/terrain/v1/analysis/grid?dataset=copernicus-glo30&west=8&south=50&east=8.01&north=50.01&columns=512&rows=512",
+      "requests": 200,
+      "concurrency": 4,
+      "round": 6,
+      "distinct_request_urls": 200,
+      "elapsed_s": 33.882,
+      "throughput_requests_per_s": 5.9,
+      "latency_ms": {
+        "mean": 674.189,
+        "p50": 675.46,
+        "p95": 826.431,
+        "p99": 877.589,
+        "max": 1116.829
+      },
+      "statuses": {
+        "200": 200
+      },
+      "errors": {},
+      "unexpected_http_statuses": {},
+      "passed": true,
+      "received_bytes": 209715200,
+      "rss_kib": {
+        "before": 96832,
+        "peak_observed": 128612,
+        "immediately_after": 96836,
+        "after_recovery": 96836,
+        "recovery_delta_from_before": 4
+      }
+    },
+    {
+      "name": "grid",
+      "url": "http://127.0.0.1:8122/terrain/v1/analysis/grid?dataset=copernicus-glo30&west=8&south=50&east=8.01&north=50.01&columns=512&rows=512",
+      "requests": 200,
+      "concurrency": 4,
+      "round": 7,
+      "distinct_request_urls": 200,
+      "elapsed_s": 24.011,
+      "throughput_requests_per_s": 8.33,
+      "latency_ms": {
+        "mean": 478.195,
+        "p50": 431.796,
+        "p95": 723.119,
+        "p99": 862.492,
+        "max": 922.886
+      },
+      "statuses": {
+        "200": 200
+      },
+      "errors": {},
+      "unexpected_http_statuses": {},
+      "passed": true,
+      "received_bytes": 209715200,
+      "rss_kib": {
+        "before": 96836,
+        "peak_observed": 140848,
+        "immediately_after": 101660,
+        "after_recovery": 101660,
+        "recovery_delta_from_before": 4824
+      }
+    },
+    {
+      "name": "grid",
+      "url": "http://127.0.0.1:8122/terrain/v1/analysis/grid?dataset=copernicus-glo30&west=8&south=50&east=8.01&north=50.01&columns=512&rows=512",
+      "requests": 200,
+      "concurrency": 4,
+      "round": 8,
+      "distinct_request_urls": 200,
+      "elapsed_s": 21.683,
+      "throughput_requests_per_s": 9.22,
+      "latency_ms": {
+        "mean": 431.929,
+        "p50": 416.987,
+        "p95": 531.315,
+        "p99": 628.579,
+        "max": 738.627
+      },
+      "statuses": {
+        "200": 200
+      },
+      "errors": {},
+      "unexpected_http_statuses": {},
+      "passed": true,
+      "received_bytes": 209715200,
+      "rss_kib": {
+        "before": 101660,
+        "peak_observed": 130420,
+        "immediately_after": 94620,
+        "after_recovery": 94620,
+        "recovery_delta_from_before": -7040
+      }
+    },
+    {
+      "name": "grid",
+      "url": "http://127.0.0.1:8122/terrain/v1/analysis/grid?dataset=copernicus-glo30&west=8&south=50&east=8.01&north=50.01&columns=512&rows=512",
+      "requests": 200,
+      "concurrency": 4,
+      "round": 9,
+      "distinct_request_urls": 200,
+      "elapsed_s": 23.322,
+      "throughput_requests_per_s": 8.58,
+      "latency_ms": {
+        "mean": 464.4,
+        "p50": 439.62,
+        "p95": 661.757,
+        "p99": 752.13,
+        "max": 784.987
+      },
+      "statuses": {
+        "200": 200
+      },
+      "errors": {},
+      "unexpected_http_statuses": {},
+      "passed": true,
+      "received_bytes": 209715200,
+      "rss_kib": {
+        "before": 94620,
+        "peak_observed": 135640,
+        "immediately_after": 97688,
+        "after_recovery": 97688,
+        "recovery_delta_from_before": 3068
+      }
+    },
+    {
+      "name": "grid",
+      "url": "http://127.0.0.1:8122/terrain/v1/analysis/grid?dataset=copernicus-glo30&west=8&south=50&east=8.01&north=50.01&columns=512&rows=512",
+      "requests": 200,
+      "concurrency": 4,
+      "round": 10,
+      "distinct_request_urls": 200,
+      "elapsed_s": 19.837,
+      "throughput_requests_per_s": 10.08,
+      "latency_ms": {
+        "mean": 394.951,
+        "p50": 386.491,
+        "p95": 483.123,
+        "p99": 564.375,
+        "max": 566.073
+      },
+      "statuses": {
+        "200": 200
+      },
+      "errors": {},
+      "unexpected_http_statuses": {},
+      "passed": true,
+      "received_bytes": 209715200,
+      "rss_kib": {
+        "before": 97688,
+        "peak_observed": 133020,
+        "immediately_after": 97688,
+        "after_recovery": 97688,
+        "recovery_delta_from_before": 0
+      }
+    },
+    {
+      "name": "grid",
+      "url": "http://127.0.0.1:8122/terrain/v1/analysis/grid?dataset=copernicus-glo30&west=8&south=50&east=8.01&north=50.01&columns=512&rows=512",
+      "requests": 200,
+      "concurrency": 16,
+      "round": 1,
+      "distinct_request_urls": 200,
+      "elapsed_s": 19.191,
+      "throughput_requests_per_s": 10.42,
+      "latency_ms": {
+        "mean": 1497.576,
+        "p50": 1537.833,
+        "p95": 1734.335,
+        "p99": 1813.667,
+        "max": 1834.034
+      },
+      "statuses": {
+        "200": 200
+      },
+      "errors": {},
+      "unexpected_http_statuses": {},
+      "passed": true,
+      "received_bytes": 209715200,
+      "rss_kib": {
+        "before": 97688,
+        "peak_observed": 135864,
+        "immediately_after": 96988,
+        "after_recovery": 96988,
+        "recovery_delta_from_before": -700
+      }
+    },
+    {
+      "name": "grid",
+      "url": "http://127.0.0.1:8122/terrain/v1/analysis/grid?dataset=copernicus-glo30&west=8&south=50&east=8.01&north=50.01&columns=512&rows=512",
+      "requests": 200,
+      "concurrency": 16,
+      "round": 2,
+      "distinct_request_urls": 200,
+      "elapsed_s": 19.59,
+      "throughput_requests_per_s": 10.21,
+      "latency_ms": {
+        "mean": 1531.409,
+        "p50": 1552.792,
+        "p95": 1841.607,
+        "p99": 1973.431,
+        "max": 2026.349
+      },
+      "statuses": {
+        "200": 200
+      },
+      "errors": {},
+      "unexpected_http_statuses": {},
+      "passed": true,
+      "received_bytes": 209715200,
+      "rss_kib": {
+        "before": 96988,
+        "peak_observed": 137120,
+        "immediately_after": 102992,
+        "after_recovery": 102992,
+        "recovery_delta_from_before": 6004
+      }
+    },
+    {
+      "name": "grid",
+      "url": "http://127.0.0.1:8122/terrain/v1/analysis/grid?dataset=copernicus-glo30&west=8&south=50&east=8.01&north=50.01&columns=512&rows=512",
+      "requests": 200,
+      "concurrency": 16,
+      "round": 3,
+      "distinct_request_urls": 200,
+      "elapsed_s": 19.667,
+      "throughput_requests_per_s": 10.17,
+      "latency_ms": {
+        "mean": 1530.385,
+        "p50": 1558.039,
+        "p95": 1885.038,
+        "p99": 2059.906,
+        "max": 2118.63
+      },
+      "statuses": {
+        "200": 200
+      },
+      "errors": {},
+      "unexpected_http_statuses": {},
+      "passed": true,
+      "received_bytes": 209715200,
+      "rss_kib": {
+        "before": 102992,
+        "peak_observed": 137316,
+        "immediately_after": 103008,
+        "after_recovery": 103008,
+        "recovery_delta_from_before": 16
+      }
+    },
+    {
+      "name": "grid",
+      "url": "http://127.0.0.1:8122/terrain/v1/analysis/grid?dataset=copernicus-glo30&west=8&south=50&east=8.01&north=50.01&columns=512&rows=512",
+      "requests": 200,
+      "concurrency": 16,
+      "round": 4,
+      "distinct_request_urls": 200,
+      "elapsed_s": 22.394,
+      "throughput_requests_per_s": 8.93,
+      "latency_ms": {
+        "mean": 1735.426,
+        "p50": 1742.763,
+        "p95": 2130.528,
+        "p99": 2154.154,
+        "max": 2274.376
+      },
+      "statuses": {
+        "200": 200
+      },
+      "errors": {},
+      "unexpected_http_statuses": {},
+      "passed": true,
+      "received_bytes": 209715200,
+      "rss_kib": {
+        "before": 103008,
+        "peak_observed": 137872,
+        "immediately_after": 98920,
+        "after_recovery": 98920,
+        "recovery_delta_from_before": -4088
+      }
+    },
+    {
+      "name": "grid",
+      "url": "http://127.0.0.1:8122/terrain/v1/analysis/grid?dataset=copernicus-glo30&west=8&south=50&east=8.01&north=50.01&columns=512&rows=512",
+      "requests": 200,
+      "concurrency": 16,
+      "round": 5,
+      "distinct_request_urls": 200,
+      "elapsed_s": 20.787,
+      "throughput_requests_per_s": 9.62,
+      "latency_ms": {
+        "mean": 1625.888,
+        "p50": 1591.009,
+        "p95": 2183.149,
+        "p99": 2381.782,
+        "max": 2634.49
+      },
+      "statuses": {
+        "200": 200
+      },
+      "errors": {},
+      "unexpected_http_statuses": {},
+      "passed": true,
+      "received_bytes": 209715200,
+      "rss_kib": {
+        "before": 98920,
+        "peak_observed": 135692,
+        "immediately_after": 103016,
+        "after_recovery": 103016,
+        "recovery_delta_from_before": 4096
+      }
+    },
+    {
+      "name": "grid",
+      "url": "http://127.0.0.1:8122/terrain/v1/analysis/grid?dataset=copernicus-glo30&west=8&south=50&east=8.01&north=50.01&columns=512&rows=512",
+      "requests": 200,
+      "concurrency": 16,
+      "round": 6,
+      "distinct_request_urls": 200,
+      "elapsed_s": 19.49,
+      "throughput_requests_per_s": 10.26,
+      "latency_ms": {
+        "mean": 1509.911,
+        "p50": 1532.99,
+        "p95": 1765.664,
+        "p99": 1863.148,
+        "max": 2013.837
+      },
+      "statuses": {
+        "200": 200
+      },
+      "errors": {},
+      "unexpected_http_statuses": {},
+      "passed": true,
+      "received_bytes": 209715200,
+      "rss_kib": {
+        "before": 103016,
+        "peak_observed": 137088,
+        "immediately_after": 97020,
+        "after_recovery": 97020,
+        "recovery_delta_from_before": -5996
+      }
+    },
+    {
+      "name": "grid",
+      "url": "http://127.0.0.1:8122/terrain/v1/analysis/grid?dataset=copernicus-glo30&west=8&south=50&east=8.01&north=50.01&columns=512&rows=512",
+      "requests": 200,
+      "concurrency": 16,
+      "round": 7,
+      "distinct_request_urls": 200,
+      "elapsed_s": 22.086,
+      "throughput_requests_per_s": 9.06,
+      "latency_ms": {
+        "mean": 1687.366,
+        "p50": 1639.372,
+        "p95": 2631.533,
+        "p99": 2891.314,
+        "max": 3131.032
+      },
+      "statuses": {
+        "200": 200
+      },
+      "errors": {},
+      "unexpected_http_statuses": {},
+      "passed": true,
+      "received_bytes": 209715200,
+      "rss_kib": {
+        "before": 97020,
+        "peak_observed": 135676,
+        "immediately_after": 95092,
+        "after_recovery": 95092,
+        "recovery_delta_from_before": -1928
+      }
+    },
+    {
+      "name": "grid",
+      "url": "http://127.0.0.1:8122/terrain/v1/analysis/grid?dataset=copernicus-glo30&west=8&south=50&east=8.01&north=50.01&columns=512&rows=512",
+      "requests": 200,
+      "concurrency": 16,
+      "round": 8,
+      "distinct_request_urls": 200,
+      "elapsed_s": 25.337,
+      "throughput_requests_per_s": 7.89,
+      "latency_ms": {
+        "mean": 1887.731,
+        "p50": 1741.975,
+        "p95": 2988.671,
+        "p99": 3786.349,
+        "max": 3880.718
+      },
+      "statuses": {
+        "200": 200
+      },
+      "errors": {},
+      "unexpected_http_statuses": {},
+      "passed": true,
+      "received_bytes": 209715200,
+      "rss_kib": {
+        "before": 95092,
+        "peak_observed": 136380,
+        "immediately_after": 96716,
+        "after_recovery": 96716,
+        "recovery_delta_from_before": 1624
+      }
+    },
+    {
+      "name": "grid",
+      "url": "http://127.0.0.1:8122/terrain/v1/analysis/grid?dataset=copernicus-glo30&west=8&south=50&east=8.01&north=50.01&columns=512&rows=512",
+      "requests": 200,
+      "concurrency": 16,
+      "round": 9,
+      "distinct_request_urls": 200,
+      "elapsed_s": 44.867,
+      "throughput_requests_per_s": 4.46,
+      "latency_ms": {
+        "mean": 3536.373,
+        "p50": 2976.412,
+        "p95": 5450.858,
+        "p99": 5787.931,
+        "max": 5880.232
+      },
+      "statuses": {
+        "200": 200
+      },
+      "errors": {},
+      "unexpected_http_statuses": {},
+      "passed": true,
+      "received_bytes": 209715200,
+      "rss_kib": {
+        "before": 96716,
+        "peak_observed": 139040,
+        "immediately_after": 99204,
+        "after_recovery": 99204,
+        "recovery_delta_from_before": 2488
+      }
+    },
+    {
+      "name": "grid",
+      "url": "http://127.0.0.1:8122/terrain/v1/analysis/grid?dataset=copernicus-glo30&west=8&south=50&east=8.01&north=50.01&columns=512&rows=512",
+      "requests": 200,
+      "concurrency": 16,
+      "round": 10,
+      "distinct_request_urls": 200,
+      "elapsed_s": 37.69,
+      "throughput_requests_per_s": 5.31,
+      "latency_ms": {
+        "mean": 2959.829,
+        "p50": 2973.639,
+        "p95": 3873.063,
+        "p99": 4177.475,
+        "max": 4480.011
+      },
+      "statuses": {
+        "200": 200
+      },
+      "errors": {},
+      "unexpected_http_statuses": {},
+      "passed": true,
+      "received_bytes": 209715200,
+      "rss_kib": {
+        "before": 99204,
+        "peak_observed": 141396,
+        "immediately_after": 101132,
+        "after_recovery": 101132,
+        "recovery_delta_from_before": 1928
+      }
+    }
+  ],
+  "endurance_summary": [
+    {
+      "name": "grid",
+      "concurrency": 4,
+      "rounds": 10,
+      "before_first_round_kib": 50500,
+      "after_first_round_kib": 96800,
+      "after_last_round_kib": 97688,
+      "total_recovered_rss_growth_kib": 47188,
+      "post_first_round_rss_growth_kib": 888,
+      "peak_observed_kib": 140848,
+      "max_rss_growth_kib": 16384,
+      "rss_growth_limit_exceeded": false
+    },
+    {
+      "name": "grid",
+      "concurrency": 16,
+      "rounds": 10,
+      "before_first_round_kib": 97688,
+      "after_first_round_kib": 96988,
+      "after_last_round_kib": 101132,
+      "total_recovered_rss_growth_kib": 3444,
+      "post_first_round_rss_growth_kib": 4144,
+      "peak_observed_kib": 141396,
+      "max_rss_growth_kib": 16384,
+      "rss_growth_limit_exceeded": false
+    }
+  ],
+  "passed": true
+}

@@ -134,3 +134,66 @@ The architectural objective is to keep cached requests responsive under pressure
 ### Live acquisition contention regression
 
 The terrain HTTP integration test uses an in-process-only Copernicus source URL to hold two real loopback GeoTIFF transfers open while a normalized cached tile is served. The test repeats that scenario three times with new server instances and cache roots. Destroying each server must cancel both transfers, close both upstream sockets, and complete both pending terrain futures. This checks repeated shutdown cleanup, not a long-duration soak test. The URL override exists only in programmatic configuration for tests; the INI parser does not expose it, and the default production Copernicus URL remains fixed.
+
+### Linux terrain RSS benchmark
+
+`tools/benchmark_terrain_memory.py` measures HTTP response latency/throughput and
+samples the *server process* `VmRSS` from `/proc/<pid>/status` throughout each
+stage. Run it against a **dedicated server instance** to avoid background
+requests contaminating the result. Locate the exact process PID yourself;
+the script will not start, stop, or guess which server to profile. Provide
+one or both known-good URLs, for example:
+
+```sh
+python3 tools/benchmark_terrain_memory.py \
+  --pid "$SERVER_PID" \
+  --tile-url 'http://127.0.0.1:8122/terrain/v1/copernicus-glo30/8/133/86.aowterrain' \
+  --grid-url 'http://127.0.0.1:8122/terrain/v1/analysis/grid?dataset=copernicus-glo30&west=8&south=50&east=8.01&north=50.01&columns=512&rows=512' \
+  --requests 100 --concurrencies 1,4,16 --output terrain-memory.json
+```
+
+Warm/cache the selected sources first if benchmarking **cached** delivery;
+the script deliberately does not conflate warm and cold results. The grid
+URL may trigger upstream downloads; use a prepared, local test dataset where
+possible. Always confirm the endpoint returns HTTP 200. Reports contain
+per-stage response status counts, errors, payload bytes, mean/p50/p95/p99/max
+latency, throughput, observed peak RSS, immediate and post-recovery RSS,
+and residual RSS change from the stage baseline. A non-200 HTTP result or
+request error is printed as FAIL and causes a nonzero exit code. Reports also
+include an explicit `passed` flag; the transport `errors` field alone does not
+indicate HTTP success. The HTTP probe itself is not a
+source downloader or a network-stall simulator.
+
+RSS is sampled periodically and can miss very short peaks. `VmRSS` includes
+memory unrelated to terrain and does not distinguish private from shared
+pages; retained allocator pages may prevent RSS from returning to its
+original value even when reservations are correctly released. Compare
+identical workloads across builds and repeat runs before drawing conclusions.
+
+
+#### Repeatable endurance runs
+
+To test recovery after warm-up and reduce single-flight reuse of identical grids,
+run several rounds and shift the grid bounding box by small reproducible offsets.
+Use a **known-good grid area with source data covering the entire jitter range**;
+variation can expose missing upstream files and is intentionally counted as a
+failed benchmark (HTTP 404). Start small and increase jitter only after
+verifying coverage. Example (set `SERVER_PID` first):
+
+```sh
+SERVER_PID=$(pgrep -f '/build-linux/aowis-server-map$')
+python3 tools/benchmark_terrain_memory.py \
+  --pid "$SERVER_PID" \
+  --grid-url 'http://127.0.0.1:8122/terrain/v1/analysis/grid?dataset=copernicus-glo30&west=8&south=50&east=8.01&north=50.01&columns=512&rows=512' \
+  --requests 200 --concurrencies 4,16 \
+  --endurance-rounds 10 --grid-jitter-degrees 0.001 --seed 12345 \
+  --max-rss-growth-kib 16384 --output terrain-endurance.json
+```
+
+Results list each round and a per-workload/concurrency summary. The RSS
+threshold compares recovered RSS after the *first* round to recovered RSS
+after the *last*, allowing for initial allocator warm-up; all rounds also
+report total baseline-to-final growth and peak sampled RSS. The threshold is
+a diagnostic heuristic, **not proof of leak freedom**. `--endurance-rounds 1`
+and zero grid jitter preserve the previous default behavior. Avoid pointing
+endurance traffic at a live production server or unwarmed remote sources.

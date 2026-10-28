@@ -1,0 +1,169 @@
+{
+  "pid": 446800,
+  "sample_interval_s": 0.02,
+  "recovery_s": 1.0,
+  "stages": [
+    {
+      "name": "cached_tile",
+      "url": "http://127.0.0.1:8122/terrain/v1/copernicus-glo30/8/133/86.aowterrain",
+      "requests": 100,
+      "concurrency": 1,
+      "elapsed_s": 0.067,
+      "throughput_requests_per_s": 1493.86,
+      "latency_ms": {
+        "mean": 0.643,
+        "p50": 0.541,
+        "p95": 0.644,
+        "p99": 0.769,
+        "max": 10.394
+      },
+      "statuses": {
+        "200": 100
+      },
+      "errors": {},
+      "received_bytes": 853000,
+      "rss_kib": {
+        "before": 45600,
+        "peak_observed": 45600,
+        "immediately_after": 45600,
+        "after_recovery": 45600,
+        "recovery_delta_from_before": 0
+      }
+    },
+    {
+      "name": "cached_tile",
+      "url": "http://127.0.0.1:8122/terrain/v1/copernicus-glo30/8/133/86.aowterrain",
+      "requests": 100,
+      "concurrency": 4,
+      "elapsed_s": 0.042,
+      "throughput_requests_per_s": 2404.33,
+      "latency_ms": {
+        "mean": 1.581,
+        "p50": 1.478,
+        "p95": 2.395,
+        "p99": 2.992,
+        "max": 3.435
+      },
+      "statuses": {
+        "200": 100
+      },
+      "errors": {},
+      "received_bytes": 853000,
+      "rss_kib": {
+        "before": 45600,
+        "peak_observed": 45600,
+        "immediately_after": 45600,
+        "after_recovery": 45600,
+        "recovery_delta_from_before": 0
+      }
+    },
+    {
+      "name": "cached_tile",
+      "url": "http://127.0.0.1:8122/terrain/v1/copernicus-glo30/8/133/86.aowterrain",
+      "requests": 100,
+      "concurrency": 16,
+      "elapsed_s": 0.043,
+      "throughput_requests_per_s": 2335.83,
+      "latency_ms": {
+        "mean": 4.811,
+        "p50": 4.173,
+        "p95": 9.072,
+        "p99": 10.302,
+        "max": 11.076
+      },
+      "statuses": {
+        "200": 100
+      },
+      "errors": {},
+      "received_bytes": 853000,
+      "rss_kib": {
+        "before": 45600,
+        "peak_observed": 45600,
+        "immediately_after": 45600,
+        "after_recovery": 45600,
+        "recovery_delta_from_before": 0
+      }
+    },
+    {
+      "name": "grid",
+      "url": "http://127.0.0.1:8122/terrain/v1/analysis/grid?dataset=copernicus-glo30&west=8&south=50&east=8.01&north=50.01&columns=512&rows=512",
+      "requests": 100,
+      "concurrency": 1,
+      "elapsed_s": 21.126,
+      "throughput_requests_per_s": 4.73,
+      "latency_ms": {
+        "mean": 211.235,
+        "p50": 198.562,
+        "p95": 270.11,
+        "p99": 363.35,
+        "max": 416.175
+      },
+      "statuses": {
+        "200": 100
+      },
+      "errors": {},
+      "received_bytes": 104857600,
+      "rss_kib": {
+        "before": 45600,
+        "peak_observed": 52032,
+        "immediately_after": 50484,
+        "after_recovery": 50484,
+        "recovery_delta_from_before": 4884
+      }
+    },
+    {
+      "name": "grid",
+      "url": "http://127.0.0.1:8122/terrain/v1/analysis/grid?dataset=copernicus-glo30&west=8&south=50&east=8.01&north=50.01&columns=512&rows=512",
+      "requests": 100,
+      "concurrency": 4,
+      "elapsed_s": 6.629,
+      "throughput_requests_per_s": 15.09,
+      "latency_ms": {
+        "mean": 265.059,
+        "p50": 263.06,
+        "p95": 358.856,
+        "p99": 369.293,
+        "max": 369.733
+      },
+      "statuses": {
+        "200": 100
+      },
+      "errors": {},
+      "received_bytes": 104857600,
+      "rss_kib": {
+        "before": 50484,
+        "peak_observed": 52032,
+        "immediately_after": 50484,
+        "after_recovery": 50484,
+        "recovery_delta_from_before": 0
+      }
+    },
+    {
+      "name": "grid",
+      "url": "http://127.0.0.1:8122/terrain/v1/analysis/grid?dataset=copernicus-glo30&west=8&south=50&east=8.01&north=50.01&columns=512&rows=512",
+      "requests": 100,
+      "concurrency": 16,
+      "elapsed_s": 1.489,
+      "throughput_requests_per_s": 67.15,
+      "latency_ms": {
+        "mean": 211.343,
+        "p50": 211.122,
+        "p95": 222.834,
+        "p99": 224.502,
+        "max": 224.609
+      },
+      "statuses": {
+        "200": 100
+      },
+      "errors": {},
+      "received_bytes": 104857600,
+      "rss_kib": {
+        "before": 50484,
+        "peak_observed": 52048,
+        "immediately_after": 50500,
+        "after_recovery": 50500,
+        "recovery_delta_from_before": 16
+      }
+    }
+  ]
+}
