@@ -570,6 +570,138 @@ int main(int argc, char **argv)
             return 1;
         }
     }
+    // Mixed-load HTTP regression: remote acquisition for a tile, an elevation,
+    // and an analysis grid can all be pending at once without starving an
+    // already-normalized tile. Keep remote workers occupied using semaphores
+    // so this test has no upstream dependency or wall-clock download delays.
+    {
+        QTemporaryDir mixed_cache;
+        if (!mixed_cache.isValid())
+            return 1;
+        Server::Config mixed_config;
+        mixed_config.port = 0;
+        mixed_config.cache_directory = mixed_cache.path();
+        mixed_config.terrain_cache_directory = mixed_cache.path() + "/terrain";
+        mixed_config.map_remote_fetch_enabled = false;
+        mixed_config.terrain_remote_fetch_enabled = true;
+        mixed_config.copernicus_enabled = false;
+        mixed_config.maximum_terrain_workers = 1;
+        mixed_config.maximum_terrain_remote_workers = 2;
+        mixed_config.maximum_terrain_jobs = 8;
+        mixed_config.maximum_pending_requests = 12;
+        Server mixed_server(mixed_config);
+        if (!mixed_server.start())
+            return 1;
+
+        Aowis::Map::TerrainTile mixed_tile;
+        mixed_tile.dataset = QStringLiteral("copernicus-glo30");
+        mixed_tile.address.zoom = 5;
+        mixed_tile.address.x = 11;
+        mixed_tile.address.y = 12;
+        mixed_tile.nominal_resolution_m = 30.0;
+        mixed_tile.vertical_datum = Aowis::Map::TerrainVerticalDatum::Egm96;
+        mixed_tile.elevations_m.fill(73.0f, Aowis::Map::TerrainTileSampleCount);
+        QString mixed_encoding_error;
+        const QByteArray mixed_encoded = Aowis::Map::encodeTerrainTile(
+            mixed_tile, &mixed_encoding_error);
+        const QString mixed_path = TerrainSingleFlightTestAccess::normalizedTilePath(
+            mixed_server, mixed_tile.dataset, mixed_tile.address);
+        if (mixed_encoded.isEmpty() ||
+            !QDir().mkpath(QFileInfo(mixed_path).absolutePath()))
+            return 1;
+        QSaveFile mixed_output(mixed_path);
+        if (!mixed_output.open(QIODevice::WriteOnly) ||
+            mixed_output.write(mixed_encoded) != mixed_encoded.size() ||
+            !mixed_output.commit())
+            return 1;
+
+        QSemaphore remote_entered;
+        QSemaphore remote_release;
+        TerrainSingleFlightTestAccess::blockRemoteWorker(
+            mixed_server, remote_entered, remote_release);
+        TerrainSingleFlightTestAccess::blockRemoteWorker(
+            mixed_server, remote_entered, remote_release);
+        if (!remote_entered.tryAcquire(2, 3000))
+        {
+            remote_release.release(2);
+            std::cerr << "Mixed-load remote workers did not start\n";
+            return 1;
+        }
+
+        const QString mixed_base = QStringLiteral("http://127.0.0.1:%1")
+            .arg(TerrainSingleFlightTestAccess::port(mixed_server));
+        QNetworkAccessManager mixed_network;
+        QNetworkReply *miss_reply = mixed_network.get(QNetworkRequest(QUrl(
+            mixed_base + QStringLiteral("/terrain/v1/copernicus-glo30/5/11/13.aowterrain"))));
+        QNetworkReply *elevation_reply = mixed_network.get(QNetworkRequest(QUrl(
+            mixed_base + QStringLiteral("/terrain/v1/elevation?latitude=49&longitude=8"))));
+        QNetworkReply *grid_reply = mixed_network.get(QNetworkRequest(QUrl(
+            mixed_base + QStringLiteral(
+                "/terrain/v1/analysis/grid?west=8&south=49&east=9&north=50&columns=2&rows=2"))));
+
+        timer.restart();
+        bool mixed_queued = false;
+        while (timer.elapsed() < 3000)
+        {
+            app.processEvents(QEventLoop::AllEvents, 20);
+            mixed_queued = TerrainSingleFlightTestAccess::uniqueJobCount(mixed_server) == 1 &&
+                TerrainSingleFlightTestAccess::elevationJobs(mixed_server) == 1 &&
+                TerrainSingleFlightTestAccess::gridJobs(mixed_server) == 1 &&
+                TerrainSingleFlightTestAccess::remoteAdmittedJobs(mixed_server) == 3 &&
+                TerrainSingleFlightTestAccess::admittedJobs(mixed_server) == 3 &&
+                !miss_reply->isFinished() && !elevation_reply->isFinished() &&
+                !grid_reply->isFinished();
+            if (mixed_queued)
+                break;
+            QThread::msleep(1);
+        }
+
+        // A separate client manager prevents unrelated client-side connection
+        // limits from masking server responsiveness under three pending requests.
+        QNetworkAccessManager cached_network;
+        QNetworkReply *cached_reply = cached_network.get(QNetworkRequest(QUrl(
+            mixed_base + QStringLiteral("/terrain/v1/copernicus-glo30/5/11/12.aowterrain"))));
+        timer.restart();
+        while (!cached_reply->isFinished() && timer.elapsed() < 3000)
+        {
+            app.processEvents(QEventLoop::AllEvents, 20);
+            QThread::msleep(1);
+        }
+        const bool cached_responsive = cached_reply->isFinished() &&
+            cached_reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() == 200 &&
+            cached_reply->readAll() == mixed_encoded &&
+            !miss_reply->isFinished() && !elevation_reply->isFinished() &&
+            !grid_reply->isFinished();
+        cached_reply->deleteLater();
+
+        remote_release.release(2);
+        timer.restart();
+        while ((!miss_reply->isFinished() || !elevation_reply->isFinished() ||
+                !grid_reply->isFinished()) && timer.elapsed() < 5000)
+        {
+            app.processEvents(QEventLoop::AllEvents, 20);
+            QThread::msleep(1);
+        }
+        const bool drained = miss_reply->isFinished() && elevation_reply->isFinished() &&
+            grid_reply->isFinished();
+        miss_reply->deleteLater();
+        elevation_reply->deleteLater();
+        grid_reply->deleteLater();
+        app.processEvents(QEventLoop::AllEvents, 20);
+        const bool budgets_cleared =
+            TerrainSingleFlightTestAccess::uniqueJobCount(mixed_server) == 0 &&
+            TerrainSingleFlightTestAccess::elevationJobs(mixed_server) == 0 &&
+            TerrainSingleFlightTestAccess::gridJobs(mixed_server) == 0 &&
+            TerrainSingleFlightTestAccess::remoteAdmittedJobs(mixed_server) == 0 &&
+            TerrainSingleFlightTestAccess::admittedJobs(mixed_server) == 0;
+        if (!mixed_queued || !cached_responsive || !drained || !budgets_cleared)
+        {
+            std::cerr << "Mixed terrain workload isolation failed: queued=" << mixed_queued
+                      << " cached=" << cached_responsive << " drained=" << drained
+                      << " budgets=" << budgets_cleared << '\n';
+            return 1;
+        }
+    }
     // A completed acquisition must release its remote slot before a blocked
     // CPU continuation runs, while retaining global admission until completion.
     // Disable providers to make acquisition deterministic and fully offline.
