@@ -100,6 +100,54 @@ int main(int argc, char **argv)
                 "Asynchronous disk hit unexpectedly contacted upstream");
     }
 
+    // Deletion invalidates a pending disk read even when its worker has already
+    // read the bytes but the queued completion has not run on the Qt thread.
+    // It must not repopulate RAM or trigger another upstream download.
+    {
+        QTemporaryDir deletion_cache;
+        require(deletion_cache.isValid(), "Cannot create deletion-race cache");
+        const QString tile_path = QDir(deletion_cache.path()).filePath(
+            QStringLiteral("maptiles/%1/6/31/20.png").arg(provider_id));
+        writeFile(tile_path, QByteArray("deleted-tile-data"));
+        MapTiles reader(deletion_cache.path(), 2, 8);
+        reader.configureProviders(providers, {}, {});
+        int ready_count = 0;
+        int canceled_count = 0;
+        QObject::connect(&reader, &MapTiles::tileReady, &reader,
+            [&ready_count](const QString &key, const QByteArray &)
+        {
+            if (key == QStringLiteral("delete-race")) ++ready_count;
+        });
+        QObject::connect(&reader, &MapTiles::tileFailed, &reader,
+            [&canceled_count](const QString &key, MapTiles::TileFailureReason reason)
+        {
+            if (key == QStringLiteral("delete-race") &&
+                reason == MapTiles::TileFailureReason::Cancelled) ++canceled_count;
+        });
+        const MapTiles::TileRequestResult pending =
+            reader.getTileForHttp(provider_id, 6, 31, 20, QStringLiteral("delete-race"));
+        require(pending.status == MapTiles::TileRequestStatus::Pending,
+                "Deletion race fixture should schedule a disk read");
+        require(reader.deleteTiles(provider_id, 6, 31, 31, 20, 20) == 1,
+                "Cannot delete tile during pending disk read");
+        QEventLoop callback_loop;
+        QTimer callback_timeout;
+        callback_timeout.setSingleShot(true);
+        QObject::connect(&callback_timeout, &QTimer::timeout, &callback_loop, &QEventLoop::quit);
+        QObject::connect(&reader, &MapTiles::tileFailed, &callback_loop,
+            [&callback_loop](const QString &key, MapTiles::TileFailureReason)
+        {
+            if (key == QStringLiteral("delete-race")) callback_loop.quit();
+        });
+        callback_timeout.start(5000);
+        callback_loop.exec();
+        require(canceled_count == 1 && ready_count == 0,
+                "Invalidated disk read must complete once as canceled");
+        require(!QFile::exists(tile_path), "Deleted tile unexpectedly reappeared");
+        require(reader.upstreamActivity().active == 0 && reader.upstreamActivity().queued == 0,
+                "Invalidated cache read restarted an upstream download");
+    }
+
     // A sparse oversized cache file must be rejected before any disk worker
     // tries to allocate its content. This verifies the read byte budget.
     {

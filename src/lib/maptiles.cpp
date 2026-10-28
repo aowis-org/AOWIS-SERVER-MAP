@@ -379,8 +379,17 @@ MapTiles::TileRequestResult MapTiles::getTileForHttp(
             for (const QString &response_key : request_keys) emit tileReady(response_key, data);
             return;
         }
-        // A file disappeared, was empty, or provider/cache configuration changed.
-        // Re-evaluate the request on the owning thread; never publish stale bytes.
+        // Cache deletion or provider reconfiguration invalidates the original
+        // request. Do not restart a remote fetch for a tile just deleted by an
+        // administrator, and never deliver data from the old configuration.
+        if (generation != this->cache_generation)
+        {
+            for (const QString &response_key : request_keys)
+                emit tileFailed(response_key, TileFailureReason::Cancelled);
+            return;
+        }
+        // An unchanged cache file may have vanished or become unreadable.
+        // Fall back to the normal request path only for that genuine miss.
         for (const QString &response_key : request_keys)
         {
             const TileRequestResult result = getTile(provider, z, wrapped_x, y, response_key);

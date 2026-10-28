@@ -162,3 +162,12 @@ Asynchronous cold-cache reads are limited to 64 unique jobs and a combined
 rejected with the existing busy status instead of being loaded into memory.
 The read worker also bounds the actual read if a file changes after admission.
 
+
+### Phase 03: invalidated cold reads
+
+Cache deletion and provider reconfiguration now cancel pending asynchronous
+cache reads rather than interpreting them as ordinary disk misses. This avoids
+accidental upstream refetches and stale response delivery after administrative
+invalidation. Genuine read failures with an unchanged cache generation retain
+the existing fallback behavior. The cache reuse regression test covers deletion
+while a read completion is queued.
