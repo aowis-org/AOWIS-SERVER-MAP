@@ -206,3 +206,8 @@ URL override is an internal test seam; production Copernicus URLs remain fixed.
 The local Copernicus HTTP integration test also exercises slow-but-progressing transfers
 and a stalled peer with shortened test-only timeouts. Production timeout defaults
 and the upstream URL are unchanged.
+
+The local slow-network regression suite independently checks that ongoing progress avoids
+inactivity timeout, that stalled transfers terminate on inactivity, and that an
+absolute deadline still stops a continuously progressing but overlong transfer.
+These checks use short test-only limits and do not alter production defaults.

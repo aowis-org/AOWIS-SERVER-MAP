@@ -156,9 +156,12 @@ MockUpstream launchRecoveryUpstream(int scenario, const QByteArray &payload)
 // Prove real bytes arriving steadily can exceed the old two-minute-style
 // absolute cutoff without being misclassified as an idle connection. Also
 // prove that a peer which stops making progress is eventually aborted.
-bool verifySlowNetwork(const QString &root, bool stall)
+bool verifySlowNetwork(const QString &root, int scenario)
 {
-    const QString directory = QDir(root).filePath(stall ? "stalled-transfer" : "slow-transfer");
+    const bool stall = scenario == 1;
+    const bool absolute_deadline = scenario == 2;
+    const QString directory = QDir(root).filePath(
+        stall ? "stalled-transfer" : (absolute_deadline ? "deadline-transfer" : "slow-transfer"));
     std::promise<quint16> ready;
     std::promise<bool> completed;
     std::future<quint16> port = ready.get_future();
@@ -222,16 +225,17 @@ bool verifySlowNetwork(const QString &root, bool stall)
     QString error;
     const bool fetched = Aowis::Map::Internal::fetchCopernicusSourceForIntegrationTest(
         directory, QUrl(QStringLiteral("http://127.0.0.1:%1/source.tif").arg(upstream_port)),
-        &error, 500, 500, stall ? 900 : 4000);
+        &error, 500, stall ? 300 : 500, absolute_deadline ? 650 : 4000);
     const bool request_ok = outcome.get();
     server_thread.join();
     const QString source = QDir(directory).filePath(
         "copernicus/glo30/Copernicus_DSM_COG_10_N50_00_E008_00_DEM.tif");
     if (!require(request_ok, "Slow-network upstream did not receive a full GET") ||
-        !require(fetched == !stall, "Unexpected slow-network transfer result"))
+        !require(fetched == (scenario == 0), "Unexpected slow-network transfer result"))
         return false;
-    if (stall)
-        return require(!QFile::exists(source), "Stalled transfer published incomplete source");
+    if (scenario != 0)
+        return require(!QFile::exists(source),
+                       "Timed-out transfer published incomplete source");
     QFile published(source);
     return require(published.open(QIODevice::ReadOnly) &&
                    published.readAll() == QByteArray(1000, 'S'),
@@ -338,8 +342,9 @@ int main(int argc, char **argv)
     QByteArray changed_payload(1000, '\0');
     for (qsizetype i = 0; i < changed_payload.size(); ++i)
         changed_payload[i] = char('a' + i % 26);
-    if (!verifySlowNetwork(temp.path(), false) ||
-        !verifySlowNetwork(temp.path(), true) ||
+    if (!verifySlowNetwork(temp.path(), 0) ||
+        !verifySlowNetwork(temp.path(), 1) ||
+        !verifySlowNetwork(temp.path(), 2) ||
         !verifyRecoveryScenario(temp.path(), 0, payload, changed_payload) ||
         !verifyRecoveryScenario(temp.path(), 1, payload, payload) ||
         !verifyRecoveryScenario(temp.path(), 2, payload, changed_payload))
