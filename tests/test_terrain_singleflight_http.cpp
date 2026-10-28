@@ -160,15 +160,39 @@ int main(int argc, char **argv)
         reply->deleteLater();
     }
 
+    // Once the first flight has completed, capacity must be reusable. A
+    // rejected request must not leave a stuck registry entry or admission
+    // reservation that prevents later unique tiles from being processed.
+    const bool first_flight_cleared =
+        TerrainSingleFlightTestAccess::waiterCount(server) == 0 &&
+        TerrainSingleFlightTestAccess::uniqueJobCount(server) == 0 &&
+        TerrainSingleFlightTestAccess::admittedJobs(server) == 0;
+
+    QNetworkAccessManager recovery_network;
+    QNetworkReply *recovery_reply = recovery_network.get(QNetworkRequest(other_url));
+    timer.restart();
+    while (!recovery_reply->isFinished() && timer.elapsed() < 5000)
+    {
+        app.processEvents(QEventLoop::AllEvents, 20);
+        QThread::msleep(1);
+    }
+    const bool recovered = recovery_reply->isFinished() &&
+        recovery_reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() == 404 &&
+        TerrainSingleFlightTestAccess::waiterCount(server) == 0 &&
+        TerrainSingleFlightTestAccess::uniqueJobCount(server) == 0 &&
+        TerrainSingleFlightTestAccess::admittedJobs(server) == 0;
+    recovery_reply->deleteLater();
+
     if (!deduplicated || !overload_rejected || !response_ok ||
-        TerrainSingleFlightTestAccess::waiterCount(server) != 0 ||
-        TerrainSingleFlightTestAccess::uniqueJobCount(server) != 0)
+        !first_flight_cleared || !recovered)
     {
         std::cerr << "Terrain tile single-flight HTTP regression failed: "
                   << "deduplicated=" << deduplicated
                   << " overload_rejected=" << overload_rejected
                   << " all_finished=" << all_finished
-                  << " valid_responses=" << response_ok << '\n';
+                  << " valid_responses=" << response_ok
+                  << " first_flight_cleared=" << first_flight_cleared
+                  << " recovered=" << recovered << '\n';
         return 1;
     }
     return 0;

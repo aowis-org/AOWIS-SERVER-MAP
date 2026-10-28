@@ -262,3 +262,12 @@ same tile returns HTTP 503, and a different tile is also rejected with HTTP
 or admitted-job count. Once unblocked, all original waiters must finish and the
 single-flight registry must be empty. This verifies the overload behavior at
 actual HTTP request boundaries, not just the admission counter.
+
+### Terrain admission recovery regression
+
+After the single-flight overload test releases the blocked worker and all
+six shared requests complete, the integration test checks that no pending
+waiters, unique jobs, or terrain admission slots remain. It then requests a
+previously rejected different tile and requires the normal offline 404
+response, followed by another zero-capacity-leak check. This catches stale
+registration or admission leaks that only become visible after overload.
