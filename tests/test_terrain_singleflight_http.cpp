@@ -1069,14 +1069,15 @@ int main(int argc, char **argv)
         }
     }
 
-    // Real loopback acquisition: an upstream holds a response open while a
-    // normalized cached tile must still be served by the CPU pool. Shutdown
-    // must cancel the active QNetworkReply and finish the outstanding future.
+    // Repeat live contention/shutdown to catch resource leakage over time.
+    // Two real upstream transfers hold open while a cached tile is served.
+    // Shutdown must cancel both replies and finish both terrain futures.
+    for (int repetition = 0; repetition < 3; ++repetition)
     {
         std::promise<quint16> listen_promise;
         std::future<quint16> listen_future = listen_promise.get_future();
-        std::atomic<bool> upstream_connected{false};
-        std::atomic<bool> upstream_disconnected{false};
+        std::atomic<int> upstream_connected{0};
+        std::atomic<int> upstream_disconnected{0};
         std::thread upstream([&listen_promise, &upstream_connected,
                               &upstream_disconnected]()
         {
@@ -1087,34 +1088,57 @@ int main(int argc, char **argv)
                 return;
             }
             listen_promise.set_value(upstream_server.serverPort());
-            if (!upstream_server.waitForNewConnection(5000))
-                return;
-            QTcpSocket *socket = upstream_server.nextPendingConnection();
-            QByteArray request;
-            while (!request.contains("\r\n\r\n") && request.size() < 16384)
+            QList<QTcpSocket *> sockets;
+            QElapsedTimer accept_deadline;
+            accept_deadline.start();
+            while (sockets.size() < 2 && accept_deadline.elapsed() < 5000)
             {
-                if (!socket->waitForReadyRead(3000))
-                    break;
-                request += socket->readAll();
-            }
-            if (request.contains("GET "))
-            {
+                if (!upstream_server.waitForNewConnection(100))
+                    continue;
+                QTcpSocket *socket = upstream_server.nextPendingConnection();
+                QByteArray request;
+                QElapsedTimer request_deadline;
+                request_deadline.start();
+                while (!request.contains("\r\n\r\n") &&
+                       request.size() < 16384 && request_deadline.elapsed() < 2000)
+                {
+                    if (socket->waitForReadyRead(100))
+                        request += socket->readAll();
+                }
+                if (!request.contains("GET "))
+                {
+                    delete socket;
+                    continue;
+                }
                 socket->write("HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n"
                               "ETag: \"stalled\"\r\nConnection: close\r\n\r\n"
                               "partial-data");
                 socket->flush();
-                upstream_connected.store(true);
-                // The client should disconnect on Server destruction, not
-                // because this mock peer prematurely completes its response.
-                QElapsedTimer deadline;
-                deadline.start();
-                while (socket->state() != QAbstractSocket::UnconnectedState &&
-                       deadline.elapsed() < 6000)
+                sockets.append(socket);
+                upstream_connected.fetch_add(1);
+            }
+            // Both remote workers should be waiting on network I/O when the
+            // cached request is served. Shutdown must abort both replies.
+            QElapsedTimer disconnect_deadline;
+            disconnect_deadline.start();
+            while (disconnect_deadline.elapsed() < 6000)
+            {
+                int disconnected = 0;
+                for (QTcpSocket *socket : sockets)
                 {
-                    socket->waitForDisconnected(100);
+                    if (socket->state() != QAbstractSocket::UnconnectedState)
+                        socket->waitForDisconnected(50);
+                    if (socket->state() == QAbstractSocket::UnconnectedState)
+                        ++disconnected;
                 }
-                upstream_disconnected.store(
-                    socket->state() == QAbstractSocket::UnconnectedState);
+                if (disconnected == sockets.size())
+                    break;
+            }
+            for (QTcpSocket *socket : sockets)
+            {
+                if (socket->state() == QAbstractSocket::UnconnectedState)
+                    upstream_disconnected.fetch_add(1);
+                delete socket;
             }
         });
         const quint16 upstream_port = listen_future.get();
@@ -1137,7 +1161,7 @@ int main(int argc, char **argv)
         live_config.map_remote_fetch_enabled = false;
         live_config.terrain_remote_fetch_enabled = true;
         live_config.maximum_terrain_workers = 1;
-        live_config.maximum_terrain_remote_workers = 1;
+        live_config.maximum_terrain_remote_workers = 2;
         live_config.maximum_terrain_jobs = 4;
         live_config.terrain_integration_source_url = QUrl(
             QStringLiteral("http://127.0.0.1:%1/source.tif").arg(upstream_port));
@@ -1175,9 +1199,12 @@ int main(int argc, char **argv)
         QFuture<QHttpServerResponse> stalled_future =
             TerrainSingleFlightTestAccess::submitTileDirect(
                 *live_server, QStringLiteral("copernicus-glo30"), 8, 101, 100);
+        QFuture<QHttpServerResponse> second_stalled_future =
+            TerrainSingleFlightTestAccess::submitTileDirect(
+                *live_server, QStringLiteral("copernicus-glo30"), 8, 160, 100);
         QElapsedTimer waiting;
         waiting.start();
-        while (!upstream_connected.load() && waiting.elapsed() < 3000)
+        while (upstream_connected.load() < 2 && waiting.elapsed() < 4000)
         {
             app.processEvents(QEventLoop::AllEvents, 10);
             QThread::msleep(1);
@@ -1196,18 +1223,35 @@ int main(int argc, char **argv)
             cached_reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() == 200 &&
             cached_reply->readAll() == cached_bytes;
         cached_reply->deleteLater();
-        const bool active_before_shutdown = upstream_connected.load() &&
-            !stalled_future.isFinished();
+        const int remote_jobs_before_shutdown =
+            TerrainSingleFlightTestAccess::remoteAdmittedJobs(*live_server);
+        const int global_jobs_before_shutdown =
+            TerrainSingleFlightTestAccess::admittedJobs(*live_server);
+        const int tile_jobs_before_shutdown =
+            TerrainSingleFlightTestAccess::uniqueJobCount(*live_server);
+        const bool first_finished_before_shutdown = stalled_future.isFinished();
+        const bool second_finished_before_shutdown = second_stalled_future.isFinished();
+        const bool active_before_shutdown = upstream_connected.load() == 2 &&
+            !first_finished_before_shutdown && !second_finished_before_shutdown;
         delete live_server;
         upstream.join();
         if (!active_before_shutdown || !cached_ok ||
             !stalled_future.isFinished() || stalled_future.resultCount() != 1 ||
-            !upstream_disconnected.load())
+            !second_stalled_future.isFinished() || second_stalled_future.resultCount() != 1 ||
+            upstream_disconnected.load() != 2)
         {
             std::cerr << "Live upstream contention/shutdown failed: active="
                       << active_before_shutdown << " cached=" << cached_ok
                       << " future=" << stalled_future.isFinished()
-                      << " disconnected=" << upstream_disconnected.load() << '\n';
+                      << " second=" << second_stalled_future.isFinished()
+                      << " connections=" << upstream_connected.load()
+                      << " disconnected=" << upstream_disconnected.load()
+                      << " remote_jobs=" << remote_jobs_before_shutdown
+                      << " global_jobs=" << global_jobs_before_shutdown
+                      << " tile_jobs=" << tile_jobs_before_shutdown
+                      << " first_finished_before_shutdown=" << first_finished_before_shutdown
+                      << " second_finished_before_shutdown=" << second_finished_before_shutdown
+                      << " repetition=" << repetition << '\n';
             return 1;
         }
     }
