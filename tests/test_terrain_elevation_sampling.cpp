@@ -337,6 +337,47 @@ int main()
         return 1;
     }
 
+    // A remote-enabled two-stage elevation request must retain the same local
+    // lower-zoom fallback when its acquisition stage has no provider source.
+    // The CPU continuation is explicitly forbidden from fetching upstream data.
+    TerrainData::Config fallback_config;
+    fallback_config.enabled = true;
+    fallback_config.remote_fetch_enabled = true;
+    fallback_config.cache_directory = temporary_directory.path();
+    TerrainData fallback_terrain(fallback_config);
+    if (!require(fallback_terrain.initialize(&error_message),
+                 "Failed to initialize remote-enabled fallback terrain"))
+    {
+        return 1;
+    }
+
+    const QString fallback_dataset = QStringLiteral("elevation-handoff-fallback");
+    const TerrainTile fallback_tile = makeConstantTile(coarse_address, fallback_dataset, 217.0f);
+    if (!require(writeTile(fallback_terrain, fallback_tile, &error_message),
+                 "Failed to seed cached coarse fallback tile"))
+    {
+        return 1;
+    }
+    const TerrainProviderFetchResult acquired_fallback =
+        fallback_terrain.acquireElevationSources(fallback_dataset, latitude_deg, longitude_deg);
+    if (!require(acquired_fallback.status == TerrainProviderFetchStatus::Ready,
+                 "Unavailable remote source incorrectly blocked a cached elevation fallback"))
+    {
+        return 1;
+    }
+    const TerrainElevationLookupResult fallback_result =
+        fallback_terrain.sampleElevation(fallback_dataset, latitude_deg, longitude_deg,
+                                         std::nullopt, false);
+    if (!require(fallback_result.status == TerrainElevationLookupStatus::Ready &&
+                     fallback_result.tile_address.has_value() &&
+                     fallback_result.tile_address->zoom == coarse_address.zoom &&
+                     fallback_result.sample.has_value() &&
+                     std::abs(fallback_result.sample->elevation_m - 217.0) < 0.001,
+                 "CPU-only elevation continuation lost the cached lower-zoom fallback"))
+    {
+        return 1;
+    }
+
     const QString fine_path = terrain_data.normalizedTilePath(dataset, fine_address);
     QFile corrupt_file(fine_path);
     if (!require(corrupt_file.open(QIODevice::ReadWrite), "Failed to open terrain tile for corruption test"))
