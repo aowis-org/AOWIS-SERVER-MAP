@@ -32,6 +32,24 @@ public:
         });
     }
 
+    static bool reserveRemoteJob(Server &server)
+    {
+        if (!server.terrain_remote_admission.tryAcquire())
+            return false;
+        if (!server.terrain_admission.tryAcquire())
+        {
+            server.terrain_remote_admission.release();
+            return false;
+        }
+        return true;
+    }
+
+    static void releaseRemoteJob(Server &server)
+    {
+        server.terrain_admission.release();
+        server.terrain_remote_admission.release();
+    }
+
     static int remoteWorkerLimit(const Server &server)
     {
         return server.terrain_remote_pool.maxThreadCount();
@@ -462,6 +480,38 @@ int main(int argc, char **argv)
             return 1;
         }
 
+        // Fill only the remote admission allowance. The cached tile must
+        // still enter through the shared admission budget and finish on the
+        // local pool, while a new remote miss must get HTTP 503 immediately.
+        const bool first_remote_slot =
+            TerrainSingleFlightTestAccess::reserveRemoteJob(isolated_server);
+        const bool second_remote_slot = first_remote_slot &&
+            TerrainSingleFlightTestAccess::reserveRemoteJob(isolated_server);
+        if (!second_remote_slot)
+        {
+            if (first_remote_slot)
+                TerrainSingleFlightTestAccess::releaseRemoteJob(isolated_server);
+            remote_release.release(2);
+            std::cerr << "Failed to reserve remote admission slots\n";
+            return 1;
+        }
+
+        QNetworkAccessManager remote_probe_network;
+        const QUrl remote_url(QStringLiteral(
+            "http://127.0.0.1:%1/terrain/v1/copernicus-glo30/5/11/13.aowterrain")
+            .arg(TerrainSingleFlightTestAccess::port(isolated_server)));
+        QNetworkReply *remote_reply =
+            remote_probe_network.get(QNetworkRequest(remote_url));
+        timer.restart();
+        while (!remote_reply->isFinished() && timer.elapsed() < 3000)
+        {
+            app.processEvents(QEventLoop::AllEvents, 20);
+            QThread::msleep(1);
+        }
+        const bool remote_rejected = remote_reply->isFinished() &&
+            remote_reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() == 503;
+        remote_reply->deleteLater();
+
         QNetworkAccessManager isolation_network;
         const QUrl cached_url(QStringLiteral(
             "http://127.0.0.1:%1/terrain/v1/copernicus-glo30/5/11/12.aowterrain")
@@ -478,10 +528,15 @@ int main(int argc, char **argv)
             cached_reply->readAll() == encoded;
         // Always unblock before server destruction, even if the HTTP probe failed.
         remote_release.release(2);
+        TerrainSingleFlightTestAccess::releaseRemoteJob(isolated_server);
+        TerrainSingleFlightTestAccess::releaseRemoteJob(isolated_server);
         cached_reply->deleteLater();
-        if (!isolation_passed)
+        if (!isolation_passed || !remote_rejected ||
+            TerrainSingleFlightTestAccess::admittedJobs(isolated_server) != 0)
         {
-            std::cerr << "Cached terrain request was starved by remote workers\n";
+            std::cerr << "Remote overload did not preserve cached terrain admission: "
+                      << "cached=" << isolation_passed
+                      << " rejected=" << remote_rejected << '\n';
             return 1;
         }
     }
