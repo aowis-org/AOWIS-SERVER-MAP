@@ -248,6 +248,23 @@ if(AOWIS_SERVER_MAP_BUILD_SERVER)
             PRIVATE cxx_std_20)
         add_test(NAME aowis-server-map-provider-state
                  COMMAND aowis-server-map-provider-state-test)
+        add_executable(aowis-server-map-terrain-singleflight-http-test
+            tests/test_terrain_singleflight_http.cpp
+            src/server/server.cpp
+            src/server/server.h
+            src/server/configuration.cpp
+            src/server/configuration.h
+        )
+        target_include_directories(aowis-server-map-terrain-singleflight-http-test
+            PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/server")
+        target_link_libraries(aowis-server-map-terrain-singleflight-http-test
+            PRIVATE AOWIS::Map Qt6::HttpServer Qt6::Concurrent)
+        target_compile_features(aowis-server-map-terrain-singleflight-http-test
+            PRIVATE cxx_std_20)
+        add_test(NAME aowis-server-map-terrain-singleflight-http
+            COMMAND aowis-server-map-terrain-singleflight-http-test)
+        set_tests_properties(aowis-server-map-terrain-singleflight-http
+            PROPERTIES TIMEOUT 15)
     endif()
 endif()
 
@@ -271,6 +288,7 @@ if(BUILD_TESTING)
         # The native test target must compile the production executable too.
         list(APPEND AOWIS_SERVER_MAP_TEST_TARGETS
             aowis-server-map-provider-state-test
+            aowis-server-map-terrain-singleflight-http-test
             aowis-server-map-server)
     endif()
     add_executable(aowis-server-map-terrain-admission-test

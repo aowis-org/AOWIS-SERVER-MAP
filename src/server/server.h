@@ -29,9 +29,12 @@ namespace Aowis::Map
 class TerrainData;
 }
 
+class TerrainSingleFlightTestAccess;
+
 class Server : public QObject
 {
     Q_OBJECT
+    friend class TerrainSingleFlightTestAccess;
 
 public:
     struct Config
