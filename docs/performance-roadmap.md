@@ -281,3 +281,16 @@ counter as terrain tile single-flight. Each waiting client owns its own
 response promise, and shutdown drains the elevation registry after workers
 complete. The terrain HTTP integration test exercises deduplication, overload,
 completion and capacity recovery for elevation requests.
+
+### Phase 04 — Terrain analysis grid single-flight
+
+Identical concurrent analysis-grid GET requests now share a single terrain
+computation and a single admitted job. The canonical request key includes the
+resolved dataset, all four numeric bounds, columns, and rows. Grid requests
+share the existing pending-HTTP-response limit with terrain tiles and
+individual elevation lookups, and preserve the existing status-code and binary
+float32 little-endian output contract. Each result is serialized once for its
+waiting clients. Grid dimensions remain limited to 512×512 (at most 1 MiB of
+binary float samples per unique grid result); the configured terrain job count
+limits concurrent unique computations. HTTP regression coverage verifies
+identical and numerically equivalent queries, overload, and cleanup.

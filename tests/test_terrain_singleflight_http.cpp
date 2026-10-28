@@ -43,6 +43,11 @@ public:
         return server.pending_terrain_tiles.size();
     }
 
+    static int gridJobs(const Server &server)
+    {
+        return server.pending_terrain_grids.size();
+    }
+
     static int elevationJobs(const Server &server)
     {
         return server.pending_terrain_elevations.size();
@@ -276,6 +281,89 @@ int main(int argc, char **argv)
                   << " overload=" << elevation_overload
                   << " responses=" << elevation_responses
                   << " cleared=" << elevation_cleared << '\n';
+        return 1;
+    }
+    // Third wave: grid requests also use single-flight, admission, and the
+    // same global pending-response budget. Equivalent numeric query strings
+    // must map to one computation.
+    QSemaphore grid_entered;
+    QSemaphore grid_release;
+    TerrainSingleFlightTestAccess::blockWorker(server, grid_entered, grid_release);
+    if (!grid_entered.tryAcquire(1, 3000))
+    {
+        grid_release.release();
+        std::cerr << "Failed to occupy grid worker\n";
+        return 1;
+    }
+
+    QNetworkAccessManager grid_network;
+    QList<QNetworkReply *> grid_replies;
+    const QString grid_path = QStringLiteral(
+        "/terrain/v1/analysis/grid?west=8&south=49&east=10&north=51&columns=8&rows=8");
+    const QUrl grid_url(QStringLiteral("http://127.0.0.1:%1%2")
+        .arg(TerrainSingleFlightTestAccess::port(server)).arg(grid_path));
+    const QUrl equivalent_url(QStringLiteral(
+        "http://127.0.0.1:%1/terrain/v1/analysis/grid?west=8.0&south=49.0&east=10.0&north=51.0&columns=08&rows=08")
+        .arg(TerrainSingleFlightTestAccess::port(server)));
+    for (int index = 0; index < request_count; ++index)
+        grid_replies.append(grid_network.get(QNetworkRequest(
+            index == request_count - 1 ? equivalent_url : grid_url)));
+    timer.restart();
+    while (TerrainSingleFlightTestAccess::waiterCount(server) != request_count &&
+           timer.elapsed() < 5000)
+    {
+        app.processEvents(QEventLoop::AllEvents, 20);
+        QThread::msleep(1);
+    }
+    const bool grid_deduplicated =
+        TerrainSingleFlightTestAccess::waiterCount(server) == request_count &&
+        TerrainSingleFlightTestAccess::gridJobs(server) == 1 &&
+        TerrainSingleFlightTestAccess::admittedJobs(server) == 1;
+
+    QNetworkAccessManager grid_overload_network;
+    QNetworkReply *grid_excess = grid_overload_network.get(QNetworkRequest(grid_url));
+    timer.restart();
+    while (!grid_excess->isFinished() && timer.elapsed() < 5000)
+    {
+        app.processEvents(QEventLoop::AllEvents, 20);
+        QThread::msleep(1);
+    }
+    const bool grid_overload = grid_excess->isFinished() &&
+        grid_excess->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() == 503;
+    grid_excess->deleteLater();
+    grid_release.release();
+
+    timer.restart();
+    bool grid_finished = false;
+    while (timer.elapsed() < 5000)
+    {
+        app.processEvents(QEventLoop::AllEvents, 20);
+        grid_finished = true;
+        for (QNetworkReply *reply : std::as_const(grid_replies))
+            grid_finished = grid_finished && reply->isFinished();
+        if (grid_finished)
+            break;
+        QThread::msleep(1);
+    }
+    bool grid_responses = grid_finished;
+    for (QNetworkReply *reply : std::as_const(grid_replies))
+    {
+        // Offline-only test data produces not-found, shared by all waiters.
+        grid_responses = grid_responses &&
+            reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() == 404;
+        reply->deleteLater();
+    }
+    const bool grid_cleared =
+        TerrainSingleFlightTestAccess::waiterCount(server) == 0 &&
+        TerrainSingleFlightTestAccess::gridJobs(server) == 0 &&
+        TerrainSingleFlightTestAccess::admittedJobs(server) == 0;
+    if (!grid_deduplicated || !grid_overload || !grid_responses || !grid_cleared)
+    {
+        std::cerr << "Terrain grid single-flight regression failed: "
+                  << "deduplicated=" << grid_deduplicated
+                  << " overload=" << grid_overload
+                  << " responses=" << grid_responses
+                  << " cleared=" << grid_cleared << '\n';
         return 1;
     }
     return 0;

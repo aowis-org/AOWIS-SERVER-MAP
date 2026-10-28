@@ -319,6 +319,17 @@ Server::~Server()
         }
     }
     this->pending_terrain_elevations.clear();
+    for (const PendingPromises &promises : std::as_const(this->pending_terrain_grids))
+    {
+        for (const PendingPromise &promise : promises)
+        {
+            promise->addResult(QHttpServerResponse(
+                "Map server shutting down",
+                QHttpServerResponse::StatusCode::ServiceUnavailable));
+            promise->finish();
+        }
+    }
+    this->pending_terrain_grids.clear();
     this->pending_terrain_tile_count = 0;
 
     for (const PendingPromises &promises : std::as_const(pending))
@@ -496,6 +507,107 @@ QFuture<QHttpServerResponse> Server::submitTerrainElevation(
             for (const PendingPromise &waiter : waiters)
             {
                 waiter->addResult(makeTerrainElevationSuccessResponse(result));
+                waiter->finish();
+            }
+        }, Qt::QueuedConnection);
+    });
+    return future;
+}
+
+QFuture<QHttpServerResponse> Server::submitTerrainGrid(
+    const Aowis::Map::TerrainAnalysisGridRequest &request)
+{
+    // Values have already passed HTTP validation. Canonical numeric keys
+    // coalesce equivalent query representations without merging distinct grids.
+    const auto number = [](double value)
+    {
+        return QString::number(value == 0.0 ? 0.0 : value, 'g', 17);
+    };
+    const QString key = request.dataset + QLatin1Char('/') +
+        number(request.bounds.west_deg) + QLatin1Char('/') +
+        number(request.bounds.south_deg) + QLatin1Char('/') +
+        number(request.bounds.east_deg) + QLatin1Char('/') +
+        number(request.bounds.north_deg) + QLatin1Char('/') +
+        QString::number(request.columns) + QLatin1Char('/') +
+        QString::number(request.rows);
+    const bool existing = this->pending_terrain_grids.contains(key);
+    if (this->shutting_down ||
+        this->pending_terrain_tile_count >= this->config.maximum_pending_requests ||
+        (!existing && !this->terrain_admission.tryAcquire()))
+    {
+        QHttpServerResponse response(
+            "Terrain service busy; retry later",
+            QHttpServerResponse::StatusCode::ServiceUnavailable);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
+        QHttpHeaders headers = response.headers();
+        headers.replaceOrAppend("Retry-After", "1");
+        response.setHeaders(std::move(headers));
+#else
+        response.setHeader("Retry-After", "1");
+#endif
+        return makeReadyResponse(std::move(response));
+    }
+
+    PendingPromise promise = PendingPromise::create();
+    promise->start();
+    QFuture<QHttpServerResponse> future = promise->future();
+    this->pending_terrain_grids[key].append(promise);
+    ++this->pending_terrain_tile_count;
+    if (existing)
+        return future;
+
+    this->terrain_worker_pool.start([this, key, request]()
+    {
+        Aowis::Map::TerrainAnalysisGridResult result;
+        try
+        {
+            result = this->terrain_data->analysisGrid(request);
+        }
+        catch (...)
+        {
+            result.status = Aowis::Map::TerrainProviderFetchStatus::ConversionError;
+            result.error_message = QStringLiteral("Terrain processing failed");
+        }
+        // Serialize once for all waiting responses. Input dimensions are
+        // bounded by the route to 512x512 (at most 1 MiB of floats).
+        QByteArray bytes;
+        if (result.status == Aowis::Map::TerrainProviderFetchStatus::Ready)
+        {
+            bytes.resize(result.elevations_m.size() * qsizetype(sizeof(float)));
+            for (qsizetype index = 0; index < result.elevations_m.size(); ++index)
+            {
+                const float value = result.elevations_m.at(index);
+                quint32 bits = 0;
+                std::memcpy(&bits, &value, sizeof(bits));
+                qToLittleEndian(bits, bytes.data() + index * qsizetype(sizeof(float)));
+            }
+        }
+        this->terrain_admission.release();
+        QMetaObject::invokeMethod(this,
+            [this, key, result = std::move(result), bytes = std::move(bytes)]() mutable
+        {
+            const PendingPromises waiters = this->pending_terrain_grids.take(key);
+            this->pending_terrain_tile_count -= waiters.size();
+            for (const PendingPromise &waiter : waiters)
+            {
+                if (result.status == Aowis::Map::TerrainProviderFetchStatus::Ready)
+                {
+                    waiter->addResult(QHttpServerResponse(
+                        QByteArrayLiteral("application/vnd.aowis.dem-f32le"), bytes));
+                }
+                else
+                {
+                    const QHttpServerResponse::StatusCode status =
+                        result.status == Aowis::Map::TerrainProviderFetchStatus::UnsupportedDataset ||
+                        result.status == Aowis::Map::TerrainProviderFetchStatus::UnsupportedAddress
+                        ? QHttpServerResponse::StatusCode::BadRequest :
+                        result.status == Aowis::Map::TerrainProviderFetchStatus::SourceUnavailable
+                        ? QHttpServerResponse::StatusCode::NotFound :
+                        result.status == Aowis::Map::TerrainProviderFetchStatus::NetworkError
+                        ? QHttpServerResponse::StatusCode::BadGateway :
+                        QHttpServerResponse::StatusCode::ServiceUnavailable;
+                    waiter->addResult(QHttpServerResponse(result.error_message, status));
+                }
                 waiter->finish();
             }
         }, Qt::QueuedConnection);
@@ -936,36 +1048,7 @@ void Server::setupRoutes()
         grid_request.bounds = {values[0], values[1], values[2], values[3]};
         grid_request.columns = columns;
         grid_request.rows = rows;
-        return submitTerrainJob( [this, grid_request]()
-        {
-            const Aowis::Map::TerrainAnalysisGridResult result =
-                this->terrain_data->analysisGrid(grid_request);
-            if (result.status != Aowis::Map::TerrainProviderFetchStatus::Ready)
-            {
-                const QHttpServerResponse::StatusCode status =
-                    result.status == Aowis::Map::TerrainProviderFetchStatus::UnsupportedDataset ||
-                    result.status == Aowis::Map::TerrainProviderFetchStatus::UnsupportedAddress
-                    ? QHttpServerResponse::StatusCode::BadRequest :
-                    result.status == Aowis::Map::TerrainProviderFetchStatus::SourceUnavailable
-                    ? QHttpServerResponse::StatusCode::NotFound :
-                    result.status == Aowis::Map::TerrainProviderFetchStatus::NetworkError
-                    ? QHttpServerResponse::StatusCode::BadGateway :
-                    QHttpServerResponse::StatusCode::ServiceUnavailable;
-                return QHttpServerResponse(result.error_message, status);
-            }
-            QByteArray bytes;
-            bytes.resize(result.elevations_m.size() * qsizetype(sizeof(float)));
-            for (qsizetype index = 0; index < result.elevations_m.size(); ++index)
-            {
-                const float value = result.elevations_m.at(index);
-                quint32 bits = 0;
-                static_assert(sizeof(value) == sizeof(bits));
-                std::memcpy(&bits, &value, sizeof(bits));
-                qToLittleEndian(bits, bytes.data() + index * qsizetype(sizeof(float)));
-            }
-            return QHttpServerResponse(
-                QByteArrayLiteral("application/vnd.aowis.dem-f32le"), bytes);
-        });
+        return submitTerrainGrid(grid_request);
     });
 
     this->http.route("/terrain/v1/analysis/grid",
