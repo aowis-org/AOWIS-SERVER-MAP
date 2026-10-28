@@ -512,6 +512,42 @@ int main()
         return 1;
     }
 
+    // Repeated interrupted 206 responses must extend the verified prefix, not
+    // start over or expose an incomplete final source.
+    QTemporaryDir repeated_resume_directory;
+    if (!require(repeated_resume_directory.isValid(),
+                 "Failed to create repeated-resume staging directory"))
+        return 1;
+    const QString repeated_prefix = repeated_resume_directory.filePath("source.partial");
+    const QString repeated_meta = repeated_resume_directory.filePath("source.partial.meta");
+    const QString repeated_incoming = repeated_resume_directory.filePath("source.incoming");
+    {
+        QFile prefix(repeated_prefix);
+        QFile incoming(repeated_incoming);
+        if (!require(prefix.open(QIODevice::WriteOnly) && prefix.write("ABCD", 4) == 4 &&
+                     incoming.open(QIODevice::WriteOnly) && incoming.write("EFG", 3) == 3,
+                     "Failed to create repeated-resume input files"))
+            return 1;
+    }
+    const Internal::CopernicusPartialState repeated_state{4, 12, "\"v1\""};
+    if (!require(Internal::saveCopernicusPartialState(repeated_meta, repeated_state, 1024) &&
+                 Internal::appendCopernicusPartialSuffix(
+                     repeated_prefix, repeated_meta, repeated_incoming, repeated_state, 3, 1024),
+                 "Failed to extend a verified interrupted range"))
+        return 1;
+    const std::optional<Internal::CopernicusPartialState> extended =
+        Internal::loadCopernicusPartialState(repeated_prefix, repeated_meta, 1024);
+    QFile extended_file(repeated_prefix);
+    if (!require(extended && extended->downloaded_bytes == 7 &&
+                 extended_file.open(QIODevice::ReadOnly) &&
+                 extended_file.readAll() == "ABCDEFG",
+                 "Repeated resume lost bytes or metadata"))
+        return 1;
+    if (!require(!Internal::appendCopernicusPartialSuffix(
+                     repeated_prefix, repeated_meta, repeated_incoming, repeated_state, 3, 1024),
+                 "Stale partial metadata was accepted for a second append"))
+        return 1;
+
     // A competing process can hold a provider-native source lock for minutes.
     // Cancellation must interrupt that wait promptly rather than occupy a
     // terrain worker until the normal source lock timeout expires.

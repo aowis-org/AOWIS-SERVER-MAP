@@ -190,3 +190,5 @@ A profile's geographic tile intersection is evaluated before the provider is
 allowed to acquire missing source data. Note that one Copernicus COG covers a
 whole degree cell, which may extend beyond the smaller allowed XYZ tile footprint;
 the policy governs the requested normalized tile, not clipping of the upstream COG.
+
+Repeated interruptions during validated HTTP 206 resumes retain newly received bytes when the response range, strong ETag and declared length match the saved entity. Partial files remain unpublished until complete.

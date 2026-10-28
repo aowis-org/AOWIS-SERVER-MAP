@@ -454,6 +454,25 @@ SourceLoadResult downloadSourceTile(const QString &provider_cache_directory,
             else
                 discard_incoming();
         }
+        else if (http_status == 206 && prior_state && downloaded_bytes > 0)
+        {
+            const std::optional<Internal::CopernicusContentRange> range =
+                Internal::parseCopernicusContentRange(content_range);
+            const qint64 remaining = prior_state->total_bytes - prior_state->downloaded_bytes;
+            if (range && range->first == prior_state->downloaded_bytes &&
+                range->total == prior_state->total_bytes &&
+                range->last + 1 == range->total &&
+                range->last - range->first + 1 == remaining &&
+                etag == prior_state->strong_etag &&
+                valid_content_length && content_length == remaining &&
+                downloaded_bytes < remaining)
+            {
+                Internal::appendCopernicusPartialSuffix(
+                    partial_path, metadata_path, incoming_path, *prior_state,
+                    downloaded_bytes, MaximumSourceDownloadBytes);
+            }
+            discard_incoming();
+        }
         else
             discard_incoming();
         result.status = SourceLoadStatus::NetworkError;

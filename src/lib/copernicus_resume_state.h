@@ -89,4 +89,63 @@ inline std::optional<CopernicusPartialState> loadCopernicusPartialState(
         return std::nullopt;
     return state;
 }
+
+// Preserve a second (or later) interrupted range response without exposing an
+// incomplete source at the final cache path. The caller has verified the HTTP
+// range, total length and strong ETag, and owns the cross-process source lock.
+inline bool appendCopernicusPartialSuffix(const QString &partial_path,
+                                          const QString &metadata_path,
+                                          const QString &incoming_path,
+                                          const CopernicusPartialState &old_state,
+                                          qint64 suffix_bytes,
+                                          qint64 maximum_bytes)
+{
+    if (!validCopernicusPartialState(old_state, maximum_bytes) ||
+        suffix_bytes <= 0 || suffix_bytes >= old_state.total_bytes - old_state.downloaded_bytes)
+        return false;
+    const std::optional<CopernicusPartialState> current =
+        loadCopernicusPartialState(partial_path, metadata_path, maximum_bytes);
+    if (!current || current->downloaded_bytes != old_state.downloaded_bytes ||
+        current->total_bytes != old_state.total_bytes ||
+        current->strong_etag != old_state.strong_etag ||
+        QFileInfo(incoming_path).size() != suffix_bytes)
+        return false;
+
+    QFile prefix(partial_path);
+    QFile suffix(incoming_path);
+    QSaveFile combined(partial_path);
+    if (!prefix.open(QIODevice::ReadOnly) || !suffix.open(QIODevice::ReadOnly) ||
+        !combined.open(QIODevice::WriteOnly))
+        return false;
+    const auto copy_bytes = [&combined](QFile &source, qint64 expected) -> bool
+    {
+        qint64 remaining = expected;
+        while (remaining > 0)
+        {
+            const QByteArray chunk = source.read(qMin(remaining, qint64(64 * 1024)));
+            if (chunk.isEmpty() || combined.write(chunk) != chunk.size())
+                return false;
+            remaining -= chunk.size();
+        }
+        return true;
+    };
+    if (!copy_bytes(prefix, old_state.downloaded_bytes) ||
+        !copy_bytes(suffix, suffix_bytes))
+    {
+        combined.cancelWriting();
+        return false;
+    }
+    prefix.close();
+    suffix.close();
+    if (!combined.commit())
+        return false;
+
+    const CopernicusPartialState updated{
+        old_state.downloaded_bytes + suffix_bytes, old_state.total_bytes,
+        old_state.strong_etag};
+    // A failed metadata update leaves a mismatching pair, which is rejected
+    // on next load. Nothing incomplete can become a published source.
+    return saveCopernicusPartialState(metadata_path, updated, maximum_bytes);
+}
+
 }
