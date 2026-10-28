@@ -99,6 +99,8 @@ private:
     QHttpServer http;
     QTcpServer *tcp;
     QThreadPool terrain_worker_pool;
+    // Slow source acquisition is isolated from cached terrain processing.
+    QThreadPool terrain_remote_pool;
     TerrainAdmission terrain_admission;
     TerrainByteAdmission terrain_grid_bytes;
     MapTiles *maptiles;

@@ -20,14 +20,14 @@ Apache / trusted local clients
                    |  bounded unique-job admission
                    |  grid output-byte reservations
                    v
-              dedicated terrain QThreadPool
+              separate cached / remote-capable pools
                    |
              TerrainData + Copernicus provider
                    |
             normalized/native caches -> upstream COG
 ```
 
-The frontend stays event-driven: waiting HTTP tile responses use `QFuture`/`QPromise` rather than dedicating a worker to every waiter. Network downloads for raster imagery use Qt's asynchronous network APIs. Terrain computation runs in a dedicated, bounded server-owned pool; Copernicus source acquisition **still uses a worker-local event loop** and can occupy a terrain worker while downloading. Terrain upstream I/O and CPU computation are **not yet separate execution domains**.
+The frontend stays event-driven: waiting HTTP tile responses use `QFuture`/`QPromise` rather than dedicating a worker to every waiter. Network downloads for raster imagery use Qt's asynchronous network APIs. Terrain jobs run in two independently bounded server-owned pools: normalized-cache tile hits and deletion work use the CPU pool, while potentially remote-fetching work uses a two-thread remote-capable pool. Copernicus source acquisition **still uses a worker-local event loop** and raster decoding occurs in the same remote-capable worker. This isolates slow transfers from normalized-cache hits but is **not yet an asynchronous acquisition/CPU continuation pipeline**.
 
 ## Raster tile delivery
 
@@ -43,11 +43,12 @@ Cached tiles and already available terrain remain usable without external networ
 
 ## Terrain execution and concurrency
 
-All asynchronous terrain routes run via a dedicated server-owned `QThreadPool`. Current defaults:
+Asynchronous terrain routes use separate cached-work and remote-capable `QThreadPool` instances. The remote-capable pool defaults to two workers and shares the existing terrain admission budget. Current defaults:
 
 | Budget | Default | Meaning |
 | --- | ---: | --- |
-| `terrain/maximum_workers` | 4 | Maximum concurrently executing terrain tasks; clamped to the job budget |
+| `terrain/maximum_workers` | 4 | Cached terrain processing and maintenance pool size; clamped to the job budget |
+| Remote-capable terrain workers | 2 | Independently bounded pool for requests that can acquire upstream data; not yet separately configurable |
 | `terrain/maximum_jobs` | 128 | Total admitted unique/ordinary terrain tasks, including queued tasks |
 | `server/max_pending_requests` | 2048 | Upper bound used for pending HTTP response waiters; shared by terrain tile, elevation and grid single-flight requests |
 | In-flight terrain grid reservation | 64 MiB | Estimated float32 output bytes for distinct admitted grid jobs |
@@ -57,7 +58,7 @@ Identical concurrent requests to normalized terrain tiles, point elevation, and 
 
 The grid byte budget accounts for estimated float-buffer output, **not** every intermediate decoder allocation, native raster buffer, waiting response or provider-cache allocation. These still need production memory profiling. Terrain cache deletion and upstream cancellation have their own endpoint semantics; do not assume every route is coalesced.
 
-On shutdown, the server stops listening, requests upstream cancellation, drains outstanding response promises and joins its terrain pool before destroying terrain dependencies. A blocked operation that does not respond to cancellation may still delay shutdown. Connection-disconnect tracking, absolute job deadlines and cancellation semantics merit further stress testing.
+On shutdown, the server stops listening, requests upstream cancellation, drains outstanding response promises and joins both terrain pools before destroying terrain dependencies. A blocked operation that does not respond to cancellation may still delay shutdown. Connection-disconnect tracking, absolute job deadlines and cancellation semantics merit further stress testing.
 
 ## Slow-network and offline behavior
 
@@ -72,7 +73,7 @@ download_deadline_seconds=1800
 
 The connection limit bounds waiting for response progress, the inactivity limit detects stalled transfers, and the **30-minute absolute deadline** allows slow but continuously progressing downloads to continue much longer than two minutes. All three are bounded; these are not unlimited downloads. Source-lock acquisition can be canceled while waiting. Incomplete downloads are not published as complete cache objects.
 
-Interrupted Copernicus COG downloads can resume from validated partial files when a strong ETag and known total length are available. Transfers without suitable validators restart from byte zero. Despite the available timeout controls, Copernicus downloads can still occupy terrain workers until they finish, fail or are canceled. A dedicated network I/O scheduler is a future architectural improvement, not a current feature.
+Interrupted Copernicus COG downloads can resume from validated partial files when a strong ETag and known total length are available. Transfers without suitable validators restart from byte zero. Despite the available timeout controls, Copernicus downloads occupy remote-capable workers until they finish, fail or are canceled. Normalized cached tile hits use the separate processing pool. Elevation and grid jobs currently use the remote-capable pool whenever terrain remote fetching is enabled, even when their inputs are cached; a true source acquisition/CPU continuation scheduler remains future work.
 
 To enforce offline use while retaining cached data, configure `terrain/remote_fetch_enabled=false` independently from `downloads/remote_fetch_enabled=false` for imagery. Restricting download coverage does **not** forbid reading already cached data outside that coverage.
 

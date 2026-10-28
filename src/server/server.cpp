@@ -271,6 +271,9 @@ Server::Server(const Config &config, QObject *parent)
     this->terrain_worker_pool.setObjectName(QStringLiteral("aowis-map-terrain"));
     this->terrain_worker_pool.setMaxThreadCount(
         qMax(1, qMin(config.maximum_terrain_workers, config.maximum_terrain_jobs)));
+    this->terrain_remote_pool.setObjectName(QStringLiteral("aowis-map-terrain-remote"));
+    this->terrain_remote_pool.setMaxThreadCount(
+        qMax(1, qMin(2, config.maximum_terrain_jobs)));
     this->maptiles->setRemoteFetchEnabled(config.map_remote_fetch_enabled);
     this->maptiles->setPermanentDataDirectory(config.permanent_data_directory);
     this->maptiles->configureProviders(config.map_providers, config.download_coverage,
@@ -298,6 +301,7 @@ Server::~Server()
     this->terrain_data->cancelUpstreamDownloads();
     // Worker lambdas capture this and access terrain_data. Finish all of them
     // before QObject child destruction starts; no new requests are accepted.
+    this->terrain_remote_pool.waitForDone();
     this->terrain_worker_pool.waitForDone();
 
     // Any queued terrain-tile completion callbacks are canceled on shutdown.
@@ -414,7 +418,15 @@ QFuture<QHttpServerResponse> Server::submitTerrainTile(
     address.zoom = zoom;
     address.x = quint32(tile_x);
     address.y = quint32(tile_y);
-    this->terrain_worker_pool.start([this, key, dataset, address]()
+    // A normalized cache hit never waits behind slow upstream transfers.
+    // A cache miss runs on the separately bounded remote-capable pool.
+    // This is workload isolation, not yet a split acquisition/CPU pipeline.
+    const QString normalized_path = this->terrain_data->normalizedTilePath(dataset, address);
+    QThreadPool *execution_pool =
+        this->terrain_data->isRemoteFetchEnabled() &&
+        !QFileInfo::exists(normalized_path)
+            ? &this->terrain_remote_pool : &this->terrain_worker_pool;
+    execution_pool->start([this, key, dataset, address]()
     {
         Aowis::Map::TerrainTileLookupResult result;
         try
@@ -489,7 +501,9 @@ QFuture<QHttpServerResponse> Server::submitTerrainElevation(
     if (existing)
         return future;
 
-    this->terrain_worker_pool.start(
+    QThreadPool *execution_pool = this->terrain_data->isRemoteFetchEnabled()
+        ? &this->terrain_remote_pool : &this->terrain_worker_pool;
+    execution_pool->start(
         [this, key, dataset, latitude_deg, longitude_deg, requested_vertical_datum]()
     {
         Aowis::Map::TerrainElevationLookupResult result;
@@ -574,7 +588,9 @@ QFuture<QHttpServerResponse> Server::submitTerrainGrid(
     if (existing)
         return future;
 
-    this->terrain_worker_pool.start([this, key, request, estimated_bytes]()
+    QThreadPool *execution_pool = this->terrain_data->isRemoteFetchEnabled()
+        ? &this->terrain_remote_pool : &this->terrain_worker_pool;
+    execution_pool->start([this, key, request, estimated_bytes]()
     {
         Aowis::Map::TerrainAnalysisGridResult result;
         try
