@@ -27,6 +27,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <numbers>
@@ -166,9 +167,20 @@ SourceLoadResult downloadSourceTile(const QString &provider_cache_directory,
                                     quint64 request_cancel_generation,
                                     int connect_timeout_ms, int inactivity_timeout_ms,
                                     int download_deadline_ms,
-                                    const QUrl &source_url = QUrl())
+                                    const QUrl &source_url = QUrl(),
+                                    const std::shared_ptr<std::atomic_bool> &cancel_requested = {})
 {
     SourceLoadResult result;
+    const std::function<bool()> is_cancelled = [&]()
+    {
+        return cancel_requested && cancel_requested->load(std::memory_order_acquire);
+    };
+    if (is_cancelled())
+    {
+        result.status = SourceLoadStatus::Cancelled;
+        result.error_message = QStringLiteral("Copernicus upstream download canceled");
+        return result;
+    }
     result.path = sourceTileCachePath(provider_cache_directory, address);
 
     const QFileInfo existing_info(result.path);
@@ -211,6 +223,12 @@ SourceLoadResult downloadSourceTile(const QString &provider_cache_directory,
     bool source_locked = false;
     while (lock_wait.elapsed() < ProviderSourceLockTimeoutMs)
     {
+        if (is_cancelled())
+        {
+            result.status = SourceLoadStatus::Cancelled;
+            result.error_message = QStringLiteral("Copernicus upstream download canceled");
+            return result;
+        }
         if (upstream_mutex != nullptr && upstream_cancel_generation != nullptr)
         {
             QMutexLocker locker(upstream_mutex);
@@ -239,6 +257,12 @@ SourceLoadResult downloadSourceTile(const QString &provider_cache_directory,
     }
 
     // Cancellation may have happened during the final lock attempt.
+    if (is_cancelled())
+    {
+        result.status = SourceLoadStatus::Cancelled;
+        result.error_message = QStringLiteral("Copernicus upstream download canceled");
+        return result;
+    }
     if (upstream_mutex != nullptr && upstream_cancel_generation != nullptr)
     {
         QMutexLocker locker(upstream_mutex);
@@ -294,6 +318,14 @@ SourceLoadResult downloadSourceTile(const QString &provider_cache_directory,
         }
     }
 
+    if (is_cancelled())
+    {
+        output.close();
+        QFile::remove(incoming_path);
+        result.status = SourceLoadStatus::Cancelled;
+        result.error_message = QStringLiteral("Copernicus upstream download canceled");
+        return result;
+    }
     QNetworkAccessManager network_manager;
     QNetworkRequest request(source_url.isEmpty() ? sourceTileUrl(address) : source_url);
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
@@ -325,6 +357,21 @@ SourceLoadResult downloadSourceTile(const QString &provider_cache_directory,
         }
     }
     QEventLoop event_loop;
+    // The token is owned by the single-flight job, not the provider. Poll on
+    // the network worker event loop, so only this request is aborted.
+    QTimer orphan_poll;
+    if (cancel_requested)
+    {
+        QObject::connect(&orphan_poll, &QTimer::timeout, &event_loop,
+                         [reply, cancel_requested]()
+        {
+            if (cancel_requested->load(std::memory_order_acquire) && !reply->isFinished())
+                reply->abort();
+        });
+        orphan_poll.start(25);
+        if (is_cancelled())
+            reply->abort();
+    }
     QTimer connection_deadline;
     connection_deadline.setSingleShot(true);
     bool connection_expired = false;
@@ -376,15 +423,16 @@ SourceLoadResult downloadSourceTile(const QString &provider_cache_directory,
         event_loop.exec();
     connection_deadline.stop();
     download_deadline.stop();
+    orphan_poll.stop();
 
-    bool canceled = false;
+    bool canceled = is_cancelled();
     if (upstream_mutex != nullptr)
     {
         QMutexLocker locker(upstream_mutex);
         if (upstream_active_replies != nullptr)
             upstream_active_replies->remove(reply);
-        canceled = upstream_cancel_generation != nullptr &&
-            *upstream_cancel_generation != request_cancel_generation;
+        canceled = canceled || (upstream_cancel_generation != nullptr &&
+            *upstream_cancel_generation != request_cancel_generation);
     }
 
     if (!write_failed)
@@ -525,6 +573,14 @@ SourceLoadResult downloadSourceTile(const QString &provider_cache_directory,
         result.status = SourceLoadStatus::NetworkError;
         result.error_message = QStringLiteral("Copernicus returned incomplete or inconsistent source bytes: %1")
                                    .arg(request_url.toString());
+        return result;
+    }
+
+    if (is_cancelled())
+    {
+        discard_incoming();
+        result.status = SourceLoadStatus::Cancelled;
+        result.error_message = QStringLiteral("Copernicus upstream download canceled");
         return result;
     }
 
@@ -1161,10 +1217,16 @@ bool CopernicusTerrainProvider::supportsAddress(const QString &dataset,
 
 TerrainProviderFetchResult CopernicusTerrainProvider::acquireTileSources(
     const QString &dataset, const TerrainTileAddress &address,
-    const QString &provider_cache_directory, bool allow_remote_fetch)
+    const QString &provider_cache_directory, bool allow_remote_fetch,
+    const std::shared_ptr<std::atomic_bool> &cancel_requested)
 {
     TerrainProviderFetchResult result;
     result.status = TerrainProviderFetchStatus::Ready;
+    if (cancel_requested && cancel_requested->load(std::memory_order_acquire))
+    {
+        result.status = TerrainProviderFetchStatus::Cancelled;
+        return result;
+    }
     if (!supportsAddress(dataset, address) || !allow_remote_fetch)
         return result;
 
@@ -1206,7 +1268,7 @@ TerrainProviderFetchResult CopernicusTerrainProvider::acquireTileSources(
             provider_cache_directory, source, true, &this->upstream_mutex,
             &this->upstream_active_replies, &this->upstream_cancel_generation,
             request_generation, this->connect_timeout_ms, this->inactivity_timeout_ms,
-            this->download_deadline_ms, this->integration_source_url);
+            this->download_deadline_ms, this->integration_source_url, cancel_requested);
         if (acquired.status == SourceLoadStatus::Cancelled ||
             acquired.status == SourceLoadStatus::NetworkError ||
             acquired.status == SourceLoadStatus::ReadError)
@@ -1331,10 +1393,16 @@ TerrainProviderFetchResult CopernicusTerrainProvider::fetchTile(
 
 TerrainProviderFetchResult CopernicusTerrainProvider::acquireGridSources(
     const TerrainAnalysisGridRequest &request,
-    const QString &provider_cache_directory, bool allow_remote_fetch)
+    const QString &provider_cache_directory, bool allow_remote_fetch,
+    const std::shared_ptr<std::atomic_bool> &cancel_requested)
 {
     TerrainProviderFetchResult result;
     result.status = TerrainProviderFetchStatus::Ready;
+    if (cancel_requested && cancel_requested->load(std::memory_order_acquire))
+    {
+        result.status = TerrainProviderFetchStatus::Cancelled;
+        return result;
+    }
     if (!allow_remote_fetch)
         return result;
     if (!supportsDataset(request.dataset))
@@ -1383,7 +1451,7 @@ TerrainProviderFetchResult CopernicusTerrainProvider::acquireGridSources(
             provider_cache_directory, source, true, &this->upstream_mutex,
             &this->upstream_active_replies, &this->upstream_cancel_generation,
             request_generation, this->connect_timeout_ms, this->inactivity_timeout_ms,
-            this->download_deadline_ms);
+            this->download_deadline_ms, QUrl(), cancel_requested);
         if (acquired.status == SourceLoadStatus::Cancelled ||
             acquired.status == SourceLoadStatus::NetworkError ||
             acquired.status == SourceLoadStatus::ReadError)

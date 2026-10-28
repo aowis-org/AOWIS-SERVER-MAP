@@ -585,7 +585,8 @@ TerrainAnalysisGridResult TerrainData::analysisGrid(
 }
 
 TerrainProviderFetchResult TerrainData::acquireGridSources(
-    const TerrainAnalysisGridRequest &request) const
+    const TerrainAnalysisGridRequest &request,
+    const std::shared_ptr<std::atomic_bool> &cancel_requested) const
 {
     TerrainProviderFetchResult result;
     result.status = TerrainProviderFetchStatus::Ready;
@@ -594,13 +595,15 @@ TerrainProviderFetchResult TerrainData::acquireGridSources(
     for (const std::unique_ptr<TerrainProvider> &provider : this->providers)
     {
         if (provider->supportsDataset(request.dataset))
-            return provider->acquireGridSources(request, this->storage_paths.providers, true);
+            return provider->acquireGridSources(request, this->storage_paths.providers, true,
+                                                cancel_requested);
     }
     return result;
 }
 
 TerrainProviderFetchResult TerrainData::acquireTileSources(
-    const QString &dataset, const TerrainTileAddress &address) const
+    const QString &dataset, const TerrainTileAddress &address,
+    const std::shared_ptr<std::atomic_bool> &cancel_requested) const
 {
     TerrainProviderFetchResult result;
     result.status = TerrainProviderFetchStatus::Ready;
@@ -615,7 +618,7 @@ TerrainProviderFetchResult TerrainData::acquireTileSources(
     {
         if (provider->supportsDataset(dataset) && provider->supportsAddress(dataset, address))
             return provider->acquireTileSources(dataset, address,
-                                                this->storage_paths.providers, true);
+                                                this->storage_paths.providers, true, cancel_requested);
     }
     return result;
 }
@@ -922,7 +925,8 @@ TerrainTileLookupResult TerrainData::fetchAndStoreNormalizedTile(
 }
 
 TerrainProviderFetchResult TerrainData::acquireElevationSources(
-    const QString &dataset, double latitude_deg, double longitude_deg) const
+    const QString &dataset, double latitude_deg, double longitude_deg,
+    const std::shared_ptr<std::atomic_bool> &cancel_requested) const
 {
     TerrainProviderFetchResult result;
     result.status = TerrainProviderFetchStatus::Ready;
@@ -942,7 +946,7 @@ TerrainProviderFetchResult TerrainData::acquireElevationSources(
         {
             if (provider->supportsDataset(dataset) &&
                 provider->supportsAddress(dataset, position->address))
-                return acquireTileSources(dataset, position->address);
+                return acquireTileSources(dataset, position->address, cancel_requested);
         }
     }
     return result;

@@ -14,6 +14,7 @@
 #include <QString>
 #include <QVector>
 
+#include <atomic>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -143,18 +144,21 @@ public:
         const TerrainAnalysisGridRequest &request,
         bool allow_remote_fetch = true) const;
     TerrainProviderFetchResult acquireGridSources(
-        const TerrainAnalysisGridRequest &request) const;
+        const TerrainAnalysisGridRequest &request,
+        const std::shared_ptr<std::atomic_bool> &cancel_requested = {}) const;
 
     TerrainTileLookupResult terrainTile(const QString &dataset,
                                         const TerrainTileAddress &address,
                                         bool allow_remote_fetch = true) const;
     // Network-only stage used before CPU normalization for uncached tiles.
     TerrainProviderFetchResult acquireTileSources(
-        const QString &dataset, const TerrainTileAddress &address) const;
+        const QString &dataset, const TerrainTileAddress &address,
+        const std::shared_ptr<std::atomic_bool> &cancel_requested = {}) const;
 
     // Acquire the highest-resolution point tile sources before CPU-only sampling.
     TerrainProviderFetchResult acquireElevationSources(
-        const QString &dataset, double latitude_deg, double longitude_deg) const;
+        const QString &dataset, double latitude_deg, double longitude_deg,
+        const std::shared_ptr<std::atomic_bool> &cancel_requested = {}) const;
 
     TerrainElevationLookupResult sampleElevation(
         const QString &dataset,

@@ -8,6 +8,8 @@
 #include <QVector>
 
 #include <optional>
+#include <atomic>
+#include <memory>
 
 namespace Aowis::Map
 {
@@ -95,8 +97,10 @@ public:
     // provider-native sources but must not normalize the tile here.
     virtual TerrainProviderFetchResult acquireTileSources(
         const QString &dataset, const TerrainTileAddress &address,
-        const QString &provider_cache_directory, bool allow_remote_fetch)
+        const QString &provider_cache_directory, bool allow_remote_fetch,
+        const std::shared_ptr<std::atomic_bool> &cancel_requested = {})
     {
+        Q_UNUSED(cancel_requested);
         Q_UNUSED(dataset);
         Q_UNUSED(address);
         Q_UNUSED(provider_cache_directory);
@@ -113,8 +117,10 @@ public:
     // without allocating its output or reading raster pixels.
     virtual TerrainProviderFetchResult acquireGridSources(
         const TerrainAnalysisGridRequest &request,
-        const QString &provider_cache_directory, bool allow_remote_fetch)
+        const QString &provider_cache_directory, bool allow_remote_fetch,
+        const std::shared_ptr<std::atomic_bool> &cancel_requested = {})
     {
+        Q_UNUSED(cancel_requested);
         Q_UNUSED(request);
         Q_UNUSED(provider_cache_directory);
         Q_UNUSED(allow_remote_fetch);

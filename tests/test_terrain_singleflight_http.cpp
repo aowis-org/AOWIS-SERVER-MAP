@@ -398,13 +398,25 @@ int main(int argc, char **argv)
         }
     }
 
-    // When the *last* client disappears the registry key must remain until
-    // completion. New arrivals can reuse the existing admission/job safely.
+    // The final disconnect cancels its job. A new request for the same key
+    // must start an independent flight; completion from the canceled flight
+    // cannot steal the new client's promise or admission reservation.
     {
+        Server::Config orphan_config = config;
+        orphan_config.maximum_terrain_jobs = 2;
+        orphan_config.maximum_pending_requests = 4;
+        orphan_config.cache_directory = temporary_directory.path() + "/orphan";
+        orphan_config.terrain_cache_directory = orphan_config.cache_directory + "/terrain";
+        Server orphan_server(orphan_config);
+        if (!orphan_server.start())
+            return 1;
+        const QUrl orphan_url(QStringLiteral(
+            "http://127.0.0.1:%1/terrain/v1/copernicus-glo30/5/11/12.aowterrain")
+            .arg(TerrainSingleFlightTestAccess::port(orphan_server)));
         QSemaphore orphan_worker_entered;
         QSemaphore orphan_worker_release;
         TerrainSingleFlightTestAccess::blockWorker(
-            server, orphan_worker_entered, orphan_worker_release);
+            orphan_server, orphan_worker_entered, orphan_worker_release);
         if (!orphan_worker_entered.tryAcquire(1, 3000))
         {
             orphan_worker_release.release();
@@ -413,7 +425,7 @@ int main(int argc, char **argv)
         }
         QTcpSocket abandoned_socket;
         abandoned_socket.connectToHost(QHostAddress::LocalHost,
-                                       TerrainSingleFlightTestAccess::port(server));
+                                       TerrainSingleFlightTestAccess::port(orphan_server));
         const bool connected = abandoned_socket.waitForConnected(3000);
         if (connected)
         {
@@ -423,39 +435,39 @@ int main(int argc, char **argv)
             abandoned_socket.flush();
         }
         timer.restart();
-        while (TerrainSingleFlightTestAccess::waiterCount(server) != 1 &&
+        while (TerrainSingleFlightTestAccess::waiterCount(orphan_server) != 1 &&
                timer.elapsed() < 5000)
         {
             app.processEvents(QEventLoop::AllEvents, 20);
             QThread::msleep(1);
         }
         const bool accepted = connected &&
-            TerrainSingleFlightTestAccess::waiterCount(server) == 1;
+            TerrainSingleFlightTestAccess::waiterCount(orphan_server) == 1;
         abandoned_socket.abort();
         timer.restart();
-        while (TerrainSingleFlightTestAccess::waiterCount(server) != 0 &&
+        while (TerrainSingleFlightTestAccess::waiterCount(orphan_server) != 0 &&
                timer.elapsed() < 5000)
         {
             app.processEvents(QEventLoop::AllEvents, 20);
             QThread::msleep(1);
         }
-        const bool empty_but_running =
-            TerrainSingleFlightTestAccess::waiterCount(server) == 0 &&
-            TerrainSingleFlightTestAccess::uniqueJobCount(server) == 1 &&
-            TerrainSingleFlightTestAccess::admittedJobs(server) == 1;
+        const bool orphan_canceled =
+            TerrainSingleFlightTestAccess::waiterCount(orphan_server) == 0 &&
+            TerrainSingleFlightTestAccess::uniqueJobCount(orphan_server) == 0 &&
+            TerrainSingleFlightTestAccess::admittedJobs(orphan_server) == 1;
         QNetworkAccessManager late_network;
-        QNetworkReply *late_reply = late_network.get(QNetworkRequest(url));
+        QNetworkReply *late_reply = late_network.get(QNetworkRequest(orphan_url));
         timer.restart();
-        while (TerrainSingleFlightTestAccess::waiterCount(server) != 1 &&
+        while (TerrainSingleFlightTestAccess::waiterCount(orphan_server) != 1 &&
                timer.elapsed() < 5000)
         {
             app.processEvents(QEventLoop::AllEvents, 20);
             QThread::msleep(1);
         }
-        const bool reused =
-            TerrainSingleFlightTestAccess::waiterCount(server) == 1 &&
-            TerrainSingleFlightTestAccess::uniqueJobCount(server) == 1 &&
-            TerrainSingleFlightTestAccess::admittedJobs(server) == 1;
+        const bool replacement_started =
+            TerrainSingleFlightTestAccess::waiterCount(orphan_server) == 1 &&
+            TerrainSingleFlightTestAccess::uniqueJobCount(orphan_server) == 1 &&
+            TerrainSingleFlightTestAccess::admittedJobs(orphan_server) == 2;
         orphan_worker_release.release();
         timer.restart();
         while (!late_reply->isFinished() && timer.elapsed() < 5000)
@@ -463,19 +475,188 @@ int main(int argc, char **argv)
             app.processEvents(QEventLoop::AllEvents, 20);
             QThread::msleep(1);
         }
+        app.processEvents(QEventLoop::AllEvents, 20);
         const bool completed = late_reply->isFinished() &&
             late_reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() == 404 &&
-            TerrainSingleFlightTestAccess::waiterCount(server) == 0 &&
-            TerrainSingleFlightTestAccess::uniqueJobCount(server) == 0 &&
-            TerrainSingleFlightTestAccess::admittedJobs(server) == 0;
+            TerrainSingleFlightTestAccess::waiterCount(orphan_server) == 0 &&
+            TerrainSingleFlightTestAccess::uniqueJobCount(orphan_server) == 0 &&
+            TerrainSingleFlightTestAccess::admittedJobs(orphan_server) == 0;
         late_reply->deleteLater();
-        if (!accepted || !empty_but_running || !reused || !completed)
+        if (!accepted || !orphan_canceled || !replacement_started || !completed)
         {
-            std::cerr << "Terrain orphaned-flight join regression failed: "
+            std::cerr << "Terrain orphan cancellation/replacement regression failed: "
                       << "accepted=" << accepted
-                      << " empty_but_running=" << empty_but_running
-                      << " reused=" << reused
+                      << " orphan_canceled=" << orphan_canceled
+                      << " replacement_started=" << replacement_started
                       << " completed=" << completed << '\n';
+            return 1;
+        }
+    }
+
+    // Selective remote cancellation: disconnecting one orphaned HTTP flight
+    // must abort its stalled Copernicus transfer without canceling the second
+    // independent flight. Both upstream sockets must eventually close and all
+    // admissions must be returned, without deleting the server.
+    {
+        QTemporaryDir live_cache;
+        if (!live_cache.isValid())
+            return 1;
+        std::promise<quint16> listen_promise;
+        std::future<quint16> listen_future = listen_promise.get_future();
+        std::atomic<int> upstream_responded{0};
+        std::atomic<int> upstream_disconnected{0};
+        std::thread upstream([&]()
+        {
+            QTcpServer listener;
+            if (!listener.listen(QHostAddress::LocalHost, 0))
+            {
+                listen_promise.set_value(0);
+                return;
+            }
+            listen_promise.set_value(listener.serverPort());
+            QList<QTcpSocket *> sockets;
+            QHash<QTcpSocket *, QByteArray> request_headers;
+            QSet<QTcpSocket *> replied;
+            QSet<QTcpSocket *> closed;
+            QElapsedTimer deadline;
+            deadline.start();
+            while (deadline.elapsed() < 9000 && closed.size() < 2)
+            {
+                if (listener.waitForNewConnection(5))
+                {
+                    while (listener.hasPendingConnections())
+                    {
+                        QTcpSocket *socket = listener.nextPendingConnection();
+                        sockets.append(socket);
+                        request_headers.insert(socket, QByteArray());
+                    }
+                }
+                for (QTcpSocket *socket : sockets)
+                {
+                    if (closed.contains(socket))
+                        continue;
+                    if (socket->state() == QAbstractSocket::UnconnectedState)
+                    {
+                        closed.insert(socket);
+                        upstream_disconnected.fetch_add(1);
+                        continue;
+                    }
+                    if (!replied.contains(socket))
+                    {
+                        if (socket->bytesAvailable() == 0)
+                            socket->waitForReadyRead(1);
+                        request_headers[socket] += socket->readAll();
+                        if (request_headers[socket].contains("\r\n\r\n"))
+                        {
+                            socket->write("HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n"
+                                          "ETag: \"stalled\"\r\nConnection: close\r\n\r\n"
+                                          "partial-data");
+                            socket->flush();
+                            replied.insert(socket);
+                            upstream_responded.fetch_add(1);
+                        }
+                    }
+                    else
+                    {
+                        socket->waitForDisconnected(5);
+                        if (socket->state() == QAbstractSocket::UnconnectedState)
+                        {
+                            closed.insert(socket);
+                            upstream_disconnected.fetch_add(1);
+                        }
+                    }
+                }
+            }
+            for (QTcpSocket *socket : sockets)
+            {
+                socket->abort();
+                delete socket;
+            }
+        });
+        const quint16 upstream_port = listen_future.get();
+        if (upstream_port == 0)
+        {
+            upstream.join();
+            return 1;
+        }
+        Server::Config live_config;
+        live_config.port = 0;
+        live_config.cache_directory = live_cache.path();
+        live_config.terrain_cache_directory = live_cache.path() + "/terrain";
+        live_config.map_remote_fetch_enabled = false;
+        live_config.terrain_remote_fetch_enabled = true;
+        live_config.maximum_terrain_workers = 1;
+        live_config.maximum_terrain_remote_workers = 2;
+        live_config.maximum_terrain_jobs = 4;
+        live_config.terrain_integration_source_url = QUrl(
+            QStringLiteral("http://127.0.0.1:%1/source.tif").arg(upstream_port));
+        Server live_server(live_config);
+        const bool started = live_server.start();
+        QTcpSocket first;
+        QTcpSocket second;
+        if (started)
+        {
+            first.connectToHost(QHostAddress::LocalHost,
+                                TerrainSingleFlightTestAccess::port(live_server));
+            second.connectToHost(QHostAddress::LocalHost,
+                                 TerrainSingleFlightTestAccess::port(live_server));
+            if (first.waitForConnected(3000))
+            {
+                first.write("GET /terrain/v1/copernicus-glo30/8/101/100.aowterrain HTTP/1.1\r\n"
+                            "Host: 127.0.0.1\r\n\r\n");
+                first.flush();
+            }
+            if (second.waitForConnected(3000))
+            {
+                second.write("GET /terrain/v1/copernicus-glo30/8/160/100.aowterrain HTTP/1.1\r\n"
+                             "Host: 127.0.0.1\r\n\r\n");
+                second.flush();
+            }
+        }
+        timer.restart();
+        while (upstream_responded.load() < 2 && timer.elapsed() < 5000)
+        {
+            app.processEvents(QEventLoop::AllEvents, 20);
+            QThread::msleep(1);
+        }
+        const bool both_active = started && upstream_responded.load() == 2 &&
+            TerrainSingleFlightTestAccess::waiterCount(live_server) == 2 &&
+            TerrainSingleFlightTestAccess::remoteAdmittedJobs(live_server) == 2;
+        first.abort();
+        timer.restart();
+        while (upstream_disconnected.load() < 1 && timer.elapsed() < 4000)
+        {
+            app.processEvents(QEventLoop::AllEvents, 20);
+            QThread::msleep(1);
+        }
+        const bool selective = upstream_disconnected.load() == 1 &&
+            TerrainSingleFlightTestAccess::waiterCount(live_server) == 1 &&
+            TerrainSingleFlightTestAccess::uniqueJobCount(live_server) == 1 &&
+            TerrainSingleFlightTestAccess::remoteAdmittedJobs(live_server) == 1;
+        second.abort();
+        timer.restart();
+        while ((upstream_disconnected.load() < 2 ||
+                TerrainSingleFlightTestAccess::admittedJobs(live_server) != 0 ||
+                TerrainSingleFlightTestAccess::remoteAdmittedJobs(live_server) != 0) &&
+               timer.elapsed() < 5000)
+        {
+            app.processEvents(QEventLoop::AllEvents, 20);
+            QThread::msleep(1);
+        }
+        const bool cleaned = upstream_disconnected.load() == 2 &&
+            TerrainSingleFlightTestAccess::waiterCount(live_server) == 0 &&
+            TerrainSingleFlightTestAccess::uniqueJobCount(live_server) == 0 &&
+            TerrainSingleFlightTestAccess::admittedJobs(live_server) == 0 &&
+            TerrainSingleFlightTestAccess::remoteAdmittedJobs(live_server) == 0;
+        upstream.join();
+        if (!both_active || !selective || !cleaned)
+        {
+            std::cerr << "Selective upstream orphan cancellation regression failed: "
+                      << "both_active=" << both_active
+                      << " selective=" << selective
+                      << " cleaned=" << cleaned
+                      << " upstream=" << upstream_responded.load()
+                      << " disconnected=" << upstream_disconnected.load() << '\n';
             return 1;
         }
     }

@@ -26,14 +26,16 @@ public:
                          const TerrainTileAddress &address) const override;
     TerrainProviderFetchResult acquireTileSources(
         const QString &dataset, const TerrainTileAddress &address,
-        const QString &provider_cache_directory, bool allow_remote_fetch) override;
+        const QString &provider_cache_directory, bool allow_remote_fetch,
+        const std::shared_ptr<std::atomic_bool> &cancel_requested = {}) override;
     TerrainProviderFetchResult fetchTile(const QString &dataset,
                                          const TerrainTileAddress &address,
                                          const QString &provider_cache_directory,
                                          bool allow_remote_fetch) override;
     TerrainProviderFetchResult acquireGridSources(
         const TerrainAnalysisGridRequest &request,
-        const QString &provider_cache_directory, bool allow_remote_fetch) override;
+        const QString &provider_cache_directory, bool allow_remote_fetch,
+        const std::shared_ptr<std::atomic_bool> &cancel_requested = {}) override;
     TerrainAnalysisGridResult fetchAnalysisGrid(
         const TerrainAnalysisGridRequest &request,
         const QString &provider_cache_directory, bool allow_remote_fetch) override;

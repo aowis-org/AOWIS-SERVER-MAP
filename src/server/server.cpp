@@ -366,18 +366,26 @@ void Server::forgetTerrainWaiter(const PendingPromise &promise)
 
 void Server::abandonTerrainWaiters(QTcpSocket *socket)
 {
-    // Leave an empty key registered until its job finishes. A subsequent
-    // request for the same key must join the original job, never trigger an
-    // overlapping job whose completion could be delivered to wrong waiters.
-    const QList<QHash<QString, PendingPromises> *> registries = {
-        &this->pending_terrain_tiles,
-        &this->pending_terrain_elevations,
-        &this->pending_terrain_grids
+    // Each job has its own cancellation token. Remove an orphaned flight from
+    // the registry immediately, so a new client can start a fresh job rather
+    // than joining a canceled one. The old worker still owns its admission
+    // reservation and releases it when it finishes.
+    const QList<QPair<QHash<QString, PendingPromises> *,
+                      QHash<QString, TerrainCancellation> *>> registries = {
+        { &this->pending_terrain_tiles, &this->tile_cancellations },
+        { &this->pending_terrain_elevations, &this->elevation_cancellations },
+        { &this->pending_terrain_grids, &this->grid_cancellations }
     };
-    for (QHash<QString, PendingPromises> *registry : registries)
+    for (const QPair<QHash<QString, PendingPromises> *,
+                     QHash<QString, TerrainCancellation> *> &entry : registries)
     {
-        for (PendingPromises &promises : *registry)
+        QHash<QString, PendingPromises> *registry = entry.first;
+        QHash<QString, TerrainCancellation> *cancellations = entry.second;
+        QList<QString> orphans;
+        for (QHash<QString, PendingPromises>::iterator it = registry->begin();
+             it != registry->end(); ++it)
         {
+            PendingPromises &promises = it.value();
             qsizetype index = promises.size();
             while (index > 0)
             {
@@ -388,13 +396,20 @@ void Server::abandonTerrainWaiters(QTcpSocket *socket)
                 this->terrain_waiter_sockets.remove(promise.data());
                 promises.removeAt(index);
                 --this->pending_terrain_tile_count;
-                // Resolve the future even though its HTTP socket is gone.
-                // Qt's HTTP transport will discard the undeliverable reply.
                 promise->addResult(QHttpServerResponse(
                     "HTTP client disconnected",
                     QHttpServerResponse::StatusCode::ServiceUnavailable));
                 promise->finish();
             }
+            if (promises.isEmpty())
+                orphans.append(it.key());
+        }
+        for (const QString &key : orphans)
+        {
+            const TerrainCancellation cancellation = cancellations->take(key);
+            if (cancellation)
+                cancellation->store(true, std::memory_order_release);
+            registry->remove(key);
         }
     }
 }
@@ -458,6 +473,9 @@ Server::~Server()
     }
     this->pending_terrain_grids.clear();
     this->pending_terrain_tile_count = 0;
+    this->tile_cancellations.clear();
+    this->elevation_cancellations.clear();
+    this->grid_cancellations.clear();
     this->terrain_waiter_sockets.clear();
     this->terrain_client_sockets.clear();
 
@@ -551,15 +569,18 @@ QFuture<QHttpServerResponse> Server::submitTerrainTile(
     ++this->pending_terrain_tile_count;
     if (existing)
         return future;
+    const TerrainCancellation cancellation = std::make_shared<std::atomic_bool>(false);
+    this->tile_cancellations.insert(key, cancellation);
 
     // Split missing-source acquisition from CPU normalization. The remote
     // worker *enqueues* CPU processing and returns; it never waits on it.
-    const std::function<void()> process_tile = [this, key, dataset, address, remote_job]()
+    const std::function<void()> process_tile = [this, key, dataset, address, remote_job, cancellation]()
     {
         Aowis::Map::TerrainTileLookupResult result;
         try
         {
-            result = this->terrain_data->terrainTile(dataset, address, !remote_job);
+            if (!cancellation->load(std::memory_order_acquire))
+                result = this->terrain_data->terrainTile(dataset, address, !remote_job);
         }
         catch (...)
         {
@@ -567,8 +588,11 @@ QFuture<QHttpServerResponse> Server::submitTerrainTile(
             result.error_message = QStringLiteral("Terrain processing failed");
         }
         this->terrain_admission.release();
-        QMetaObject::invokeMethod(this, [this, key, result = std::move(result)]() mutable
+        QMetaObject::invokeMethod(this, [this, key, cancellation, result = std::move(result)]() mutable
         {
+            if (this->tile_cancellations.value(key) != cancellation)
+                return;
+            this->tile_cancellations.remove(key);
             const PendingPromises waiters = this->pending_terrain_tiles.take(key);
             this->pending_terrain_tile_count -= waiters.size();
             for (const PendingPromise &waiter : waiters)
@@ -588,12 +612,12 @@ QFuture<QHttpServerResponse> Server::submitTerrainTile(
         this->terrain_worker_pool.start(process_tile);
         return future;
     }
-    this->terrain_remote_pool.start([this, key, dataset, address, process_tile]()
+    this->terrain_remote_pool.start([this, key, dataset, address, process_tile, cancellation]()
     {
         Aowis::Map::TerrainProviderFetchResult acquired;
         try
         {
-            acquired = this->terrain_data->acquireTileSources(dataset, address);
+            acquired = this->terrain_data->acquireTileSources(dataset, address, cancellation);
         }
         catch (...)
         {
@@ -601,7 +625,8 @@ QFuture<QHttpServerResponse> Server::submitTerrainTile(
             acquired.error_message = QStringLiteral("Terrain source acquisition failed");
         }
         this->terrain_remote_admission.release();
-        if (acquired.status == Aowis::Map::TerrainProviderFetchStatus::Ready)
+        if (acquired.status == Aowis::Map::TerrainProviderFetchStatus::Ready &&
+            !cancellation->load(std::memory_order_acquire))
         {
             this->terrain_worker_pool.start(process_tile);
             return;
@@ -613,8 +638,11 @@ QFuture<QHttpServerResponse> Server::submitTerrainTile(
             ? Aowis::Map::TerrainTileLookupStatus::RemoteFetchError
             : Aowis::Map::TerrainTileLookupStatus::ProviderError;
         result.error_message = acquired.error_message;
-        QMetaObject::invokeMethod(this, [this, key, result = std::move(result)]() mutable
+        QMetaObject::invokeMethod(this, [this, key, cancellation, result = std::move(result)]() mutable
         {
+            if (this->tile_cancellations.value(key) != cancellation)
+                return;
+            this->tile_cancellations.remove(key);
             const PendingPromises waiters = this->pending_terrain_tiles.take(key);
             this->pending_terrain_tile_count -= waiters.size();
             for (const PendingPromise &waiter : waiters)
@@ -677,15 +705,18 @@ QFuture<QHttpServerResponse> Server::submitTerrainElevation(
     ++this->pending_terrain_tile_count;
     if (existing)
         return future;
+    const TerrainCancellation cancellation = std::make_shared<std::atomic_bool>(false);
+    this->elevation_cancellations.insert(key, cancellation);
 
     const std::function<void()> process_elevation =
-        [this, key, dataset, latitude_deg, longitude_deg, requested_vertical_datum, remote_job]()
+        [this, key, dataset, latitude_deg, longitude_deg, requested_vertical_datum, remote_job, cancellation]()
     {
         Aowis::Map::TerrainElevationLookupResult result;
         try
         {
-            result = this->terrain_data->sampleElevation(
-                dataset, latitude_deg, longitude_deg, requested_vertical_datum, !remote_job);
+            if (!cancellation->load(std::memory_order_acquire))
+                result = this->terrain_data->sampleElevation(
+                    dataset, latitude_deg, longitude_deg, requested_vertical_datum, !remote_job);
         }
         catch (...)
         {
@@ -693,8 +724,11 @@ QFuture<QHttpServerResponse> Server::submitTerrainElevation(
             result.error_message = QStringLiteral("Terrain processing failed");
         }
         this->terrain_admission.release();
-        QMetaObject::invokeMethod(this, [this, key, result = std::move(result)]() mutable
+        QMetaObject::invokeMethod(this, [this, key, cancellation, result = std::move(result)]() mutable
         {
+            if (this->elevation_cancellations.value(key) != cancellation)
+                return;
+            this->elevation_cancellations.remove(key);
             const PendingPromises waiters = this->pending_terrain_elevations.take(key);
             this->pending_terrain_tile_count -= waiters.size();
             for (const PendingPromise &waiter : waiters)
@@ -711,13 +745,13 @@ QFuture<QHttpServerResponse> Server::submitTerrainElevation(
         return future;
     }
     this->terrain_remote_pool.start(
-        [this, key, dataset, latitude_deg, longitude_deg, process_elevation]()
+        [this, key, dataset, latitude_deg, longitude_deg, process_elevation, cancellation]()
     {
         Aowis::Map::TerrainProviderFetchResult acquired;
         try
         {
             acquired = this->terrain_data->acquireElevationSources(
-                dataset, latitude_deg, longitude_deg);
+                dataset, latitude_deg, longitude_deg, cancellation);
         }
         catch (...)
         {
@@ -725,7 +759,8 @@ QFuture<QHttpServerResponse> Server::submitTerrainElevation(
             acquired.error_message = QStringLiteral("Elevation source acquisition failed");
         }
         this->terrain_remote_admission.release();
-        if (acquired.status == Aowis::Map::TerrainProviderFetchStatus::Ready)
+        if (acquired.status == Aowis::Map::TerrainProviderFetchStatus::Ready &&
+            !cancellation->load(std::memory_order_acquire))
         {
             this->terrain_worker_pool.start(process_elevation);
             return;
@@ -737,8 +772,11 @@ QFuture<QHttpServerResponse> Server::submitTerrainElevation(
             ? Aowis::Map::TerrainElevationLookupStatus::RemoteFetchError
             : Aowis::Map::TerrainElevationLookupStatus::ProviderError;
         result.error_message = acquired.error_message;
-        QMetaObject::invokeMethod(this, [this, key, result = std::move(result)]() mutable
+        QMetaObject::invokeMethod(this, [this, key, cancellation, result = std::move(result)]() mutable
         {
+            if (this->elevation_cancellations.value(key) != cancellation)
+                return;
+            this->elevation_cancellations.remove(key);
             const PendingPromises waiters = this->pending_terrain_elevations.take(key);
             this->pending_terrain_tile_count -= waiters.size();
             for (const PendingPromise &waiter : waiters)
@@ -817,13 +855,16 @@ QFuture<QHttpServerResponse> Server::submitTerrainGrid(
     ++this->pending_terrain_tile_count;
     if (existing)
         return future;
+    const TerrainCancellation cancellation = std::make_shared<std::atomic_bool>(false);
+    this->grid_cancellations.insert(key, cancellation);
 
-    const std::function<void()> process_grid = [this, key, request, estimated_bytes, remote_job]()
+    const std::function<void()> process_grid = [this, key, request, estimated_bytes, remote_job, cancellation]()
     {
         Aowis::Map::TerrainAnalysisGridResult result;
         try
         {
-            result = this->terrain_data->analysisGrid(request, !remote_job);
+            if (!cancellation->load(std::memory_order_acquire))
+                result = this->terrain_data->analysisGrid(request, !remote_job);
         }
         catch (...)
         {
@@ -851,9 +892,15 @@ QFuture<QHttpServerResponse> Server::submitTerrainGrid(
         result.elevations_m.clear();
         this->terrain_admission.release();
         QMetaObject::invokeMethod(this,
-            [this, key, estimated_bytes, result_status,
+            [this, key, estimated_bytes, cancellation, result_status,
              error_message = std::move(error_message), bytes = std::move(bytes)]() mutable
         {
+            if (this->grid_cancellations.value(key) != cancellation)
+            {
+                this->terrain_grid_bytes.release(estimated_bytes);
+                return;
+            }
+            this->grid_cancellations.remove(key);
             const PendingPromises waiters = this->pending_terrain_grids.take(key);
             this->pending_terrain_tile_count -= waiters.size();
             for (const PendingPromise &waiter : waiters)
@@ -887,12 +934,12 @@ QFuture<QHttpServerResponse> Server::submitTerrainGrid(
         this->terrain_worker_pool.start(process_grid);
         return future;
     }
-    this->terrain_remote_pool.start([this, key, request, estimated_bytes, process_grid]()
+    this->terrain_remote_pool.start([this, key, request, estimated_bytes, process_grid, cancellation]()
     {
         Aowis::Map::TerrainProviderFetchResult acquired;
         try
         {
-            acquired = this->terrain_data->acquireGridSources(request);
+            acquired = this->terrain_data->acquireGridSources(request, cancellation);
         }
         catch (...)
         {
@@ -900,15 +947,22 @@ QFuture<QHttpServerResponse> Server::submitTerrainGrid(
             acquired.error_message = QStringLiteral("Grid source acquisition failed");
         }
         this->terrain_remote_admission.release();
-        if (acquired.status == Aowis::Map::TerrainProviderFetchStatus::Ready)
+        if (acquired.status == Aowis::Map::TerrainProviderFetchStatus::Ready &&
+            !cancellation->load(std::memory_order_acquire))
         {
             this->terrain_worker_pool.start(process_grid);
             return;
         }
         this->terrain_admission.release();
         QMetaObject::invokeMethod(this,
-            [this, key, estimated_bytes, acquired = std::move(acquired)]() mutable
+            [this, key, estimated_bytes, cancellation, acquired = std::move(acquired)]() mutable
         {
+            if (this->grid_cancellations.value(key) != cancellation)
+            {
+                this->terrain_grid_bytes.release(estimated_bytes);
+                return;
+            }
+            this->grid_cancellations.remove(key);
             const PendingPromises waiters = this->pending_terrain_grids.take(key);
             this->pending_terrain_tile_count -= waiters.size();
             const QHttpServerResponse::StatusCode status =

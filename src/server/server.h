@@ -19,6 +19,7 @@
 #include <QString>
 #include <QTcpServer>
 #include <QThreadPool>
+#include <atomic>
 #include <functional>
 #include <optional>
 #include <aowis/map/terrain_elevation.h>
@@ -84,6 +85,7 @@ public:
 private:
     using PendingPromise = QSharedPointer<QPromise<QHttpServerResponse>>;
     using PendingPromises = QList<PendingPromise>;
+    using TerrainCancellation = QSharedPointer<std::atomic_bool>;
 
     void setupRoutes();
     QFuture<QHttpServerResponse> submitTerrainJob(std::function<QHttpServerResponse()> task);
@@ -130,6 +132,11 @@ private:
     QHash<QString, PendingPromises> pending_terrain_tiles;
     QHash<QString, PendingPromises> pending_terrain_elevations;
     QHash<QString, PendingPromises> pending_terrain_grids;
+    // Identity is the cancellation token: stale callbacks must not drain a
+    // replacement job started after all clients left the previous flight.
+    QHash<QString, TerrainCancellation> tile_cancellations;
+    QHash<QString, TerrainCancellation> elevation_cancellations;
+    QHash<QString, TerrainCancellation> grid_cancellations;
     int pending_terrain_tile_count = 0;
     QMutex mutex_pending;
     QHash<QString, PendingPromises> connections_pending;
