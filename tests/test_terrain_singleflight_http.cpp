@@ -295,6 +295,191 @@ int main(int argc, char **argv)
                   << " recovered=" << recovered << '\n';
         return 1;
     }
+    // Socket ownership regression: disconnecting one HTTP client must reclaim
+    // its pending response slot while keeping the shared computation alive for
+    // other clients. A late arrival must join that same in-flight job.
+    // Repeat across tile, elevation and grid because they have separate
+    // single-flight registries but share one pending-response admission cap.
+    const QList<QPair<QString, QUrl>> disconnect_cases = {
+        { QStringLiteral("tile"), url },
+        { QStringLiteral("elevation"), QUrl(QStringLiteral(
+            "http://127.0.0.1:%1/terrain/v1/elevation?latitude=50&longitude=9")
+            .arg(TerrainSingleFlightTestAccess::port(server))) },
+        { QStringLiteral("grid"), QUrl(QStringLiteral(
+            "http://127.0.0.1:%1/terrain/v1/analysis/grid?dataset=copernicus-glo30&"
+            "west=10&south=48&east=10.1&north=48.1&columns=2&rows=2")
+            .arg(TerrainSingleFlightTestAccess::port(server))) }
+    };
+    for (const QPair<QString, QUrl> &test_case : disconnect_cases)
+    {
+        QSemaphore disconnected_worker_entered;
+        QSemaphore disconnected_worker_release;
+        TerrainSingleFlightTestAccess::blockWorker(
+            server, disconnected_worker_entered, disconnected_worker_release);
+        if (!disconnected_worker_entered.tryAcquire(1, 3000))
+        {
+            disconnected_worker_release.release();
+            std::cerr << "Failed to occupy worker for disconnect regression\n";
+            return 1;
+        }
+
+        QTcpSocket disconnected_socket;
+        disconnected_socket.connectToHost(QHostAddress::LocalHost,
+                                           TerrainSingleFlightTestAccess::port(server));
+        const bool socket_connected = disconnected_socket.waitForConnected(3000);
+        if (socket_connected)
+        {
+            const QByteArray target = test_case.second.toEncoded(QUrl::RemoveScheme |
+                QUrl::RemoveAuthority);
+            disconnected_socket.write("GET " + target +
+                " HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: keep-alive\r\n\r\n");
+            disconnected_socket.flush();
+        }
+        QNetworkAccessManager surviving_network;
+        QNetworkReply *survivor = surviving_network.get(QNetworkRequest(test_case.second));
+        timer.restart();
+        while (TerrainSingleFlightTestAccess::waiterCount(server) != 2 &&
+               timer.elapsed() < 5000)
+        {
+            app.processEvents(QEventLoop::AllEvents, 20);
+            QThread::msleep(1);
+        }
+        const bool two_waiters = socket_connected &&
+            TerrainSingleFlightTestAccess::waiterCount(server) == 2 &&
+            TerrainSingleFlightTestAccess::admittedJobs(server) == 1;
+        disconnected_socket.abort();
+        timer.restart();
+        while (TerrainSingleFlightTestAccess::waiterCount(server) != 1 &&
+               timer.elapsed() < 5000)
+        {
+            app.processEvents(QEventLoop::AllEvents, 20);
+            QThread::msleep(1);
+        }
+        const bool abandoned_one =
+            TerrainSingleFlightTestAccess::waiterCount(server) == 1 &&
+            TerrainSingleFlightTestAccess::admittedJobs(server) == 1;
+
+        QNetworkAccessManager joining_network;
+        QNetworkReply *joiner = joining_network.get(QNetworkRequest(test_case.second));
+        timer.restart();
+        while (TerrainSingleFlightTestAccess::waiterCount(server) != 2 &&
+               timer.elapsed() < 5000)
+        {
+            app.processEvents(QEventLoop::AllEvents, 20);
+            QThread::msleep(1);
+        }
+        const bool joined_existing =
+            TerrainSingleFlightTestAccess::waiterCount(server) == 2 &&
+            TerrainSingleFlightTestAccess::admittedJobs(server) == 1;
+        disconnected_worker_release.release();
+        timer.restart();
+        while ((!survivor->isFinished() || !joiner->isFinished()) &&
+               timer.elapsed() < 5000)
+        {
+            app.processEvents(QEventLoop::AllEvents, 20);
+            QThread::msleep(1);
+        }
+        const bool delivered = survivor->isFinished() && joiner->isFinished() &&
+            survivor->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() == 404 &&
+            joiner->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() == 404 &&
+            TerrainSingleFlightTestAccess::waiterCount(server) == 0 &&
+            TerrainSingleFlightTestAccess::admittedJobs(server) == 0;
+        survivor->deleteLater();
+        joiner->deleteLater();
+        if (!two_waiters || !abandoned_one || !joined_existing || !delivered)
+        {
+            std::cerr << "Terrain client-disconnect regression failed for "
+                      << test_case.first.toStdString()
+                      << " two_waiters=" << two_waiters
+                      << " abandoned_one=" << abandoned_one
+                      << " joined_existing=" << joined_existing
+                      << " delivered=" << delivered << '\n';
+            return 1;
+        }
+    }
+
+    // When the *last* client disappears the registry key must remain until
+    // completion. New arrivals can reuse the existing admission/job safely.
+    {
+        QSemaphore orphan_worker_entered;
+        QSemaphore orphan_worker_release;
+        TerrainSingleFlightTestAccess::blockWorker(
+            server, orphan_worker_entered, orphan_worker_release);
+        if (!orphan_worker_entered.tryAcquire(1, 3000))
+        {
+            orphan_worker_release.release();
+            std::cerr << "Failed to occupy worker for orphan regression\n";
+            return 1;
+        }
+        QTcpSocket abandoned_socket;
+        abandoned_socket.connectToHost(QHostAddress::LocalHost,
+                                       TerrainSingleFlightTestAccess::port(server));
+        const bool connected = abandoned_socket.waitForConnected(3000);
+        if (connected)
+        {
+            abandoned_socket.write(
+                "GET /terrain/v1/copernicus-glo30/5/11/12.aowterrain HTTP/1.1\r\n"
+                "Host: 127.0.0.1\r\n\r\n");
+            abandoned_socket.flush();
+        }
+        timer.restart();
+        while (TerrainSingleFlightTestAccess::waiterCount(server) != 1 &&
+               timer.elapsed() < 5000)
+        {
+            app.processEvents(QEventLoop::AllEvents, 20);
+            QThread::msleep(1);
+        }
+        const bool accepted = connected &&
+            TerrainSingleFlightTestAccess::waiterCount(server) == 1;
+        abandoned_socket.abort();
+        timer.restart();
+        while (TerrainSingleFlightTestAccess::waiterCount(server) != 0 &&
+               timer.elapsed() < 5000)
+        {
+            app.processEvents(QEventLoop::AllEvents, 20);
+            QThread::msleep(1);
+        }
+        const bool empty_but_running =
+            TerrainSingleFlightTestAccess::waiterCount(server) == 0 &&
+            TerrainSingleFlightTestAccess::uniqueJobCount(server) == 1 &&
+            TerrainSingleFlightTestAccess::admittedJobs(server) == 1;
+        QNetworkAccessManager late_network;
+        QNetworkReply *late_reply = late_network.get(QNetworkRequest(url));
+        timer.restart();
+        while (TerrainSingleFlightTestAccess::waiterCount(server) != 1 &&
+               timer.elapsed() < 5000)
+        {
+            app.processEvents(QEventLoop::AllEvents, 20);
+            QThread::msleep(1);
+        }
+        const bool reused =
+            TerrainSingleFlightTestAccess::waiterCount(server) == 1 &&
+            TerrainSingleFlightTestAccess::uniqueJobCount(server) == 1 &&
+            TerrainSingleFlightTestAccess::admittedJobs(server) == 1;
+        orphan_worker_release.release();
+        timer.restart();
+        while (!late_reply->isFinished() && timer.elapsed() < 5000)
+        {
+            app.processEvents(QEventLoop::AllEvents, 20);
+            QThread::msleep(1);
+        }
+        const bool completed = late_reply->isFinished() &&
+            late_reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() == 404 &&
+            TerrainSingleFlightTestAccess::waiterCount(server) == 0 &&
+            TerrainSingleFlightTestAccess::uniqueJobCount(server) == 0 &&
+            TerrainSingleFlightTestAccess::admittedJobs(server) == 0;
+        late_reply->deleteLater();
+        if (!accepted || !empty_but_running || !reused || !completed)
+        {
+            std::cerr << "Terrain orphaned-flight join regression failed: "
+                      << "accepted=" << accepted
+                      << " empty_but_running=" << empty_but_running
+                      << " reused=" << reused
+                      << " completed=" << completed << '\n';
+            return 1;
+        }
+    }
+
     // A second wave verifies that elevation requests share the same bounded
     // admission and response budgets as tile requests.
     QSemaphore elevation_entered;

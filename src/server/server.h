@@ -14,6 +14,7 @@
 #include <QList>
 #include <QMutex>
 #include <QPromise>
+#include <QTcpSocket>
 #include <QSharedPointer>
 #include <QString>
 #include <QTcpServer>
@@ -87,15 +88,24 @@ private:
     void setupRoutes();
     QFuture<QHttpServerResponse> submitTerrainJob(std::function<QHttpServerResponse()> task);
     QFuture<QHttpServerResponse> submitTerrainTile(const QString &dataset,
-                                                   int zoom, int tile_x, int tile_y);
+                                                   int zoom, int tile_x, int tile_y,
+                                                   const QHttpServerRequest *client_request = nullptr);
     QFuture<QHttpServerResponse> submitTerrainElevation(
         const QString &dataset, double latitude_deg, double longitude_deg,
-        std::optional<Aowis::Map::TerrainVerticalDatum> requested_vertical_datum);
+        std::optional<Aowis::Map::TerrainVerticalDatum> requested_vertical_datum,
+        const QHttpServerRequest *client_request = nullptr);
     QFuture<QHttpServerResponse> submitTerrainGrid(
-        const Aowis::Map::TerrainAnalysisGridRequest &request);
+        const Aowis::Map::TerrainAnalysisGridRequest &request,
+        const QHttpServerRequest *client_request = nullptr);
     bool isReadAuthorized(const QHttpServerRequest &request) const;
     bool isDeleteAuthorized(const QHttpServerRequest &request) const;
     bool requestContainsKey(const QHttpServerRequest &request, const QByteArray &expected_key) const;
+    static QString terrainClientKey(const QHostAddress &address, quint16 port);
+    void trackTerrainSocket(QTcpSocket *socket);
+    void abandonTerrainWaiters(QTcpSocket *socket);
+    void attachTerrainWaiter(const PendingPromise &promise,
+                             const QHttpServerRequest *request);
+    void forgetTerrainWaiter(const PendingPromise &promise);
     bool appendPendingPromise(const QString &key, const PendingPromise &promise);
     PendingPromises takePendingPromises(const QString &key);
 
@@ -112,6 +122,11 @@ private:
     MapTiles *maptiles;
     Aowis::Map::TerrainData *terrain_data;
 
+    // Socket identity is used only on the HTTP thread. Empty single-flight
+    // entries are retained until their running job finishes, allowing a new
+    // client to join without creating a second job for the same key.
+    QHash<QString, QTcpSocket *> terrain_client_sockets;
+    QHash<QPromise<QHttpServerResponse> *, QTcpSocket *> terrain_waiter_sockets;
     QHash<QString, PendingPromises> pending_terrain_tiles;
     QHash<QString, PendingPromises> pending_terrain_elevations;
     QHash<QString, PendingPromises> pending_terrain_grids;

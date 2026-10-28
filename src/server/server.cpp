@@ -8,6 +8,7 @@
 #include <QHttpHeaders>
 #endif
 #include <QThread>
+#include <QTcpSocket>
 #include <QDir>
 #include <QFileInfo>
 #include <QJsonDocument>
@@ -27,6 +28,35 @@
 
 #include <optional>
 #include <utility>
+
+// QHttpServerRequest exposes the peer address and port, but not its socket or
+// a per-request disconnect signal. Install socket tracking before the HTTP
+// server consumes each accepted connection; never inspect Qt private APIs.
+class TerrainTrackingTcpServer final : public QTcpServer
+{
+public:
+    explicit TerrainTrackingTcpServer(QObject *parent) : QTcpServer(parent) {}
+
+    std::function<void(QTcpSocket *)> socket_accepted;
+
+protected:
+    void incomingConnection(qintptr descriptor) override
+    {
+        QTcpSocket *socket = new QTcpSocket(this);
+        if (!socket->setSocketDescriptor(descriptor))
+        {
+            delete socket;
+            return;
+        }
+        if (this->socket_accepted)
+            this->socket_accepted(socket);
+        addPendingConnection(socket);
+        // addPendingConnection emits pendingConnectionAvailable, but the
+        // QTcpServer default handler also emits newConnection explicitly.
+        // QHttpServer.bind() relies on that notification to accept sockets.
+        emit newConnection();
+    }
+};
 
 namespace
 {
@@ -245,7 +275,7 @@ bool secureEquals(const QByteArray &left, const QByteArray &right)
 Server::Server(const Config &config, QObject *parent)
     : QObject(parent),
       config(config),
-      tcp(new QTcpServer(this)),
+      tcp(new TerrainTrackingTcpServer(this)),
       terrain_admission(qMax(1, config.maximum_terrain_jobs)),
       terrain_remote_admission(qMax(1, config.maximum_terrain_jobs / 2)),
       terrain_grid_bytes(64ULL * 1024 * 1024),
@@ -269,6 +299,8 @@ Server::Server(const Config &config, QObject *parent)
           this)),
       pending_request_count(0)
 {
+    static_cast<TerrainTrackingTcpServer *>(this->tcp)->socket_accepted =
+        [this](QTcpSocket *socket) { trackTerrainSocket(socket); };
     // Terrain work must not outlive the server or consume the global Qt pool.
     this->terrain_worker_pool.setObjectName(QStringLiteral("aowis-map-terrain"));
     this->terrain_worker_pool.setMaxThreadCount(
@@ -283,6 +315,88 @@ Server::Server(const Config &config, QObject *parent)
     connect(this->maptiles, &MapTiles::tileReady, this, &Server::onTileReady);
     connect(this->maptiles, &MapTiles::tileFailed, this, &Server::onTileFailed);
     setupRoutes();
+}
+
+QString Server::terrainClientKey(const QHostAddress &address, quint16 port)
+{
+    return address.toString() + QLatin1Char('/') + QString::number(port);
+}
+
+void Server::trackTerrainSocket(QTcpSocket *socket)
+{
+    const QString key = terrainClientKey(socket->peerAddress(), socket->peerPort());
+    this->terrain_client_sockets.insert(key, socket);
+    // Both callbacks execute on the server thread; completing a dropped
+    // response must never cancel another client's single-flight waiter.
+    connect(socket, &QTcpSocket::disconnected, this, [this, socket, key]()
+    {
+        if (this->terrain_client_sockets.value(key) == socket)
+            this->terrain_client_sockets.remove(key);
+        abandonTerrainWaiters(socket);
+    });
+    connect(socket, &QObject::destroyed, this, [this, socket, key]()
+    {
+        if (this->terrain_client_sockets.value(key) == socket)
+            this->terrain_client_sockets.remove(key);
+        abandonTerrainWaiters(socket);
+    });
+}
+
+void Server::attachTerrainWaiter(const PendingPromise &promise,
+                                 const QHttpServerRequest *request)
+{
+#if QT_VERSION >= QT_VERSION_CHECK(6, 5, 0)
+    if (request != nullptr)
+    {
+        QTcpSocket *socket = this->terrain_client_sockets.value(
+            terrainClientKey(request->remoteAddress(), request->remotePort()), nullptr);
+        if (socket != nullptr)
+            this->terrain_waiter_sockets.insert(promise.data(), socket);
+    }
+#else
+    Q_UNUSED(promise);
+    Q_UNUSED(request);
+#endif
+}
+
+void Server::forgetTerrainWaiter(const PendingPromise &promise)
+{
+    this->terrain_waiter_sockets.remove(promise.data());
+}
+
+void Server::abandonTerrainWaiters(QTcpSocket *socket)
+{
+    // Leave an empty key registered until its job finishes. A subsequent
+    // request for the same key must join the original job, never trigger an
+    // overlapping job whose completion could be delivered to wrong waiters.
+    const QList<QHash<QString, PendingPromises> *> registries = {
+        &this->pending_terrain_tiles,
+        &this->pending_terrain_elevations,
+        &this->pending_terrain_grids
+    };
+    for (QHash<QString, PendingPromises> *registry : registries)
+    {
+        for (PendingPromises &promises : *registry)
+        {
+            qsizetype index = promises.size();
+            while (index > 0)
+            {
+                --index;
+                const PendingPromise promise = promises.at(index);
+                if (this->terrain_waiter_sockets.value(promise.data(), nullptr) != socket)
+                    continue;
+                this->terrain_waiter_sockets.remove(promise.data());
+                promises.removeAt(index);
+                --this->pending_terrain_tile_count;
+                // Resolve the future even though its HTTP socket is gone.
+                // Qt's HTTP transport will discard the undeliverable reply.
+                promise->addResult(QHttpServerResponse(
+                    "HTTP client disconnected",
+                    QHttpServerResponse::StatusCode::ServiceUnavailable));
+                promise->finish();
+            }
+        }
+    }
 }
 
 Server::~Server()
@@ -311,6 +425,7 @@ Server::~Server()
     {
         for (const PendingPromise &promise : promises)
         {
+            forgetTerrainWaiter(promise);
             promise->addResult(QHttpServerResponse(
                 "Map server shutting down",
                 QHttpServerResponse::StatusCode::ServiceUnavailable));
@@ -322,6 +437,7 @@ Server::~Server()
     {
         for (const PendingPromise &promise : promises)
         {
+            forgetTerrainWaiter(promise);
             promise->addResult(QHttpServerResponse(
                 "Map server shutting down",
                 QHttpServerResponse::StatusCode::ServiceUnavailable));
@@ -333,6 +449,7 @@ Server::~Server()
     {
         for (const PendingPromise &promise : promises)
         {
+            forgetTerrainWaiter(promise);
             promise->addResult(QHttpServerResponse(
                 "Map server shutting down",
                 QHttpServerResponse::StatusCode::ServiceUnavailable));
@@ -341,11 +458,14 @@ Server::~Server()
     }
     this->pending_terrain_grids.clear();
     this->pending_terrain_tile_count = 0;
+    this->terrain_waiter_sockets.clear();
+    this->terrain_client_sockets.clear();
 
     for (const PendingPromises &promises : std::as_const(pending))
     {
         for (const PendingPromise &promise : promises)
         {
+            forgetTerrainWaiter(promise);
             promise->addResult(QHttpServerResponse(
                 "Map server shutting down",
                 QHttpServerResponse::StatusCode::ServiceUnavailable));
@@ -383,7 +503,8 @@ QFuture<QHttpServerResponse> Server::submitTerrainJob(std::function<QHttpServerR
 }
 
 QFuture<QHttpServerResponse> Server::submitTerrainTile(
-    const QString &dataset, int zoom, int tile_x, int tile_y)
+    const QString &dataset, int zoom, int tile_x, int tile_y,
+    const QHttpServerRequest *client_request)
 {
     // Called exclusively on the HTTP event-loop thread. Each HTTP request owns
     // a distinct promise, but identical requests share one terrain worker job.
@@ -426,6 +547,7 @@ QFuture<QHttpServerResponse> Server::submitTerrainTile(
     promise->start();
     QFuture<QHttpServerResponse> future = promise->future();
     this->pending_terrain_tiles[key].append(promise);
+    attachTerrainWaiter(promise, client_request);
     ++this->pending_terrain_tile_count;
     if (existing)
         return future;
@@ -451,6 +573,7 @@ QFuture<QHttpServerResponse> Server::submitTerrainTile(
             this->pending_terrain_tile_count -= waiters.size();
             for (const PendingPromise &waiter : waiters)
             {
+                forgetTerrainWaiter(waiter);
                 if (result.status == Aowis::Map::TerrainTileLookupStatus::Ready)
                     waiter->addResult(QHttpServerResponse(
                         Aowis::Map::terrainTileMimeType().toUtf8(), result.data));
@@ -496,6 +619,7 @@ QFuture<QHttpServerResponse> Server::submitTerrainTile(
             this->pending_terrain_tile_count -= waiters.size();
             for (const PendingPromise &waiter : waiters)
             {
+                forgetTerrainWaiter(waiter);
                 waiter->addResult(makeTerrainTileErrorResponse(result));
                 waiter->finish();
             }
@@ -506,7 +630,8 @@ QFuture<QHttpServerResponse> Server::submitTerrainTile(
 
 QFuture<QHttpServerResponse> Server::submitTerrainElevation(
     const QString &dataset, double latitude_deg, double longitude_deg,
-    std::optional<Aowis::Map::TerrainVerticalDatum> requested_vertical_datum)
+    std::optional<Aowis::Map::TerrainVerticalDatum> requested_vertical_datum,
+    const QHttpServerRequest *client_request)
 {
     // Route handlers run on the server thread. Numeric keys avoid duplicating
     // work for equivalent textual representations of the same coordinate.
@@ -548,6 +673,7 @@ QFuture<QHttpServerResponse> Server::submitTerrainElevation(
     promise->start();
     QFuture<QHttpServerResponse> future = promise->future();
     this->pending_terrain_elevations[key].append(promise);
+    attachTerrainWaiter(promise, client_request);
     ++this->pending_terrain_tile_count;
     if (existing)
         return future;
@@ -573,6 +699,7 @@ QFuture<QHttpServerResponse> Server::submitTerrainElevation(
             this->pending_terrain_tile_count -= waiters.size();
             for (const PendingPromise &waiter : waiters)
             {
+                forgetTerrainWaiter(waiter);
                 waiter->addResult(makeTerrainElevationSuccessResponse(result));
                 waiter->finish();
             }
@@ -616,6 +743,7 @@ QFuture<QHttpServerResponse> Server::submitTerrainElevation(
             this->pending_terrain_tile_count -= waiters.size();
             for (const PendingPromise &waiter : waiters)
             {
+                forgetTerrainWaiter(waiter);
                 waiter->addResult(makeTerrainElevationSuccessResponse(result));
                 waiter->finish();
             }
@@ -625,7 +753,8 @@ QFuture<QHttpServerResponse> Server::submitTerrainElevation(
 }
 
 QFuture<QHttpServerResponse> Server::submitTerrainGrid(
-    const Aowis::Map::TerrainAnalysisGridRequest &request)
+    const Aowis::Map::TerrainAnalysisGridRequest &request,
+    const QHttpServerRequest *client_request)
 {
     // Values have already passed HTTP validation. Canonical numeric keys
     // coalesce equivalent query representations without merging distinct grids.
@@ -684,6 +813,7 @@ QFuture<QHttpServerResponse> Server::submitTerrainGrid(
     promise->start();
     QFuture<QHttpServerResponse> future = promise->future();
     this->pending_terrain_grids[key].append(promise);
+    attachTerrainWaiter(promise, client_request);
     ++this->pending_terrain_tile_count;
     if (existing)
         return future;
@@ -728,6 +858,7 @@ QFuture<QHttpServerResponse> Server::submitTerrainGrid(
             this->pending_terrain_tile_count -= waiters.size();
             for (const PendingPromise &waiter : waiters)
             {
+                forgetTerrainWaiter(waiter);
                 if (result_status == Aowis::Map::TerrainProviderFetchStatus::Ready)
                 {
                     waiter->addResult(QHttpServerResponse(
@@ -791,6 +922,7 @@ QFuture<QHttpServerResponse> Server::submitTerrainGrid(
                 : QHttpServerResponse::StatusCode::ServiceUnavailable;
             for (const PendingPromise &waiter : waiters)
             {
+                forgetTerrainWaiter(waiter);
                 waiter->addResult(QHttpServerResponse(acquired.error_message, status));
                 waiter->finish();
             }
@@ -1233,7 +1365,7 @@ void Server::setupRoutes()
         grid_request.bounds = {values[0], values[1], values[2], values[3]};
         grid_request.columns = columns;
         grid_request.rows = rows;
-        return submitTerrainGrid(grid_request);
+        return submitTerrainGrid(grid_request, &request);
     });
 
     this->http.route("/terrain/v1/analysis/grid",
@@ -1284,7 +1416,7 @@ void Server::setupRoutes()
 
         const QString dataset = this->config.terrain_default_dataset;
         return submitTerrainElevation(
-            dataset, latitude_deg, longitude_deg, requested_vertical_datum);
+            dataset, latitude_deg, longitude_deg, requested_vertical_datum, &request);
     });
 
     this->http.route("/terrain/v1/elevation",
@@ -1317,7 +1449,7 @@ void Server::setupRoutes()
             return makeReadyResponse(makeTerrainTileErrorResponse(invalid_result));
         }
 
-        return submitTerrainTile(dataset, zoom, tile_x, tile_y);
+        return submitTerrainTile(dataset, zoom, tile_x, tile_y, &request);
     });
 
     this->http.route("/terrain/v1/<arg>/<arg>/<arg>/<arg>.aowterrain",
