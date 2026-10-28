@@ -40,6 +40,7 @@ public:
         quint16 port = 8122;
         int maximum_pending_requests = 2048;
         int maximum_terrain_jobs = 128;
+        int maximum_terrain_workers = 4;
         int maximum_active_downloads = 32;
         bool map_remote_fetch_enabled = true;
         QString provider_state_file;

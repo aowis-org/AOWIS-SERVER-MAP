@@ -319,6 +319,10 @@ bool MapServerConfiguration::loadConfigFile(const QString &path, Server::Config 
                          std::numeric_limits<int>::max(), &config->maximum_terrain_jobs, error_message))
         return false;
 
+    if (!readPositiveInt(&settings, QStringLiteral("terrain/maximum_workers"),
+                         256, &config->maximum_terrain_workers, error_message))
+        return false;
+
     if (!readPositiveInt(&settings, QStringLiteral("downloads/max_active_downloads"),
                          std::numeric_limits<int>::max(), &config->maximum_active_downloads, error_message))
     {
@@ -587,7 +591,7 @@ QByteArray MapServerConfiguration::defaultConfigText()
         "coverage=\n\n"
         "[terrain]\n"
         "enabled=true\nremote_fetch_enabled=true\n"
-        "default_dataset=%5\nmaximum_jobs=%6\ncache_directory=\ncoverage=\n\n"
+        "default_dataset=%5\nmaximum_jobs=%6\nmaximum_workers=%7\ncache_directory=\ncoverage=\n\n"
         "[storage]\n"
         "; Permanent imported tiles and terrain packages; not a disposable cache.\n"
         "; Empty means <terrain cache>/offline-packages for legacy terrain packages.\n"
@@ -632,7 +636,8 @@ QByteArray MapServerConfiguration::defaultConfigText()
      .arg(defaults.maximum_pending_requests)
      .arg(defaults.maximum_active_downloads)
      .arg(defaults.terrain_default_dataset)
-     .arg(defaults.maximum_terrain_jobs).toUtf8();
+     .arg(defaults.maximum_terrain_jobs)
+     .arg(defaults.maximum_terrain_workers).toUtf8();
 }
 
 bool MapServerConfiguration::writeDefaultConfigFile(const QString &path, bool overwrite,

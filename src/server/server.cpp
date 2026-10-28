@@ -266,7 +266,7 @@ Server::Server(const Config &config, QObject *parent)
     // Terrain work must not outlive the server or consume the global Qt pool.
     this->terrain_worker_pool.setObjectName(QStringLiteral("aowis-map-terrain"));
     this->terrain_worker_pool.setMaxThreadCount(
-        qMax(1, QThread::idealThreadCount() / 2));
+        qMax(1, qMin(config.maximum_terrain_workers, config.maximum_terrain_jobs)));
     this->maptiles->setRemoteFetchEnabled(config.map_remote_fetch_enabled);
     this->maptiles->setPermanentDataDirectory(config.permanent_data_directory);
     this->maptiles->configureProviders(config.map_providers, config.download_coverage,

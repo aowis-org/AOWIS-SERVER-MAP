@@ -226,3 +226,13 @@ five-second watchdog prevents an invalidation regression from hanging the
 test indefinitely. This is a deterministic synchronization test, **not** a
 controlled test inside `QSaveFile::commit()` itself. Filesystem failure and
 crash-consistency tests remain future work.
+
+## Phase 04: independently bounded terrain workers
+
+`[terrain] maximum_workers=4` limits simultaneously executing terrain tasks
+(independently of `[terrain] maximum_jobs=128`, which bounds running plus queued
+requests). The actual pool limit is clamped to `maximum_jobs`. Valid worker
+settings are 1..256; invalid configurations fail validation. This prevents
+large hosts from automatically launching half their logical CPUs worth of
+blocking terrain fetches. The pool still mixes I/O and CPU; splitting terrain
+upstream retrieval into an asynchronous domain remains future work.
