@@ -3,6 +3,7 @@
 #include "../src/lib/copernicus_download_validation.h"
 #include "../src/lib/copernicus_resume_state.h"
 #include "../src/lib/copernicus_source_publish.h"
+#include "../src/lib/copernicus_decoded_block_cache.h"
 
 #include <QDir>
 #include <QFile>
@@ -590,6 +591,45 @@ int main()
                  "Copernicus source lock wait ignored upstream cancellation"))
         return 1;
     blocked_request.get();
+
+    // Scanning many TIFF blocks must not retain all decoded blocks indefinitely.
+    Internal::CopernicusDecodedBlockCache decoded_cache(12);
+    if (!require(decoded_cache.insert(1, QByteArray(8, 'a')) &&
+                 decoded_cache.insert(2, QByteArray(8, 'b')) &&
+                 decoded_cache.bytes() == 8 && decoded_cache.count() == 1 &&
+                 decoded_cache.find(1) == nullptr && decoded_cache.find(2) != nullptr,
+                 "Decoded raster cache did not evict the oldest block"))
+        return 1;
+    if (!require(!decoded_cache.insert(3, QByteArray(13, 'c')) &&
+                 decoded_cache.bytes() == 8 &&
+                 decoded_cache.insert(4, QByteArray(4, 'd')) &&
+                 decoded_cache.bytes() == 12 &&
+                 decoded_cache.find(2) != nullptr && decoded_cache.find(4) != nullptr,
+                 "Decoded raster cache exceeded its byte budget"))
+        return 1;
+
+    // Multiple readers share the same retained-block reservation pool.
+    // Refused cache admission must not consume bytes or prevent later readers.
+    Internal::CopernicusDecodedBlockBudget shared_budget(12);
+    {
+        Internal::CopernicusDecodedBlockCache first(12, &shared_budget);
+        Internal::CopernicusDecodedBlockCache second(12, &shared_budget);
+        if (!require(first.insert(1, QByteArray(8, 'x')) &&
+                     !second.insert(2, QByteArray(8, 'y')) &&
+                     shared_budget.bytes() == 8 &&
+                     second.insert(3, QByteArray(4, 'z')) &&
+                     shared_budget.bytes() == 12,
+                     "Concurrent raster caches exceeded the shared decoded-block budget"))
+            return 1;
+        if (!require(first.insert(4, QByteArray(8, 'w')) &&
+                     shared_budget.bytes() == 12 &&
+                     first.find(1) == nullptr,
+                     "Local eviction did not release shared raster reservation"))
+            return 1;
+    }
+    if (!require(shared_budget.bytes() == 0,
+                 "Destroyed raster caches leaked shared decoded-block reservations"))
+        return 1;
 
     return 0;
 }

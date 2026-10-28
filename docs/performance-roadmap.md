@@ -53,11 +53,12 @@ Asynchronous terrain routes use separate cached-work and remote-capable `QThread
 | Remote-capable job admission | 64 | At most `max(1, maximum_jobs / 2)` remote-capable queued or running jobs, also counted against the global budget |
 | `server/max_pending_requests` | 2048 | Upper bound used for pending HTTP response waiters; shared by terrain tile, elevation and grid single-flight requests |
 | In-flight terrain grid reservation | 64 MiB | Estimated float32 output bytes for distinct admitted grid jobs |
+| Copernicus decoded TIFF blocks | 32 MiB per opened raster; 128 MiB shared retained-block budget | FIFO eviction within each reader; when the global retained-block budget is full, read the requested block without retaining it |
 | Analysis grid dimensions | 512 × 512 | Maximum samples per HTTP analysis-grid request |
 
 Identical concurrent requests to normalized terrain tiles, point elevation, and analysis grids share an in-flight computation. The request identity includes the relevant dataset, coordinates/bounds, dimensions, and vertical datum where applicable. Each waiting client gets its own HTTP response; identical requests do not consume additional terrain job admission slots or an additional grid-byte reservation. Different requests still compete for admission. Remote requests can reach their own admission limit while global slots remain for cached terrain. At capacity, the server responds **503 Service Unavailable** (with `Retry-After: 1` in admission paths).
 
-The grid byte budget accounts for estimated float-buffer output, **not** every intermediate decoder allocation, native raster buffer, waiting response or provider-cache allocation. These still need production memory profiling. Terrain cache deletion and upstream cancellation have their own endpoint semantics; do not assume every route is coalesced.
+The grid byte budget accounts for estimated float-buffer output. Each opened Copernicus GeoTIFF also has a **32 MiB decoded-block cache**, evicting older blocks as needed. A single TIFF tile or strip exceeding 32 MiB of decoded data fails with a source read error rather than allocating an unbounded block. A thread-safe **128 MiB shared budget** also caps retained decoded TIFF blocks across concurrent readers. A reader that cannot reserve shared cache space still decodes and samples its requested block without retaining it. This budget is **not a total process RSS ceiling**: temporary decode buffers, libtiff internal allocations, response payloads and other intermediate buffers remain outside this accounting and need profiling. Terrain cache deletion and upstream cancellation have their own endpoint semantics; do not assume every route is coalesced.
 
 On shutdown, the server stops listening, requests upstream cancellation, drains outstanding response promises and joins both terrain pools before destroying terrain dependencies. A blocked operation that does not respond to cancellation may still delay shutdown. Connection-disconnect tracking, absolute job deadlines and cancellation semantics merit further stress testing.
 
@@ -124,7 +125,7 @@ These are **open engineering goals**, not descriptions of the present server:
 
 1. Refine I/O concurrency, backpressure, fairness, and elevation fallback acquisition across zoom levels.
 2. Strengthen resumable source downloads with integration coverage for unstable real-world upstreams, bounded partial-file retention, and optional retry scheduling.
-3. Account for all terrain intermediate/native raster memory and response payloads, not just grid output reservations.
+3. Extend the shared decoded-block accounting to temporary decoder buffers, libtiff internals, and response payloads; the retained-block budget alone does not impose a process-wide memory ceiling.
 4. Add comprehensive per-stage metrics, disconnect-aware waiter cleanup, retry/circuit-breaker policies and operational dashboards where justified.
 5. Run sustained mixed workload, slow-upstream, shutdown, client-disconnect, sanitizer, and endurance tests; record repeatable before/after benchmarks before claiming performance gains.
 

@@ -2,6 +2,7 @@
 #include "copernicus_download_validation.h"
 #include "copernicus_resume_state.h"
 #include "copernicus_source_publish.h"
+#include "copernicus_decoded_block_cache.h"
 
 #include <QDir>
 #include <QElapsedTimer>
@@ -43,6 +44,7 @@ constexpr int ProviderSourceLockTimeoutMs = 180000;
 constexpr int ProviderSourceMinimumStaleLockMs = 10 * 60 * 1000;
 constexpr int ProviderSourceLockGraceMs = 60 * 1000;
 constexpr qint64 MaximumSourceDownloadBytes = 256LL * 1024LL * 1024LL;
+constexpr qsizetype MaximumDecodedRasterBlockCacheBytes = 32LL * 1024LL * 1024LL;
 
 const QString CopernicusDataset = QStringLiteral("copernicus-glo30");
 const QString CopernicusBaseUrl = QStringLiteral("https://copernicus-dem-30m.s3.amazonaws.com");
@@ -664,10 +666,12 @@ private:
         const ttile_t tile_index = TIFFComputeTile(this->tiff, tile_x, tile_y, 0, 0);
         const quint32 cache_key = quint32(tile_index);
 
-        if (!this->decoded_blocks.contains(cache_key))
+        QByteArray uncached_block;
+        const QByteArray *block = this->decoded_blocks.find(cache_key);
+        if (block == nullptr)
         {
             const tmsize_t tile_bytes = TIFFTileSize(this->tiff);
-            if (tile_bytes <= 0 || tile_bytes > std::numeric_limits<int>::max())
+            if (tile_bytes <= 0 || tile_bytes > MaximumDecodedRasterBlockCacheBytes)
             {
                 if (error_message != nullptr)
                     *error_message = QStringLiteral("Copernicus GeoTIFF tile buffer size is invalid: %1")
@@ -683,16 +687,21 @@ private:
                                          .arg(this->path);
                 return std::nullopt;
             }
-            this->decoded_blocks.insert(cache_key, decoded);
+            if (this->decoded_blocks.insert(cache_key, decoded))
+                block = this->decoded_blocks.find(cache_key);
+            else
+            {
+                uncached_block = std::move(decoded);
+                block = &uncached_block;
+            }
         }
 
-        const QByteArray &decoded = this->decoded_blocks[cache_key];
         const int local_column = column - int(tile_x);
         const int local_row = row - int(tile_y);
         const qsizetype byte_offset =
             (qsizetype(local_row) * qsizetype(this->tile_width) + qsizetype(local_column)) *
             qsizetype(sizeof(float));
-        return floatAt(decoded, byte_offset, error_message);
+        return floatAt(*block, byte_offset, error_message);
     }
 
     std::optional<float> strippedPixel(int column, int row, QString *error_message)
@@ -700,10 +709,12 @@ private:
         const tstrip_t strip_index = TIFFComputeStrip(this->tiff, uint32_t(row), 0);
         const quint32 cache_key = quint32(strip_index);
 
-        if (!this->decoded_blocks.contains(cache_key))
+        QByteArray uncached_block;
+        const QByteArray *block = this->decoded_blocks.find(cache_key);
+        if (block == nullptr)
         {
             const tmsize_t strip_bytes = TIFFStripSize(this->tiff);
-            if (strip_bytes <= 0 || strip_bytes > std::numeric_limits<int>::max())
+            if (strip_bytes <= 0 || strip_bytes > MaximumDecodedRasterBlockCacheBytes)
             {
                 if (error_message != nullptr)
                     *error_message = QStringLiteral("Copernicus GeoTIFF strip buffer size is invalid: %1")
@@ -719,15 +730,20 @@ private:
                                          .arg(this->path);
                 return std::nullopt;
             }
-            this->decoded_blocks.insert(cache_key, decoded);
+            if (this->decoded_blocks.insert(cache_key, decoded))
+                block = this->decoded_blocks.find(cache_key);
+            else
+            {
+                uncached_block = std::move(decoded);
+                block = &uncached_block;
+            }
         }
 
-        const QByteArray &decoded = this->decoded_blocks[cache_key];
         const int local_row = row % int(this->rows_per_strip);
         const qsizetype byte_offset =
             (qsizetype(local_row) * qsizetype(this->width) + qsizetype(column)) *
             qsizetype(sizeof(float));
-        return floatAt(decoded, byte_offset, error_message);
+        return floatAt(*block, byte_offset, error_message);
     }
 
     std::optional<float> floatAt(const QByteArray &decoded, qsizetype byte_offset,
@@ -756,7 +772,8 @@ private:
     uint32_t tile_height = 0;
     uint32_t rows_per_strip = 0;
     bool tiled = false;
-    QHash<quint32, QByteArray> decoded_blocks;
+    Internal::CopernicusDecodedBlockCache decoded_blocks{
+        MaximumDecodedRasterBlockCacheBytes, &Internal::sharedCopernicusDecodedBlockBudget()};
 };
 
 class CopernicusRasterSet
