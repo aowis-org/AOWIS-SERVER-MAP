@@ -18,6 +18,8 @@
 #include <QTcpServer>
 #include <QThreadPool>
 #include <functional>
+#include <optional>
+#include <aowis/map/terrain_elevation.h>
 #include "terrain_admission.h"
 
 #include <aowis/map/maptiles.h>
@@ -77,6 +79,9 @@ private:
     QFuture<QHttpServerResponse> submitTerrainJob(std::function<QHttpServerResponse()> task);
     QFuture<QHttpServerResponse> submitTerrainTile(const QString &dataset,
                                                    int zoom, int tile_x, int tile_y);
+    QFuture<QHttpServerResponse> submitTerrainElevation(
+        const QString &dataset, double latitude_deg, double longitude_deg,
+        std::optional<Aowis::Map::TerrainVerticalDatum> requested_vertical_datum);
     bool isReadAuthorized(const QHttpServerRequest &request) const;
     bool isDeleteAuthorized(const QHttpServerRequest &request) const;
     bool requestContainsKey(const QHttpServerRequest &request, const QByteArray &expected_key) const;
@@ -92,6 +97,7 @@ private:
     Aowis::Map::TerrainData *terrain_data;
 
     QHash<QString, PendingPromises> pending_terrain_tiles;
+    QHash<QString, PendingPromises> pending_terrain_elevations;
     int pending_terrain_tile_count = 0;
     QMutex mutex_pending;
     QHash<QString, PendingPromises> connections_pending;

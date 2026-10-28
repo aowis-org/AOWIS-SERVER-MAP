@@ -271,3 +271,13 @@ waiters, unique jobs, or terrain admission slots remain. It then requests a
 previously rejected different tile and requires the normal offline 404
 response, followed by another zero-capacity-leak check. This catches stale
 registration or admission leaks that only become visible after overload.
+
+### Elevation HTTP single-flight
+
+The `/terrain/v1/elevation` GET route now shares in-flight computations for
+identical numeric latitude/longitude, default dataset and requested vertical
+datum. It uses the same pending-response budget and terrain job admission
+counter as terrain tile single-flight. Each waiting client owns its own
+response promise, and shutdown drains the elevation registry after workers
+complete. The terrain HTTP integration test exercises deduplication, overload,
+completion and capacity recovery for elevation requests.

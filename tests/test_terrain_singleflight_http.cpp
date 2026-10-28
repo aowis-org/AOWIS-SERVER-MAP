@@ -43,6 +43,11 @@ public:
         return server.pending_terrain_tiles.size();
     }
 
+    static int elevationJobs(const Server &server)
+    {
+        return server.pending_terrain_elevations.size();
+    }
+
     static int admittedJobs(const Server &server)
     {
         return server.terrain_admission.count();
@@ -193,6 +198,84 @@ int main(int argc, char **argv)
                   << " valid_responses=" << response_ok
                   << " first_flight_cleared=" << first_flight_cleared
                   << " recovered=" << recovered << '\n';
+        return 1;
+    }
+    // A second wave verifies that elevation requests share the same bounded
+    // admission and response budgets as tile requests.
+    QSemaphore elevation_entered;
+    QSemaphore elevation_release;
+    TerrainSingleFlightTestAccess::blockWorker(server, elevation_entered, elevation_release);
+    if (!elevation_entered.tryAcquire(1, 3000))
+    {
+        elevation_release.release();
+        std::cerr << "Failed to occupy elevation worker\n";
+        return 1;
+    }
+
+    QNetworkAccessManager elevation_network;
+    QList<QNetworkReply *> elevation_replies;
+    const QUrl elevation_url(QStringLiteral(
+        "http://127.0.0.1:%1/terrain/v1/elevation?latitude=50&longitude=9")
+        .arg(TerrainSingleFlightTestAccess::port(server)));
+    for (int index = 0; index < request_count; ++index)
+        elevation_replies.append(elevation_network.get(QNetworkRequest(elevation_url)));
+    timer.restart();
+    while (TerrainSingleFlightTestAccess::waiterCount(server) != request_count &&
+           timer.elapsed() < 5000)
+    {
+        app.processEvents(QEventLoop::AllEvents, 20);
+        QThread::msleep(1);
+    }
+    const bool elevation_deduplicated =
+        TerrainSingleFlightTestAccess::waiterCount(server) == request_count &&
+        TerrainSingleFlightTestAccess::elevationJobs(server) == 1 &&
+        TerrainSingleFlightTestAccess::admittedJobs(server) == 1;
+
+    QNetworkAccessManager elevation_overload_network;
+    QNetworkReply *elevation_excess =
+        elevation_overload_network.get(QNetworkRequest(elevation_url));
+    timer.restart();
+    while (!elevation_excess->isFinished() && timer.elapsed() < 5000)
+    {
+        app.processEvents(QEventLoop::AllEvents, 20);
+        QThread::msleep(1);
+    }
+    const bool elevation_overload = elevation_excess->isFinished() &&
+        elevation_excess->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() == 503;
+    elevation_excess->deleteLater();
+    elevation_release.release();
+
+    timer.restart();
+    bool elevation_finished = false;
+    while (timer.elapsed() < 5000)
+    {
+        app.processEvents(QEventLoop::AllEvents, 20);
+        elevation_finished = true;
+        for (QNetworkReply *reply : std::as_const(elevation_replies))
+            elevation_finished = elevation_finished && reply->isFinished();
+        if (elevation_finished)
+            break;
+        QThread::msleep(1);
+    }
+    bool elevation_responses = elevation_finished;
+    for (QNetworkReply *reply : std::as_const(elevation_replies))
+    {
+        elevation_responses = elevation_responses &&
+            reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() == 404;
+        reply->deleteLater();
+    }
+    const bool elevation_cleared =
+        TerrainSingleFlightTestAccess::waiterCount(server) == 0 &&
+        TerrainSingleFlightTestAccess::elevationJobs(server) == 0 &&
+        TerrainSingleFlightTestAccess::admittedJobs(server) == 0;
+    if (!elevation_deduplicated || !elevation_overload ||
+        !elevation_responses || !elevation_cleared)
+    {
+        std::cerr << "Terrain elevation single-flight regression failed: "
+                  << "deduplicated=" << elevation_deduplicated
+                  << " overload=" << elevation_overload
+                  << " responses=" << elevation_responses
+                  << " cleared=" << elevation_cleared << '\n';
         return 1;
     }
     return 0;

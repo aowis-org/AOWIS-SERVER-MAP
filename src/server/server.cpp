@@ -308,6 +308,17 @@ Server::~Server()
         }
     }
     this->pending_terrain_tiles.clear();
+    for (const PendingPromises &promises : std::as_const(this->pending_terrain_elevations))
+    {
+        for (const PendingPromise &promise : promises)
+        {
+            promise->addResult(QHttpServerResponse(
+                "Map server shutting down",
+                QHttpServerResponse::StatusCode::ServiceUnavailable));
+            promise->finish();
+        }
+    }
+    this->pending_terrain_elevations.clear();
     this->pending_terrain_tile_count = 0;
 
     for (const PendingPromises &promises : std::as_const(pending))
@@ -416,6 +427,75 @@ QFuture<QHttpServerResponse> Server::submitTerrainTile(
                 {
                     waiter->addResult(makeTerrainTileErrorResponse(result));
                 }
+                waiter->finish();
+            }
+        }, Qt::QueuedConnection);
+    });
+    return future;
+}
+
+QFuture<QHttpServerResponse> Server::submitTerrainElevation(
+    const QString &dataset, double latitude_deg, double longitude_deg,
+    std::optional<Aowis::Map::TerrainVerticalDatum> requested_vertical_datum)
+{
+    // Route handlers run on the server thread. Numeric keys avoid duplicating
+    // work for equivalent textual representations of the same coordinate.
+    const QString key = dataset + QLatin1Char('/') +
+        QString::number(latitude_deg == 0.0 ? 0.0 : latitude_deg, 'g', 17) +
+        QLatin1Char('/') +
+        QString::number(longitude_deg == 0.0 ? 0.0 : longitude_deg, 'g', 17) +
+        QLatin1Char('/') +
+        (requested_vertical_datum.has_value()
+            ? Aowis::Map::terrainVerticalDatumId(*requested_vertical_datum)
+            : QStringLiteral("native"));
+    const bool existing = this->pending_terrain_elevations.contains(key);
+    if (this->shutting_down ||
+        this->pending_terrain_tile_count >= this->config.maximum_pending_requests ||
+        (!existing && !this->terrain_admission.tryAcquire()))
+    {
+        QHttpServerResponse response(
+            "Terrain service busy; retry later",
+            QHttpServerResponse::StatusCode::ServiceUnavailable);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
+        QHttpHeaders headers = response.headers();
+        headers.replaceOrAppend("Retry-After", "1");
+        response.setHeaders(std::move(headers));
+#else
+        response.setHeader("Retry-After", "1");
+#endif
+        return makeReadyResponse(std::move(response));
+    }
+
+    PendingPromise promise = PendingPromise::create();
+    promise->start();
+    QFuture<QHttpServerResponse> future = promise->future();
+    this->pending_terrain_elevations[key].append(promise);
+    ++this->pending_terrain_tile_count;
+    if (existing)
+        return future;
+
+    this->terrain_worker_pool.start(
+        [this, key, dataset, latitude_deg, longitude_deg, requested_vertical_datum]()
+    {
+        Aowis::Map::TerrainElevationLookupResult result;
+        try
+        {
+            result = this->terrain_data->sampleElevation(
+                dataset, latitude_deg, longitude_deg, requested_vertical_datum);
+        }
+        catch (...)
+        {
+            result.status = Aowis::Map::TerrainElevationLookupStatus::ProviderError;
+            result.error_message = QStringLiteral("Terrain processing failed");
+        }
+        this->terrain_admission.release();
+        QMetaObject::invokeMethod(this, [this, key, result = std::move(result)]() mutable
+        {
+            const PendingPromises waiters = this->pending_terrain_elevations.take(key);
+            this->pending_terrain_tile_count -= waiters.size();
+            for (const PendingPromise &waiter : waiters)
+            {
+                waiter->addResult(makeTerrainElevationSuccessResponse(result));
                 waiter->finish();
             }
         }, Qt::QueuedConnection);
@@ -935,14 +1015,8 @@ void Server::setupRoutes()
         }
 
         const QString dataset = this->config.terrain_default_dataset;
-        return submitTerrainJob(
-            [this, dataset, latitude_deg, longitude_deg, requested_vertical_datum]()
-        {
-            const Aowis::Map::TerrainElevationLookupResult elevation_result =
-                this->terrain_data->sampleElevation(
-                    dataset, latitude_deg, longitude_deg, requested_vertical_datum);
-            return makeTerrainElevationSuccessResponse(elevation_result);
-        });
+        return submitTerrainElevation(
+            dataset, latitude_deg, longitude_deg, requested_vertical_datum);
     });
 
     this->http.route("/terrain/v1/elevation",
