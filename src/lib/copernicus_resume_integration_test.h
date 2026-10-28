@@ -1,0 +1,15 @@
+#ifndef COPERNICUS_RESUME_INTEGRATION_TEST_H
+#define COPERNICUS_RESUME_INTEGRATION_TEST_H
+
+#include <QString>
+#include <QUrl>
+
+namespace Aowis::Map::Internal
+{
+// Internal transport test seam; never used to change production source URLs.
+bool fetchCopernicusSourceForIntegrationTest(const QString &directory,
+                                             const QUrl &source_url,
+                                             QString *error_message);
+}
+
+#endif

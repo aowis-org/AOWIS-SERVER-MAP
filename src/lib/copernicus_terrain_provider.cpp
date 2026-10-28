@@ -162,7 +162,8 @@ SourceLoadResult downloadSourceTile(const QString &provider_cache_directory,
                                     quint64 *upstream_cancel_generation,
                                     quint64 request_cancel_generation,
                                     int connect_timeout_ms, int inactivity_timeout_ms,
-                                    int download_deadline_ms)
+                                    int download_deadline_ms,
+                                    const QUrl &source_url = QUrl())
 {
     SourceLoadResult result;
     result.path = sourceTileCachePath(provider_cache_directory, address);
@@ -284,7 +285,7 @@ SourceLoadResult downloadSourceTile(const QString &provider_cache_directory,
     }
 
     QNetworkAccessManager network_manager;
-    QNetworkRequest request(sourceTileUrl(address));
+    QNetworkRequest request(source_url.isEmpty() ? sourceTileUrl(address) : source_url);
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
                          QNetworkRequest::NoLessSafeRedirectPolicy);
     request.setTransferTimeout(inactivity_timeout_ms);
@@ -1019,6 +1020,22 @@ void coordinateForNormalizedGridSample(const TerrainTileAddress &address,
     *longitude_deg = tile_x / tile_count * 360.0 - 180.0;
     const double mercator_y = std::numbers::pi * (1.0 - 2.0 * tile_y / tile_count);
     *latitude_deg = std::atan(std::sinh(mercator_y)) * 180.0 / std::numbers::pi;
+}
+}
+
+
+namespace Internal
+{
+bool fetchCopernicusSourceForIntegrationTest(const QString &directory,
+                                             const QUrl &source_url,
+                                             QString *error_message)
+{
+    const CopernicusSourceAddress address{50, 8};
+    const SourceLoadResult result = downloadSourceTile(directory, address, true,
+        nullptr, nullptr, nullptr, 0, 5000, 5000, 10000, source_url);
+    if (error_message != nullptr)
+        *error_message = result.error_message;
+    return result.status == SourceLoadStatus::Ready;
 }
 }
 

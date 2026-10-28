@@ -123,6 +123,15 @@ if(BUILD_TESTING)
         COMMAND aowis-server-map-terrain-tile-delivery-test
     )
 
+    add_executable(aowis-server-map-copernicus-resume-http-test
+        tests/test_copernicus_resume_http.cpp
+    )
+    target_link_libraries(aowis-server-map-copernicus-resume-http-test
+        PRIVATE AOWIS::Map Qt6::Network
+    )
+    add_test(NAME aowis-server-map-copernicus-resume-http
+             COMMAND aowis-server-map-copernicus-resume-http-test)
+
     add_executable(aowis-server-map-terrain-provider-test
         tests/test_terrain_provider.cpp
     )
@@ -279,6 +288,7 @@ if(BUILD_TESTING)
         aowis-server-map-terrain-tile-format-test
         aowis-server-map-terrain-tile-delivery-test
         aowis-server-map-terrain-provider-test
+        aowis-server-map-copernicus-resume-http-test
         aowis-server-map-terrain-elevation-sampling-test
         aowis-server-map-terrain-vertical-datum-test
         aowis-server-map-terrain-dataset-catalog-test

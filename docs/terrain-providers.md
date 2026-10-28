@@ -192,3 +192,12 @@ whole degree cell, which may extend beyond the smaller allowed XYZ tile footprin
 the policy governs the requested normalized tile, not clipping of the upstream COG.
 
 Repeated interruptions during validated HTTP 206 resumes retain newly received bytes when the response range, strong ETag and declared length match the saved entity. Partial files remain unpublished until complete.
+
+### Local HTTP resume regression
+
+The `aowis-server-map-copernicus-resume-http` CTest case uses a loopback HTTP
+server to exercise the production source downloader without external internet.
+It interrupts a full response and a subsequent range response, verifies
+`Range`/`If-Range`, and checks that only the completed concatenated source is
+published. The source URL override is an internal test seam; production
+Copernicus URLs remain fixed.
