@@ -21,6 +21,7 @@
 #include <QThreadPool>
 #include <atomic>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <aowis/map/terrain_elevation.h>
 #include <aowis/map/terrain_provider.h>
@@ -85,7 +86,7 @@ public:
 private:
     using PendingPromise = QSharedPointer<QPromise<QHttpServerResponse>>;
     using PendingPromises = QList<PendingPromise>;
-    using TerrainCancellation = QSharedPointer<std::atomic_bool>;
+    using TerrainCancellation = std::shared_ptr<std::atomic_bool>;
 
     void setupRoutes();
     QFuture<QHttpServerResponse> submitTerrainJob(std::function<QHttpServerResponse()> task);
