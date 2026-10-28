@@ -4,11 +4,15 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QLockFile>
 #include <QTemporaryDir>
 
 #include <tiffio.h>
 
+#include <chrono>
 #include <cmath>
+#include <future>
+#include <thread>
 #include <iostream>
 #include <numbers>
 #include <vector>
@@ -387,6 +391,49 @@ int main()
     {
         return 1;
     }
+
+    // A competing process can hold a provider-native source lock for minutes.
+    // Cancellation must interrupt that wait promptly rather than occupy a
+    // terrain worker until the normal source lock timeout expires.
+    QTemporaryDir cancellation_directory;
+    if (!require(cancellation_directory.isValid(),
+                 "Failed to create source-lock cancellation test directory"))
+        return 1;
+
+    TerrainData::Config cancellation_config;
+    cancellation_config.enabled = true;
+    cancellation_config.remote_fetch_enabled = true;
+    cancellation_config.cache_directory = cancellation_directory.path();
+    TerrainData cancellation_terrain_data(cancellation_config);
+    if (!require(cancellation_terrain_data.initialize(&error_message),
+                 "Failed to initialize source-lock cancellation terrain provider"))
+        return 1;
+
+    const QString locked_source_path = copernicusSourcePath(cancellation_terrain_data);
+    if (!require(QDir().mkpath(QFileInfo(locked_source_path).absolutePath()),
+                 "Failed to create source-lock cancellation test directory"))
+        return 1;
+    QLockFile held_source_lock(locked_source_path + QStringLiteral(".lock"));
+    if (!require(held_source_lock.tryLock(0),
+                 "Failed to hold source lock for cancellation test"))
+        return 1;
+
+    std::future<TerrainTileLookupResult> blocked_request = std::async(
+        std::launch::async, [&cancellation_terrain_data, address]()
+        {
+            return cancellation_terrain_data.terrainTile(
+                QStringLiteral("copernicus-glo30"), address);
+        });
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    cancellation_terrain_data.cancelUpstreamDownloads();
+    const bool canceled_promptly =
+        blocked_request.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+    // Unlock before joining in the failure case to prevent hanging this test.
+    held_source_lock.unlock();
+    if (!require(canceled_promptly,
+                 "Copernicus source lock wait ignored upstream cancellation"))
+        return 1;
+    blocked_request.get();
 
     return 0;
 }

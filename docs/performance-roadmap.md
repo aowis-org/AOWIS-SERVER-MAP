@@ -304,3 +304,15 @@ until the event-loop completion callback delivers the results and are released
 on success or failure. This budget bounds estimated float output data only; it
 does not cap provider-internal raster decompression, cache usage, or multiple
 client response copies. The byte counter is independently regression-tested.
+
+## Phase 04: cancellation-aware Copernicus source lock waits
+
+Copernicus source downloads use a cross-process `.lock` file to avoid
+concurrent writes to the same GeoTIFF. Waiting for this lock previously
+blocked a terrain worker for up to three minutes even after upstream
+cancellation. The lock wait now checks the provider cancellation generation
+at least once per approximately 100 ms lock-attempt interval. The total
+lock timeout, successful download behavior, and lock lifetime are unchanged.
+The terrain-provider test holds the source lock while issuing a request,
+cancels the provider, and verifies that the request returns promptly. This
+does not yet separate upstream I/O from CPU worker capacity.

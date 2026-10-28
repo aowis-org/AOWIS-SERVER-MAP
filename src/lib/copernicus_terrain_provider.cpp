@@ -1,6 +1,7 @@
 #include "copernicus_terrain_provider.h"
 
 #include <QDir>
+#include <QElapsedTimer>
 #include <QEventLoop>
 #include <QFile>
 #include <QFileInfo>
@@ -185,13 +186,51 @@ SourceLoadResult downloadSourceTile(const QString &provider_cache_directory,
 
     QLockFile source_lock(result.path + QStringLiteral(".lock"));
     source_lock.setStaleLockTime(ProviderSourceStaleLockMs);
-    if (!source_lock.tryLock(ProviderSourceLockTimeoutMs))
+    // Poll the cross-process source lock rather than blocking for up to three
+    // minutes without noticing a shutdown/cancellation request. The lock still
+    // protects the entire download and cache commit once acquired.
+    QElapsedTimer lock_wait;
+    lock_wait.start();
+    bool source_locked = false;
+    while (lock_wait.elapsed() < ProviderSourceLockTimeoutMs)
+    {
+        if (upstream_mutex != nullptr && upstream_cancel_generation != nullptr)
+        {
+            QMutexLocker locker(upstream_mutex);
+            if (*upstream_cancel_generation != request_cancel_generation)
+            {
+                result.status = SourceLoadStatus::Cancelled;
+                result.error_message = QStringLiteral("Copernicus upstream download canceled");
+                return result;
+            }
+        }
+
+        const int remaining_ms = ProviderSourceLockTimeoutMs - int(lock_wait.elapsed());
+        if (source_lock.tryLock(std::min(remaining_ms, 100)))
+        {
+            source_locked = true;
+            break;
+        }
+    }
+    if (!source_locked)
     {
         result.status = SourceLoadStatus::ReadError;
         result.error_message =
             QStringLiteral("Timed out waiting for Copernicus provider cache fill: %1")
                 .arg(result.path);
         return result;
+    }
+
+    // Cancellation may have happened during the final lock attempt.
+    if (upstream_mutex != nullptr && upstream_cancel_generation != nullptr)
+    {
+        QMutexLocker locker(upstream_mutex);
+        if (*upstream_cancel_generation != request_cancel_generation)
+        {
+            result.status = SourceLoadStatus::Cancelled;
+            result.error_message = QStringLiteral("Copernicus upstream download canceled");
+            return result;
+        }
     }
 
     // Another normalized tile/process may have downloaded the same 1-degree COG while
