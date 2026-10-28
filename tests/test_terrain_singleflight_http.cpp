@@ -639,6 +639,17 @@ int main(int argc, char **argv)
             mixed_base + QStringLiteral(
                 "/terrain/v1/analysis/grid?west=8&south=49&east=9&north=50&columns=2&rows=2"))));
 
+        // Separate clients joining the same three in-flight operations must
+        // not consume additional worker admission or create duplicate jobs.
+        QNetworkAccessManager duplicate_network;
+        QNetworkReply *duplicate_miss = duplicate_network.get(QNetworkRequest(QUrl(
+            mixed_base + QStringLiteral("/terrain/v1/copernicus-glo30/5/11/13.aowterrain"))));
+        QNetworkReply *duplicate_elevation = duplicate_network.get(QNetworkRequest(QUrl(
+            mixed_base + QStringLiteral("/terrain/v1/elevation?latitude=49&longitude=8"))));
+        QNetworkReply *duplicate_grid = duplicate_network.get(QNetworkRequest(QUrl(
+            mixed_base + QStringLiteral(
+                "/terrain/v1/analysis/grid?west=8&south=49&east=9&north=50&columns=2&rows=2"))));
+
         timer.restart();
         bool mixed_queued = false;
         while (timer.elapsed() < 3000)
@@ -650,7 +661,8 @@ int main(int argc, char **argv)
                 TerrainSingleFlightTestAccess::remoteAdmittedJobs(mixed_server) == 3 &&
                 TerrainSingleFlightTestAccess::admittedJobs(mixed_server) == 3 &&
                 !miss_reply->isFinished() && !elevation_reply->isFinished() &&
-                !grid_reply->isFinished();
+                !grid_reply->isFinished() && !duplicate_miss->isFinished() &&
+                !duplicate_elevation->isFinished() && !duplicate_grid->isFinished();
             if (mixed_queued)
                 break;
             QThread::msleep(1);
@@ -671,22 +683,39 @@ int main(int argc, char **argv)
             cached_reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() == 200 &&
             cached_reply->readAll() == mixed_encoded &&
             !miss_reply->isFinished() && !elevation_reply->isFinished() &&
-            !grid_reply->isFinished();
+            !grid_reply->isFinished() && !duplicate_miss->isFinished() &&
+            !duplicate_elevation->isFinished() && !duplicate_grid->isFinished();
         cached_reply->deleteLater();
 
         remote_release.release(2);
         timer.restart();
         while ((!miss_reply->isFinished() || !elevation_reply->isFinished() ||
-                !grid_reply->isFinished()) && timer.elapsed() < 5000)
+                !grid_reply->isFinished() || !duplicate_miss->isFinished() ||
+                !duplicate_elevation->isFinished() || !duplicate_grid->isFinished()) &&
+               timer.elapsed() < 5000)
         {
             app.processEvents(QEventLoop::AllEvents, 20);
             QThread::msleep(1);
         }
         const bool drained = miss_reply->isFinished() && elevation_reply->isFinished() &&
-            grid_reply->isFinished();
+            grid_reply->isFinished() && duplicate_miss->isFinished() &&
+            duplicate_elevation->isFinished() && duplicate_grid->isFinished();
+        const bool duplicate_results_match = drained &&
+            miss_reply->attribute(QNetworkRequest::HttpStatusCodeAttribute) ==
+                duplicate_miss->attribute(QNetworkRequest::HttpStatusCodeAttribute) &&
+            elevation_reply->attribute(QNetworkRequest::HttpStatusCodeAttribute) ==
+                duplicate_elevation->attribute(QNetworkRequest::HttpStatusCodeAttribute) &&
+            grid_reply->attribute(QNetworkRequest::HttpStatusCodeAttribute) ==
+                duplicate_grid->attribute(QNetworkRequest::HttpStatusCodeAttribute) &&
+            miss_reply->readAll() == duplicate_miss->readAll() &&
+            elevation_reply->readAll() == duplicate_elevation->readAll() &&
+            grid_reply->readAll() == duplicate_grid->readAll();
         miss_reply->deleteLater();
         elevation_reply->deleteLater();
         grid_reply->deleteLater();
+        duplicate_miss->deleteLater();
+        duplicate_elevation->deleteLater();
+        duplicate_grid->deleteLater();
         app.processEvents(QEventLoop::AllEvents, 20);
         const bool budgets_cleared =
             TerrainSingleFlightTestAccess::uniqueJobCount(mixed_server) == 0 &&
@@ -694,10 +723,12 @@ int main(int argc, char **argv)
             TerrainSingleFlightTestAccess::gridJobs(mixed_server) == 0 &&
             TerrainSingleFlightTestAccess::remoteAdmittedJobs(mixed_server) == 0 &&
             TerrainSingleFlightTestAccess::admittedJobs(mixed_server) == 0;
-        if (!mixed_queued || !cached_responsive || !drained || !budgets_cleared)
+        if (!mixed_queued || !cached_responsive || !drained ||
+            !duplicate_results_match || !budgets_cleared)
         {
             std::cerr << "Mixed terrain workload isolation failed: queued=" << mixed_queued
                       << " cached=" << cached_responsive << " drained=" << drained
+                      << " duplicates=" << duplicate_results_match
                       << " budgets=" << budgets_cleared << '\n';
             return 1;
         }
