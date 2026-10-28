@@ -117,6 +117,11 @@ public:
         return server.pending_terrain_tiles.size();
     }
 
+    static std::uint64_t gridReservedBytes(const Server &server)
+    {
+        return server.terrain_grid_bytes.count();
+    }
+
     static int gridJobs(const Server &server)
     {
         return server.pending_terrain_grids.size();
@@ -403,7 +408,9 @@ int main(int argc, char **argv)
     const bool grid_deduplicated =
         TerrainSingleFlightTestAccess::waiterCount(server) == request_count &&
         TerrainSingleFlightTestAccess::gridJobs(server) == 1 &&
-        TerrainSingleFlightTestAccess::admittedJobs(server) == 1;
+        TerrainSingleFlightTestAccess::admittedJobs(server) == 1 &&
+        TerrainSingleFlightTestAccess::gridReservedBytes(server) ==
+            8ULL * 8 * 2 * sizeof(float);
 
     QNetworkAccessManager grid_overload_network;
     QNetworkReply *grid_excess = grid_overload_network.get(QNetworkRequest(grid_url));
@@ -441,7 +448,8 @@ int main(int argc, char **argv)
     const bool grid_cleared =
         TerrainSingleFlightTestAccess::waiterCount(server) == 0 &&
         TerrainSingleFlightTestAccess::gridJobs(server) == 0 &&
-        TerrainSingleFlightTestAccess::admittedJobs(server) == 0;
+        TerrainSingleFlightTestAccess::admittedJobs(server) == 0 &&
+        TerrainSingleFlightTestAccess::gridReservedBytes(server) == 0;
     if (!grid_deduplicated || !grid_overload || !grid_responses || !grid_cleared)
     {
         std::cerr << "Terrain grid single-flight regression failed: "

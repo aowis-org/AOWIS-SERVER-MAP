@@ -641,11 +641,12 @@ QFuture<QHttpServerResponse> Server::submitTerrainGrid(
         QString::number(request.columns) + QLatin1Char('/') +
         QString::number(request.rows);
     const bool existing = this->pending_terrain_grids.contains(key);
-    // Reserve each unique grid's float output until its HTTP completion
-    // callback has delivered the response. Prevents queued grid jobs from
-    // accumulating more than 64 MiB of estimated output buffers.
+    // Reserve both the float result and the serialized response payload for
+    // each unique grid until HTTP completion. The two buffers coexist while
+    // serializing, so reserving only the float output undercounts peak use.
     const std::uint64_t estimated_bytes =
-        std::uint64_t(request.columns) * std::uint64_t(request.rows) * sizeof(float);
+        std::uint64_t(request.columns) * std::uint64_t(request.rows) *
+        (sizeof(float) + sizeof(float));
     const bool remote_job = this->terrain_data->isRemoteFetchEnabled();
     bool admitted = existing;
     if (!existing && !this->shutting_down &&
@@ -713,15 +714,21 @@ QFuture<QHttpServerResponse> Server::submitTerrainGrid(
                 qToLittleEndian(bits, bytes.data() + index * qsizetype(sizeof(float)));
             }
         }
+        const Aowis::Map::TerrainProviderFetchStatus result_status = result.status;
+        QString error_message = std::move(result.error_message);
+        // Do not retain the float grid in the queued HTTP delivery closure.
+        // The serialized bytes are sufficient for all single-flight waiters.
+        result.elevations_m.clear();
         this->terrain_admission.release();
         QMetaObject::invokeMethod(this,
-            [this, key, estimated_bytes, result = std::move(result), bytes = std::move(bytes)]() mutable
+            [this, key, estimated_bytes, result_status,
+             error_message = std::move(error_message), bytes = std::move(bytes)]() mutable
         {
             const PendingPromises waiters = this->pending_terrain_grids.take(key);
             this->pending_terrain_tile_count -= waiters.size();
             for (const PendingPromise &waiter : waiters)
             {
-                if (result.status == Aowis::Map::TerrainProviderFetchStatus::Ready)
+                if (result_status == Aowis::Map::TerrainProviderFetchStatus::Ready)
                 {
                     waiter->addResult(QHttpServerResponse(
                         QByteArrayLiteral("application/vnd.aowis.dem-f32le"), bytes));
@@ -729,15 +736,15 @@ QFuture<QHttpServerResponse> Server::submitTerrainGrid(
                 else
                 {
                     const QHttpServerResponse::StatusCode status =
-                        result.status == Aowis::Map::TerrainProviderFetchStatus::UnsupportedDataset ||
-                        result.status == Aowis::Map::TerrainProviderFetchStatus::UnsupportedAddress
+                        result_status == Aowis::Map::TerrainProviderFetchStatus::UnsupportedDataset ||
+                        result_status == Aowis::Map::TerrainProviderFetchStatus::UnsupportedAddress
                         ? QHttpServerResponse::StatusCode::BadRequest :
-                        result.status == Aowis::Map::TerrainProviderFetchStatus::SourceUnavailable
+                        result_status == Aowis::Map::TerrainProviderFetchStatus::SourceUnavailable
                         ? QHttpServerResponse::StatusCode::NotFound :
-                        result.status == Aowis::Map::TerrainProviderFetchStatus::NetworkError
+                        result_status == Aowis::Map::TerrainProviderFetchStatus::NetworkError
                         ? QHttpServerResponse::StatusCode::BadGateway :
                         QHttpServerResponse::StatusCode::ServiceUnavailable;
-                    waiter->addResult(QHttpServerResponse(result.error_message, status));
+                    waiter->addResult(QHttpServerResponse(error_message, status));
                 }
                 waiter->finish();
             }

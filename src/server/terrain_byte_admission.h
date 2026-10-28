@@ -4,7 +4,7 @@
 #include <atomic>
 #include <cstdint>
 
-// Reserves estimated output bytes for unique in-flight terrain grid jobs.
+// Reserves estimated float-result and serialized-output bytes for unique terrain grids.
 // Admission is nonblocking; duplicate HTTP waiters do not reserve again.
 class TerrainByteAdmission
 {
