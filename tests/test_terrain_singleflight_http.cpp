@@ -11,6 +11,8 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QSemaphore>
+#include <QHash>
+#include <QSet>
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <atomic>
@@ -1089,36 +1091,45 @@ int main(int argc, char **argv)
             }
             listen_promise.set_value(upstream_server.serverPort());
             QList<QTcpSocket *> sockets;
+            QHash<QTcpSocket *, QByteArray> requests;
+            QSet<QTcpSocket *> responded;
             QElapsedTimer accept_deadline;
             accept_deadline.start();
-            while (sockets.size() < 2 && accept_deadline.elapsed() < 5000)
+            // Service all accepted connections together. The previous mock
+            // waited for each request header before accepting another socket,
+            // making the concurrency assertion sensitive to transport timing.
+            while (responded.size() < 2 && accept_deadline.elapsed() < 5000)
             {
-                if (!upstream_server.waitForNewConnection(100))
-                    continue;
-                QTcpSocket *socket = upstream_server.nextPendingConnection();
-                QByteArray request;
-                QElapsedTimer request_deadline;
-                request_deadline.start();
-                while (!request.contains("\r\n\r\n") &&
-                       request.size() < 16384 && request_deadline.elapsed() < 2000)
+                if (upstream_server.waitForNewConnection(10))
                 {
-                    if (socket->waitForReadyRead(100))
-                        request += socket->readAll();
+                    while (upstream_server.hasPendingConnections())
+                    {
+                        QTcpSocket *socket = upstream_server.nextPendingConnection();
+                        sockets.append(socket);
+                        requests.insert(socket, QByteArray());
+                    }
                 }
-                if (!request.contains("GET "))
+                for (QTcpSocket *socket : sockets)
                 {
-                    delete socket;
-                    continue;
+                    if (responded.contains(socket) ||
+                        socket->state() == QAbstractSocket::UnconnectedState)
+                        continue;
+                    if (socket->bytesAvailable() == 0)
+                        socket->waitForReadyRead(1);
+                    requests[socket] += socket->readAll();
+                    if (!requests[socket].contains("\r\n\r\n"))
+                        continue;
+                    if (!requests[socket].startsWith("GET "))
+                        continue;
+                    socket->write("HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n"
+                                  "ETag: \"stalled\"\r\nConnection: close\r\n\r\n"
+                                  "partial-data");
+                    socket->flush();
+                    responded.insert(socket);
+                    upstream_connected.fetch_add(1);
                 }
-                socket->write("HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n"
-                              "ETag: \"stalled\"\r\nConnection: close\r\n\r\n"
-                              "partial-data");
-                socket->flush();
-                sockets.append(socket);
-                upstream_connected.fetch_add(1);
             }
-            // Both remote workers should be waiting on network I/O when the
-            // cached request is served. Shutdown must abort both replies.
+            // Both replies remain intentionally incomplete until shutdown.
             QElapsedTimer disconnect_deadline;
             disconnect_deadline.start();
             while (disconnect_deadline.elapsed() < 6000)
