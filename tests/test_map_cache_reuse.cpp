@@ -77,6 +77,14 @@ int main(int argc, char **argv)
             "An expired memory tile should be returned without revalidation");
     require(existing.upstreamActivity().active == 0 && existing.upstreamActivity().queued == 0,
             "Memory cache hit unexpectedly scheduled an upstream download");
+    // A warm RAM hit must not depend on the disk file remaining present.
+    // This also exercises the optimized lookup path before providerCachePath().
+    require(QFile::remove(old_tile_path), "Cannot remove warm-cache fixture");
+    const MapTiles::TileRequestResult memory_after_disk_removed =
+        existing.getTile(provider_id, 6, 31, 20, QStringLiteral("warm-without-disk"));
+    require(memory_after_disk_removed.status == MapTiles::TileRequestStatus::Ready &&
+            memory_after_disk_removed.data == old_bytes,
+            "Warm memory cache should serve a tile without disk access");
 
     const QString no_metadata_path = QDir(cache.path()).filePath(
         QStringLiteral("maptiles/%1/6/31/21.png").arg(provider_id));

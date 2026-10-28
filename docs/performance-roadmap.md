@@ -1,0 +1,119 @@
+# Performance roadmap — QHttpServer
+
+## Milestone 0: reproducible baseline
+
+The tool `tools/benchmark_http.py` measures throughput, response status counts,
+network errors and client-observed p50/p95/p99 latency. It is intentionally
+client-side only and uses Python's standard library.
+
+Start the map server with a local test configuration and populate an authorized
+cache fixture. For example, substitute an existing cached endpoint and run:
+
+```sh
+python3 tools/benchmark_http.py 'http://127.0.0.1:PORT/EXISTING/TILE' --requests 1000 --concurrency 16
+```
+
+Run identical benchmarks against the direct local listener and, separately,
+Apache. Record server configuration, hardware, tile size, cache state,
+concurrency and CPU/RSS alongside JSON output. Test RAM-warm, disk-warm,
+cold-cache (using a **local mock upstream**, never a public tile provider),
+and mixed-map/terrain loads. Results are not interchangeable between runs
+with different request mixes.
+
+The harness makes **one new HTTP connection per request** (urllib); it does not
+measure keep-alive reuse, event-loop lag, server memory, or per-stage queue
+times. It is a starting baseline, not a complete load-test suite. Keep tests
+local by default, and avoid benchmark traffic against public providers.
+
+## Milestone 1: safe cache fast path
+
+`MapTiles::getTile()` validates provider and coordinates first, then returns
+known memory-cache hits before resolving the provider's filesystem cache path.
+When a permanent cache directory is configured and the key is not known to
+be permanent, the existing permanent-file precedence is preserved.
+
+## Remaining milestones (not yet implemented)
+
+1. Audit pending-response completion, disconnects, cancellation and shutdown.
+2. Add low-overhead internal counters and event-loop latency instrumentation.
+3. Offload bounded disk reads/writes while preserving atomic cache updates.
+4. Create a bounded dedicated terrain scheduler and isolate upstream I/O.
+5. Add terrain single-flight and fair work scheduling.
+6. Implement independent queue and memory budgets and overload handling.
+7. Improve upstream failure isolation and retry/negative-cache policy.
+8. Validate HTTP caching/Apache behavior and operational metrics.
+9. Run race, failure, stress and endurance tests before production release.
+
+No unmeasured performance improvement or production readiness is claimed by
+this initial patch.
+
+
+## Native test runner and loop-stall diagnostics
+
+Run the complete native test suite from the repository root:
+
+```bash
+./compile_linux_tests.sh
+./compile_linux_tests.sh --debug
+./compile_linux_tests.sh --release
+./compile_linux_tests.sh --both
+```
+
+The runner configures CMake with Ninja and `BUILD_TESTING=ON`, builds the
+`aowis-server-map-tests` aggregate target, ensures that CTest has at least one
+test labeled `aowis`, and runs all such tests with failure output.
+With `AOWIS_SERVER_MAP_BUILD_SERVER=OFF`, the provider-state test is omitted.
+
+Event-loop stall diagnostics are opt-in. To log event-loop scheduling delays
+exceeding 100 ms, start the server with:
+
+```bash
+AOWIS_MAP_EVENT_LOOP_WARN_MS=100 ./build-linux/aowis-server-map
+```
+
+This measurement detects delays between timer callbacks; it is not a precise
+per-request latency metric. Logs are throttled to one warning every 30 seconds,
+and the monitor is disabled when the environment variable is absent.
+
+## Lifecycle increment: pending map responses on shutdown
+
+The server now closes its listener, detaches map download callbacks, cancels upstream map downloads, and completes outstanding map-tile response promises with HTTP 503 in its destructor. New pending registrations are rejected once shutdown begins. This does not yet cover terrain worker lifetime and does not imply full graceful shutdown support.
+
+After successful application, `tools/apply_patch.sh` runs `tools/zip_map_server.sh` automatically to regenerate the adjacent `map.zip` source archive. If that export fails, the apply command reports failure even though the files have already been extracted.
+
+## Lifecycle increment: terrain worker ownership
+
+All five asynchronous terrain HTTP routes now submit work to a dedicated
+`QThreadPool` owned by `Server`, rather than the global Qt thread pool. Its
+initial maximum concurrency is `max(1, idealThreadCount / 2)`.
+
+During shutdown, the listener is closed, upstream cancellation is requested,
+and the terrain pool is joined before `TerrainData` is destroyed. This prevents
+terrain route lambdas from retaining a dangling `Server`/`TerrainData` pointer.
+
+This is *not* yet a bounded queue or job-admission mechanism: `QThreadPool`
+can still queue work without an application-level limit, and an upstream
+operation that ignores cancellation can delay shutdown. These remain next
+steps. Re-run `./compile_linux_tests.sh --both` after applying the patch.
+
+## Terrain job admission (Phase 01 continuation)
+
+All five asynchronous terrain handlers now share a nonblocking admission budget.
+`[terrain] maximum_jobs=128` limits the combined number of running and queued
+terrain requests; when full, the frontend responds immediately with HTTP 503
+`Service Unavailable` and `Retry-After: 1`. Admission tokens are released
+when worker tasks exit, including through exceptions. This is a count limit,
+not yet a byte-weighted memory budget, single-flight scheduler, or timeout.
+The CTest `aowis-server-map-terrain-admission` exercises saturation, token
+release and concurrent acquisition.
+
+### Cache write isolation (Phase 03, first increment)
+
+Completed upstream map tiles now use a dedicated two-thread cache-write pool for
+`QSaveFile` persistence. Up to 64 pending writes are admitted; beyond that,
+responses still deliver the downloaded bytes but persistence is skipped rather
+than allocating an unbounded write backlog. The downloaded tile is published
+to RAM immediately to avoid duplicate downloads. The `tileReady` signal remains
+deferred until the disk-save attempt finishes for admitted writes. Cache
+removal serializes against pending writes. This deliberately does **not** yet
+move cold disk-cache reads or provider-path initialization off the event loop.

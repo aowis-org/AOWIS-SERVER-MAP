@@ -16,6 +16,9 @@
 #include <QSharedPointer>
 #include <QString>
 #include <QTcpServer>
+#include <QThreadPool>
+#include <functional>
+#include "terrain_admission.h"
 
 #include <aowis/map/maptiles.h>
 #include <aowis/map/map_provider.h>
@@ -36,6 +39,7 @@ public:
         QHostAddress listen_address { QHostAddress::LocalHost };
         quint16 port = 8122;
         int maximum_pending_requests = 2048;
+        int maximum_terrain_jobs = 128;
         int maximum_active_downloads = 32;
         bool map_remote_fetch_enabled = true;
         QString provider_state_file;
@@ -57,6 +61,7 @@ public:
     };
 
     explicit Server(const Config &config, QObject *parent = nullptr);
+    ~Server() override;
 
     bool start();
 
@@ -65,6 +70,7 @@ private:
     using PendingPromises = QList<PendingPromise>;
 
     void setupRoutes();
+    QFuture<QHttpServerResponse> submitTerrainJob(std::function<QHttpServerResponse()> task);
     bool isReadAuthorized(const QHttpServerRequest &request) const;
     bool isDeleteAuthorized(const QHttpServerRequest &request) const;
     bool requestContainsKey(const QHttpServerRequest &request, const QByteArray &expected_key) const;
@@ -74,12 +80,15 @@ private:
     Config config;
     QHttpServer http;
     QTcpServer *tcp;
+    QThreadPool terrain_worker_pool;
+    TerrainAdmission terrain_admission;
     MapTiles *maptiles;
     Aowis::Map::TerrainData *terrain_data;
 
     QMutex mutex_pending;
     QHash<QString, PendingPromises> connections_pending;
     int pending_request_count;
+    bool shutting_down = false;
 
 private slots:
     void onTileReady(QString key, QByteArray data);

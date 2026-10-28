@@ -3,6 +3,8 @@
 #include <QCommandLineOption>
 #include <QCommandLineParser>
 #include <QDebug>
+#include <QElapsedTimer>
+#include <QTimer>
 #include <QFileInfo>
 #include <QHostAddress>
 #include <QTextStream>
@@ -313,6 +315,40 @@ int main(int argc, char *argv[])
     Server server(config);
     if (!server.start())
         return EXIT_FAILURE;
+
+    // Optional event-loop stall instrumentation for performance diagnostics.
+    // Configure AOWIS_MAP_EVENT_LOOP_WARN_MS to a positive integer to enable.
+    // Warnings are throttled to avoid a logging storm during sustained overload.
+    bool valid_warning_threshold = false;
+    const int event_loop_warning_ms =
+        qEnvironmentVariableIntValue("AOWIS_MAP_EVENT_LOOP_WARN_MS", &valid_warning_threshold);
+    QTimer event_loop_monitor;
+    QElapsedTimer event_loop_clock;
+    QElapsedTimer event_loop_warning_clock;
+    if (valid_warning_threshold && event_loop_warning_ms > 0)
+    {
+        constexpr qint64 monitor_interval_ms = 100;
+        event_loop_clock.start();
+        event_loop_warning_clock.start();
+        event_loop_monitor.setTimerType(Qt::PreciseTimer);
+        event_loop_monitor.setInterval(int(monitor_interval_ms));
+        QObject::connect(&event_loop_monitor, &QTimer::timeout, &app,
+                         [&event_loop_clock, &event_loop_warning_clock, event_loop_warning_ms]()
+        {
+            constexpr qint64 expected_interval_ms = 100;
+            constexpr qint64 warning_interval_ms = 30000;
+            const qint64 elapsed_ms = event_loop_clock.restart();
+            const qint64 lag_ms = qMax(qint64(0), elapsed_ms - expected_interval_ms);
+            if (lag_ms >= event_loop_warning_ms &&
+                event_loop_warning_clock.elapsed() >= warning_interval_ms)
+            {
+                qWarning().noquote() << "HTTP event-loop scheduling delay:" << lag_ms << "ms";
+                event_loop_warning_clock.restart();
+            }
+        });
+        event_loop_monitor.start();
+        qInfo() << "Event-loop stall warnings enabled, threshold:" << event_loop_warning_ms << "ms";
+    }
 
     return app.exec();
 }

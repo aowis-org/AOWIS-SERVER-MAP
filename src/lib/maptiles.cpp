@@ -7,6 +7,8 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QFutureWatcher>
+#include <QtConcurrentRun>
 #include <QList>
 #include <QMutexLocker>
 #include <QRandomGenerator>
@@ -19,6 +21,7 @@ namespace
 {
 constexpr int TileMemoryCacheMaximumCostKiB = 256 * 1024;
 constexpr int MaximumActiveDownloadsPerOrigin = 6;
+constexpr int MaximumPendingCacheWrites = 64;
 
 QString downloadOrigin(const QString &url)
 {
@@ -95,7 +98,13 @@ MapTiles::MapTiles(const QString &cache_base_directory, int maximum_active_downl
       maximum_active_downloads(qMax(1, maximum_active_downloads)),
       maximum_queued_downloads(qMax(0, maximum_queued_downloads))
 {
+    this->cache_write_pool.setMaxThreadCount(2);
     configureProviders(Aowis::Map::defaultMapProviders(), {}, {});
+}
+
+MapTiles::~MapTiles()
+{
+    this->cache_write_pool.waitForDone();
 }
 
 void MapTiles::setPermanentDataDirectory(const QString &directory)
@@ -188,8 +197,10 @@ QString MapTiles::canonicalTileKey(const QString &provider, int zoom, int x, int
 MapTiles::TileRequestResult MapTiles::getTile(const QString &provider, int z, int x, int y,
                                               const QString &key)
 {
-    const QString cache_path = providerCachePath(provider);
-    if (cache_path.isEmpty() || z < 0 || z > 30)
+    // Reject invalid providers/coordinates before consulting either cache.
+    // A warm RAM hit should not require providerCachePath(), which may perform
+    // filesystem reads and writes when the provider variant is first resolved.
+    if (!this->configured_providers.contains(provider) || z < 0 || z > 30)
     {
         qWarning() << "Invalid map tile request:" << provider << z << x << y;
         return { TileRequestStatus::InvalidRequest, {} };
@@ -203,10 +214,22 @@ MapTiles::TileRequestResult MapTiles::getTile(const QString &provider, int z, in
         return { TileRequestStatus::InvalidRequest, {} };
     }
 
+    const QString canonical_key = canonicalTileKey(provider, z, wrapped_x, y);
+    // Unknown permanent files still take precedence over the ordinary RAM
+    // cache. Only bypass that lookup when no permanent directory is set or
+    // this key has already been verified as a permanent tile.
+    if (this->permanent_data_directory.isEmpty() ||
+        this->permanent_cached_keys.contains(canonical_key))
+    {
+        const QByteArray *cached = this->tile_memory_cache.object(canonical_key);
+        if (cached != nullptr && !cached->isEmpty())
+            return { TileRequestStatus::Ready, *cached };
+    }
+
+    const QString cache_path = providerCachePath(provider);
     const QString file_name = QString("%1/%2/%3.png").arg(z).arg(wrapped_x).arg(y);
     const QString tile_path = QDir(cache_path).filePath(file_name);
-    const auto selected_provider = this->configured_providers.value(provider);
-    const QString canonical_key = canonicalTileKey(provider, z, wrapped_x, y);
+    const Aowis::Map::MapProvider selected_provider = this->configured_providers.value(provider);
 
     if (!this->permanent_data_directory.isEmpty())
     {
@@ -268,6 +291,9 @@ MapTiles::TileRequestResult MapTiles::getTile(const QString &provider, int z, in
 int MapTiles::deleteTiles(const QString &provider, int zoom, int tile_x_min, int tile_x_max,
                           int tile_y_min, int tile_y_max)
 {
+    // Serialize destructive cache maintenance against outstanding atomic writes.
+    // Cache deletion is an administrative operation, not a tile hot path.
+    this->cache_write_pool.waitForDone();
     const QString cache_path = providerCachePath(provider);
     if (cache_path.isEmpty() || zoom < 0 || zoom > 30 ||
         tile_x_min > tile_x_max || tile_y_min > tile_y_max)
@@ -285,6 +311,7 @@ int MapTiles::deleteTiles(const QString &provider, int zoom, int tile_x_min, int
         QMutexLocker locker(&this->downloads_mutex);
         QSet<QString> downloads_in_progress = this->downloads_active;
         downloads_in_progress.unite(this->downloads_queued_keys);
+        downloads_in_progress.unite(this->cache_writes_pending_keys);
         for (const QString &download_key : downloads_in_progress)
         {
             QString active_provider;
@@ -491,20 +518,58 @@ void MapTiles::startMapTileDownload(const QueuedDownload &download)
             invalidated = this->downloads_invalidated.remove(download.canonical_key);
         }
 
-        if (!invalidated && may_store)
-        {
-            if (saveMapTile(data, download.tile_path))
-            {
-                this->tile_memory_cache.insert(
-                    download.canonical_key, new QByteArray(data), tileMemoryCacheCostKiB(data));
-            }
-        }
-
-        if (!download.response_key.isEmpty()) emit tileReady(download.response_key, data);
         rest->deleteLater();
         startQueuedDownloads();
         const UpstreamActivity activity = upstreamActivity();
         emit upstreamActivityChanged(activity.active, activity.queued);
+
+        // Keep persistence off the network event loop. Response completion is
+        // deliberately deferred until the disk write has finished, preserving
+        // the existing tileReady / on-disk cache contract.
+        if (invalidated || !may_store)
+        {
+            if (!download.response_key.isEmpty()) emit tileReady(download.response_key, data);
+            return;
+        }
+
+        if (this->pending_cache_writes >= MaximumPendingCacheWrites)
+        {
+            // Bounded overload: return the tile rather than grow an unlimited
+            // write backlog. The tile is returned without persistence when saturated.
+            qWarning() << "Tile cache write capacity exhausted:" << download.tile_path;
+            if (!download.response_key.isEmpty()) emit tileReady(download.response_key, data);
+            return;
+        }
+
+        // Publish to RAM before scheduling persistence so other requests for
+        // the same tile do not launch duplicate upstream fetches while the
+        // disk worker is busy. Disk publication still finishes before tileReady.
+        this->tile_memory_cache.insert(download.canonical_key,
+            new QByteArray(data), tileMemoryCacheCostKiB(data));
+        ++this->pending_cache_writes;
+        this->cache_writes_pending_keys.insert(download.canonical_key);
+        QFutureWatcher<bool> *watcher = new QFutureWatcher<bool>(this);
+        connect(watcher, &QFutureWatcher<bool>::finished, this,
+                [this, watcher, download, data]()
+        {
+            --this->pending_cache_writes;
+            this->cache_writes_pending_keys.remove(download.canonical_key);
+            // Cache deletion may have invalidated the write while it ran.
+            // The deleting code waits for writers before removing disk files.
+            {
+                QMutexLocker locker(&this->downloads_mutex);
+                this->downloads_invalidated.remove(download.canonical_key);
+            }
+            if (!watcher->result())
+                qWarning() << "Tile cache persistence failed:" << download.tile_path;
+            if (!download.response_key.isEmpty()) emit tileReady(download.response_key, data);
+            watcher->deleteLater();
+        });
+        watcher->setFuture(QtConcurrent::run(&this->cache_write_pool,
+            [data, tile_path = download.tile_path]()
+        {
+            return MapTiles::saveMapTile(data, tile_path);
+        }));
     });
     connect(rest, &TileHttpClient::requestError, this,
             [this, rest, download](TileHttpClient::RequestFailureReason reason, const QString &error)

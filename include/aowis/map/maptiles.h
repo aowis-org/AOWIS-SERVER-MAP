@@ -12,6 +12,7 @@
 #include <QNetworkAccessManager>
 #include <QQueue>
 #include <QSet>
+#include <QThreadPool>
 #include <QString>
 
 class TileHttpClient;
@@ -55,6 +56,8 @@ public:
     MapTiles(const QString &cache_base_directory, int maximum_active_downloads,
              int maximum_queued_downloads, QObject *parent = nullptr);
 
+    ~MapTiles() override;
+
     void setRemoteFetchEnabled(bool enabled);
     void setPermanentDataDirectory(const QString &directory);
     void configureProviders(const QVector<Aowis::Map::MapProvider> &providers,
@@ -93,7 +96,7 @@ private:
     bool canStartDownloadLocked(const QueuedDownload &download) const;
     void markDownloadStartedLocked(const QueuedDownload &download);
     void markDownloadFinishedLocked(const QueuedDownload &download);
-    bool saveMapTile(const QByteArray &data, const QString &tile_path);
+    static bool saveMapTile(const QByteArray &data, const QString &tile_path);
 
     QString domainRandomizer(const QString &url) const;
 
@@ -107,6 +110,9 @@ private:
     Aowis::Map::DownloadCoverage download_coverage;
     QString default_coverage;
     QNetworkAccessManager *network_manager;
+    QThreadPool cache_write_pool;
+    int pending_cache_writes = 0;
+    QSet<QString> cache_writes_pending_keys;
     QCache<QString, QByteArray> tile_memory_cache;
     int maximum_active_downloads;
     int maximum_queued_downloads;

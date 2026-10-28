@@ -4,6 +4,10 @@
 #include <aowis/map/terrain_dataset.h>
 
 #include <QDebug>
+#if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
+#include <QHttpHeaders>
+#endif
+#include <QThread>
 #include <QDir>
 #include <QFileInfo>
 #include <QJsonDocument>
@@ -242,6 +246,7 @@ Server::Server(const Config &config, QObject *parent)
     : QObject(parent),
       config(config),
       tcp(new QTcpServer(this)),
+      terrain_admission(qMax(1, config.maximum_terrain_jobs)),
       maptiles(new MapTiles(config.cache_directory, config.maximum_active_downloads,
                             config.maximum_pending_requests, this)),
       terrain_data(new Aowis::Map::TerrainData(
@@ -258,6 +263,10 @@ Server::Server(const Config &config, QObject *parent)
           this)),
       pending_request_count(0)
 {
+    // Terrain work must not outlive the server or consume the global Qt pool.
+    this->terrain_worker_pool.setObjectName(QStringLiteral("aowis-map-terrain"));
+    this->terrain_worker_pool.setMaxThreadCount(
+        qMax(1, QThread::idealThreadCount() / 2));
     this->maptiles->setRemoteFetchEnabled(config.map_remote_fetch_enabled);
     this->maptiles->setPermanentDataDirectory(config.permanent_data_directory);
     this->maptiles->configureProviders(config.map_providers, config.download_coverage,
@@ -265,6 +274,66 @@ Server::Server(const Config &config, QObject *parent)
     connect(this->maptiles, &MapTiles::tileReady, this, &Server::onTileReady);
     connect(this->maptiles, &MapTiles::tileFailed, this, &Server::onTileFailed);
     setupRoutes();
+}
+
+Server::~Server()
+{
+    // Stop new responses from joining the pending map-tile registry. Drain
+    // every pending future so callers never retain an unfinished promise.
+    QHash<QString, PendingPromises> pending;
+    {
+        QMutexLocker locker(&this->mutex_pending);
+        this->shutting_down = true;
+        pending.swap(this->connections_pending);
+        this->pending_request_count = 0;
+    }
+
+    this->tcp->close();
+    disconnect(this->maptiles, nullptr, this, nullptr);
+    this->maptiles->cancelUpstreamDownloads();
+    this->terrain_data->cancelUpstreamDownloads();
+    // Worker lambdas capture this and access terrain_data. Finish all of them
+    // before QObject child destruction starts; no new requests are accepted.
+    this->terrain_worker_pool.waitForDone();
+
+    for (const PendingPromises &promises : std::as_const(pending))
+    {
+        for (const PendingPromise &promise : promises)
+        {
+            promise->addResult(QHttpServerResponse(
+                "Map server shutting down",
+                QHttpServerResponse::StatusCode::ServiceUnavailable));
+            promise->finish();
+        }
+    }
+}
+
+QFuture<QHttpServerResponse> Server::submitTerrainJob(std::function<QHttpServerResponse()> task)
+{
+    if (this->shutting_down || !this->terrain_admission.tryAcquire())
+    {
+        QHttpServerResponse response(
+            "Terrain service busy; retry later",
+            QHttpServerResponse::StatusCode::ServiceUnavailable);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
+        QHttpHeaders headers = response.headers();
+        headers.replaceOrAppend("Retry-After", "1");
+        response.setHeaders(std::move(headers));
+#else
+        response.setHeader("Retry-After", "1");
+#endif
+        return makeReadyResponse(std::move(response));
+    }
+
+    return QtConcurrent::run(&this->terrain_worker_pool, [this, task = std::move(task)]() mutable
+    {
+        struct ReleaseOnExit
+        {
+            TerrainAdmission *admission;
+            ~ReleaseOnExit() { admission->release(); }
+        } release { &this->terrain_admission };
+        return task();
+    });
 }
 
 bool Server::start()
@@ -487,7 +556,7 @@ void Server::setupRoutes()
         if (!isDeleteAuthorized(request))
             return makeReadyResponse(makeUnauthorizedResponse());
 
-        return QtConcurrent::run(
+        return submitTerrainJob(
             [this, dataset, zoom, tile_x_min, tile_x_max, tile_y_min, tile_y_max]()
         {
             return makeTerrainCacheDeletionResponse(this->terrain_data->deleteNormalizedTiles(
@@ -511,7 +580,7 @@ void Server::setupRoutes()
         if (!isDeleteAuthorized(request))
             return makeReadyResponse(makeUnauthorizedResponse());
 
-        return QtConcurrent::run(
+        return submitTerrainJob(
             [this, dataset, zoom, tile_x_min, tile_x_max, tile_y_min, tile_y_max]()
         {
             return makeTerrainCacheDeletionResponse(this->terrain_data->deleteSourceData(
@@ -700,7 +769,7 @@ void Server::setupRoutes()
         grid_request.bounds = {values[0], values[1], values[2], values[3]};
         grid_request.columns = columns;
         grid_request.rows = rows;
-        return QtConcurrent::run([this, grid_request]()
+        return submitTerrainJob( [this, grid_request]()
         {
             const Aowis::Map::TerrainAnalysisGridResult result =
                 this->terrain_data->analysisGrid(grid_request);
@@ -779,7 +848,7 @@ void Server::setupRoutes()
         }
 
         const QString dataset = this->config.terrain_default_dataset;
-        return QtConcurrent::run(
+        return submitTerrainJob(
             [this, dataset, latitude_deg, longitude_deg, requested_vertical_datum]()
         {
             const Aowis::Map::TerrainElevationLookupResult elevation_result =
@@ -819,7 +888,7 @@ void Server::setupRoutes()
             return makeReadyResponse(makeTerrainTileErrorResponse(invalid_result));
         }
 
-        return QtConcurrent::run([this, dataset, address]()
+        return submitTerrainJob( [this, dataset, address]()
         {
             const Aowis::Map::TerrainTileLookupResult terrain_result =
                 this->terrain_data->terrainTile(dataset, address);
@@ -936,7 +1005,8 @@ bool Server::requestContainsKey(const QHttpServerRequest &request, const QByteAr
 bool Server::appendPendingPromise(const QString &key, const PendingPromise &promise)
 {
     QMutexLocker locker(&this->mutex_pending);
-    if (this->pending_request_count >= this->config.maximum_pending_requests)
+    if (this->shutting_down ||
+        this->pending_request_count >= this->config.maximum_pending_requests)
         return false;
 
     this->connections_pending[key].append(promise);

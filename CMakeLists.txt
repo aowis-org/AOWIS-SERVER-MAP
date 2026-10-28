@@ -15,7 +15,7 @@ option(
     ON
 )
 
-find_package(Qt6 REQUIRED COMPONENTS Core Network)
+find_package(Qt6 REQUIRED COMPONENTS Core Network Concurrent)
 find_package(TIFF REQUIRED)
 
 add_library(aowis-server-map-core STATIC
@@ -52,6 +52,7 @@ target_link_libraries(aowis-server-map-core
     PUBLIC
         Qt6::Core
         Qt6::Network
+        Qt6::Concurrent
     PRIVATE
         TIFF::TIFF
 )
@@ -213,6 +214,7 @@ if(AOWIS_SERVER_MAP_BUILD_SERVER)
         src/server/configuration.h
         src/server/server.cpp
         src/server/server.h
+        src/server/terrain_admission.h
     )
 
     set_target_properties(aowis-server-map-server
@@ -247,4 +249,38 @@ if(AOWIS_SERVER_MAP_BUILD_SERVER)
         add_test(NAME aowis-server-map-provider-state
                  COMMAND aowis-server-map-provider-state-test)
     endif()
+endif()
+
+# Aggregate native test target for compile_linux_tests.sh. The labels allow the
+# runner to distinguish this project's tests from any tests in dependencies.
+if(BUILD_TESTING)
+    set(AOWIS_SERVER_MAP_TEST_TARGETS
+        aowis-server-map-provider-limits-test
+        aowis-server-map-cache-reuse-test
+        aowis-server-map-download-coverage-test
+        aowis-server-map-terrain-tile-format-test
+        aowis-server-map-terrain-tile-delivery-test
+        aowis-server-map-terrain-provider-test
+        aowis-server-map-terrain-elevation-sampling-test
+        aowis-server-map-terrain-vertical-datum-test
+        aowis-server-map-terrain-dataset-catalog-test
+        aowis-server-map-terrain-cache-deletion-test
+    )
+    if(AOWIS_SERVER_MAP_BUILD_SERVER)
+        list(APPEND AOWIS_SERVER_MAP_TEST_TARGETS
+            aowis-server-map-provider-state-test)
+    endif()
+    add_executable(aowis-server-map-terrain-admission-test
+        tests/test_terrain_admission.cpp)
+    add_test(NAME aowis-server-map-terrain-admission
+        COMMAND aowis-server-map-terrain-admission-test)
+    list(APPEND AOWIS_SERVER_MAP_TEST_TARGETS aowis-server-map-terrain-admission-test)
+    add_custom_target(aowis-server-map-tests
+        DEPENDS ${AOWIS_SERVER_MAP_TEST_TARGETS})
+    get_property(AOWIS_SERVER_MAP_REGISTERED_TESTS DIRECTORY PROPERTY TESTS)
+    foreach(test_name IN LISTS AOWIS_SERVER_MAP_REGISTERED_TESTS)
+        if(test_name MATCHES "^aowis-server-map-")
+            set_property(TEST "${test_name}" APPEND PROPERTY LABELS aowis)
+        endif()
+    endforeach()
 endif()

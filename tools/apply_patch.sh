@@ -43,3 +43,6 @@ while IFS= read -r entry; do
 done < <(unzip -Z -1 "$patch")
 
 printf 'Applied %s with current file and directory timestamps.\n' "$patch"
+
+# Export a fresh source snapshot only after successful extraction and timestamp refresh.
+"$project_root/tools/zip_map_server.sh"
