@@ -773,6 +773,11 @@ QFuture<QHttpServerResponse> Server::submitTerrainGrid(
             const PendingPromises waiters = this->pending_terrain_grids.take(key);
             this->pending_terrain_tile_count -= waiters.size();
             const QHttpServerResponse::StatusCode status =
+                acquired.status == Aowis::Map::TerrainProviderFetchStatus::UnsupportedDataset ||
+                acquired.status == Aowis::Map::TerrainProviderFetchStatus::UnsupportedAddress
+                ? QHttpServerResponse::StatusCode::BadRequest :
+                acquired.status == Aowis::Map::TerrainProviderFetchStatus::SourceUnavailable
+                ? QHttpServerResponse::StatusCode::NotFound :
                 acquired.status == Aowis::Map::TerrainProviderFetchStatus::NetworkError
                 ? QHttpServerResponse::StatusCode::BadGateway
                 : QHttpServerResponse::StatusCode::ServiceUnavailable;
