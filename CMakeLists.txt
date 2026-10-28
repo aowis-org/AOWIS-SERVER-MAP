@@ -127,7 +127,7 @@ if(BUILD_TESTING)
         tests/test_copernicus_resume_http.cpp
     )
     target_link_libraries(aowis-server-map-copernicus-resume-http-test
-        PRIVATE AOWIS::Map Qt6::Network
+        PRIVATE AOWIS::Map Qt6::Network Qt6::Concurrent
     )
     add_test(NAME aowis-server-map-copernicus-resume-http
              COMMAND aowis-server-map-copernicus-resume-http-test)

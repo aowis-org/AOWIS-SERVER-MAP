@@ -2,6 +2,8 @@
 #include "../src/lib/copernicus_resume_state.h"
 
 #include <QCoreApplication>
+#include <QtConcurrent>
+#include <QThreadPool>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -371,6 +373,162 @@ bool verifyActiveCancellation(const QString &root)
                    "Recovery did not atomically publish the complete replacement");
 }
 
+// Exercise independent real HTTP transfers concurrently: one peer holds its
+// response open until cancellation while another publishes a complete source.
+// This tests the downloader transport, not the Server's CPU scheduling.
+bool verifyConcurrentStallAndCompletion(const QString &root)
+{
+    const QString stalled_directory = QDir(root).filePath("parallel-stalled");
+    const QString healthy_directory = QDir(root).filePath("parallel-healthy");
+    const QString relative_source =
+        QStringLiteral("copernicus/glo30/Copernicus_DSM_COG_10_N50_00_E008_00_DEM.tif");
+    const QByteArray payload(1000, 'H');
+
+    std::promise<quint16> stalled_ready;
+    std::promise<bool> stalled_done;
+    std::future<quint16> stalled_port = stalled_ready.get_future();
+    std::future<bool> stalled_result = stalled_done.get_future();
+    std::thread stalled_upstream([ready = std::move(stalled_ready),
+                                  completed = std::move(stalled_done)]() mutable
+    {
+        QTcpServer server;
+        if (!server.listen(QHostAddress::LocalHost, 0))
+        {
+            ready.set_value(0);
+            completed.set_value(false);
+            return;
+        }
+        ready.set_value(server.serverPort());
+        if (!server.waitForNewConnection(5000))
+        {
+            completed.set_value(false);
+            return;
+        }
+        QTcpSocket *socket = server.nextPendingConnection();
+        QByteArray request;
+        while (!request.contains("\r\n\r\n") && request.size() < 16384)
+        {
+            if (!socket->waitForReadyRead(5000))
+                break;
+            request += socket->readAll();
+        }
+        socket->write("HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n"
+                      "ETag: \"stalled-v1\"\r\nConnection: close\r\n\r\n");
+        socket->write(QByteArray(100, 'S'));
+        socket->flush();
+        const bool disconnected = socket->waitForDisconnected(3000);
+        completed.set_value(request.startsWith("GET ") && disconnected);
+    });
+
+    std::promise<quint16> healthy_ready;
+    std::promise<bool> healthy_done;
+    std::future<quint16> healthy_port = healthy_ready.get_future();
+    std::future<bool> healthy_result = healthy_done.get_future();
+    std::thread healthy_upstream([ready = std::move(healthy_ready),
+                                  completed = std::move(healthy_done), payload]() mutable
+    {
+        QTcpServer server;
+        if (!server.listen(QHostAddress::LocalHost, 0))
+        {
+            ready.set_value(0);
+            completed.set_value(false);
+            return;
+        }
+        ready.set_value(server.serverPort());
+        if (!server.waitForNewConnection(5000))
+        {
+            completed.set_value(false);
+            return;
+        }
+        QTcpSocket *socket = server.nextPendingConnection();
+        QByteArray request;
+        while (!request.contains("\r\n\r\n") && request.size() < 16384)
+        {
+            if (!socket->waitForReadyRead(5000))
+                break;
+            request += socket->readAll();
+        }
+        const QByteArray response =
+            "HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n"
+            "ETag: \"healthy-v1\"\r\nConnection: close\r\n\r\n" + payload;
+        const bool accepted = socket->write(response) == response.size();
+        socket->flush();
+        while (socket->bytesToWrite() > 0 && socket->state() == QAbstractSocket::ConnectedState)
+        {
+            if (!socket->waitForBytesWritten(3000))
+                break;
+        }
+        const bool sent = accepted && socket->bytesToWrite() == 0;
+        socket->disconnectFromHost();
+        if (socket->state() != QAbstractSocket::UnconnectedState)
+            socket->waitForDisconnected(2000);
+        completed.set_value(request.startsWith("GET ") && sent);
+    });
+
+    const quint16 stalled_endpoint = stalled_port.get();
+    const quint16 healthy_endpoint = healthy_port.get();
+    if (stalled_endpoint == 0 || healthy_endpoint == 0)
+    {
+        stalled_upstream.join();
+        healthy_upstream.join();
+        return require(false, "Concurrent HTTP mock could not bind");
+    }
+
+    std::promise<void> start;
+    std::shared_future<void> gate = start.get_future().share();
+    QString stalled_error;
+    QString healthy_error;
+    std::promise<void> healthy_download_finished;
+    std::future<void> healthy_completion = healthy_download_finished.get_future();
+    QThreadPool download_pool;
+    download_pool.setMaxThreadCount(2);
+    QFuture<bool> stalled_fetch = QtConcurrent::run(&download_pool, [&]()
+    {
+        gate.wait();
+        return Aowis::Map::Internal::fetchCopernicusSourceForIntegrationTest(
+            stalled_directory,
+            QUrl(QStringLiteral("http://127.0.0.1:%1/source.tif").arg(stalled_endpoint)),
+            &stalled_error, 3000, 3000, 5000, 1200);
+    });
+    QFuture<bool> healthy_fetch = QtConcurrent::run(&download_pool, [&]()
+    {
+        gate.wait();
+        const bool result = Aowis::Map::Internal::fetchCopernicusSourceForIntegrationTest(
+            healthy_directory,
+            QUrl(QStringLiteral("http://127.0.0.1:%1/source.tif").arg(healthy_endpoint)),
+            &healthy_error, 3000, 3000, 5000);
+        healthy_download_finished.set_value();
+        return result;
+    });
+    start.set_value();
+
+    const bool healthy_finished_before_stall =
+        healthy_completion.wait_for(std::chrono::milliseconds(800)) == std::future_status::ready;
+    healthy_fetch.waitForFinished();
+    stalled_fetch.waitForFinished();
+    const bool healthy_ok = healthy_fetch.result();
+    const bool stalled_ok = stalled_fetch.result();
+    const bool healthy_sent = healthy_result.get();
+    const bool stalled_disconnected = stalled_result.get();
+    healthy_upstream.join();
+    stalled_upstream.join();
+
+    QFile published(QDir(healthy_directory).filePath(relative_source));
+    return require(healthy_finished_before_stall,
+                   "Healthy transfer did not finish while another connection was stalled") &&
+           require(healthy_sent && healthy_ok,
+                   QStringLiteral("Healthy parallel transfer failed: %1")
+                       .arg(healthy_error).toUtf8().constData()) &&
+           require(published.open(QIODevice::ReadOnly) && published.readAll() == payload,
+                   "Healthy parallel transfer published incorrect bytes") &&
+           require(stalled_disconnected && !stalled_ok &&
+                   stalled_error.contains("cancel", Qt::CaseInsensitive),
+                   QStringLiteral("Stalled parallel transfer did not cancel: %1")
+                       .arg(stalled_error).toUtf8().constData()) &&
+           require(!QFile::exists(QDir(stalled_directory).filePath(relative_source)),
+                   "Stalled parallel transfer published an incomplete source");
+}
+
 bool verifyRecoveryScenario(const QString &root, int scenario,
                             const QByteArray &old_payload,
                             const QByteArray &new_payload)
@@ -471,7 +629,8 @@ int main(int argc, char **argv)
     QByteArray changed_payload(1000, '\0');
     for (qsizetype i = 0; i < changed_payload.size(); ++i)
         changed_payload[i] = char('a' + i % 26);
-    if (!verifyActiveCancellation(temp.path()) ||
+    if (!verifyConcurrentStallAndCompletion(temp.path()) ||
+        !verifyActiveCancellation(temp.path()) ||
         !verifySlowNetwork(temp.path(), 0) ||
         !verifySlowNetwork(temp.path(), 1) ||
         !verifySlowNetwork(temp.path(), 2) ||
