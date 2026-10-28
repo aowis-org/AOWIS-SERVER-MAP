@@ -1,4 +1,5 @@
 #include "copernicus_terrain_provider.h"
+#include "copernicus_download_validation.h"
 
 #include <QDir>
 #include <QElapsedTimer>
@@ -374,6 +375,7 @@ SourceLoadResult downloadSourceTile(const QString &provider_cache_directory,
     }
 
     const int http_status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    const QVariant content_length_header = reply->header(QNetworkRequest::ContentLengthHeader);
     const QNetworkReply::NetworkError network_error = reply->error();
     const QString network_error_text = reply->errorString();
     const QUrl request_url = reply->url();
@@ -422,6 +424,25 @@ SourceLoadResult downloadSourceTile(const QString &provider_cache_directory,
                                    .arg(request_url.toString())
                                    .arg(http_status)
                                    .arg(network_error_text);
+        return result;
+    }
+
+    // A full GET must yield a complete 200 entity. In particular, 206 is not
+    // acceptable until validated HTTP Range resumption is implemented.
+    bool valid_content_length = false;
+    const qint64 content_length = content_length_header.toLongLong(&valid_content_length);
+    if (!Internal::completeCopernicusResponse(
+            http_status, downloaded_bytes,
+            valid_content_length ? content_length : -1))
+    {
+        output.cancelWriting();
+        result.status = SourceLoadStatus::NetworkError;
+        result.error_message = QStringLiteral(
+            "Copernicus response was partial or incomplete (HTTP %1, received %2 bytes, declared %3 bytes): %4")
+                                   .arg(http_status)
+                                   .arg(downloaded_bytes)
+                                   .arg(valid_content_length ? content_length : -1)
+                                   .arg(request_url.toString());
         return result;
     }
 

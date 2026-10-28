@@ -70,7 +70,10 @@ can continue within the total deadline. The source-file lock wait checks for
 cancellation so shutdown does not have to wait for the entire lock timeout.
 
 An interrupted transfer currently restarts rather than resuming with HTTP
-Range. Native COGs already in cache, and normalized tiles already generated,
+Range. Until resumable downloads are implemented, the downloader accepts only
+complete HTTP 200 responses (not 206 Partial Content) and verifies the received
+byte count when the server supplies Content-Length. Empty bodies are rejected;
+failed responses are not committed to the native source cache. Native COGs already in cache, and normalized tiles already generated,
 remain usable when Internet access is unavailable or remote fetching is
 disabled. Upstream acquisition still runs within terrain worker operations;
 it is not yet isolated in an independent network worker pool. For concurrency

@@ -1,5 +1,6 @@
 #include <aowis/map/terrain_data.h>
 #include <aowis/map/terrain_provider.h>
+#include "../src/lib/copernicus_download_validation.h"
 
 #include <QDir>
 #include <QFile>
@@ -151,6 +152,17 @@ int main()
     {
         return 1;
     }
+
+    // Native provider cache must never publish partial HTTP entities.
+    if (!require(Internal::completeCopernicusResponse(200, 1024, 1024) &&
+                 Internal::completeCopernicusResponse(200, 1024, -1) &&
+                 !Internal::completeCopernicusResponse(206, 1024, 1024) &&
+                 !Internal::completeCopernicusResponse(204, 0, 0) &&
+                 !Internal::completeCopernicusResponse(200, 0, -1) &&
+                 !Internal::completeCopernicusResponse(200, 512, 1024) &&
+                 !Internal::completeCopernicusResponse(200, 1536, 1024),
+                 "Copernicus complete-response validation is incorrect"))
+        return 1;
 
     QTemporaryDir temporary_directory;
     if (!require(temporary_directory.isValid(),
