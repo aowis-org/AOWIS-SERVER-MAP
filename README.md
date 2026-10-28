@@ -100,8 +100,8 @@ are not yet handled by a separate network I/O executor.
 
 For poor connections, Copernicus acquisition has configurable connection,
 network-inactivity and total-duration limits (30 seconds, 120 seconds and
-30 minutes by default). Complete cached data remains usable offline. HTTP
-Range resume for interrupted source downloads is **not yet implemented**.
+30 minutes by default). Complete cached data remains usable offline. Interrupted Copernicus source downloads can resume with validated HTTP Range
+requests when the upstream supplies a strong ETag and known total length.
 
 See [Performance, concurrency and operations](docs/performance-roadmap.md) for
 the current execution model, admission behavior, testing, limitations, and

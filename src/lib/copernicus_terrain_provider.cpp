@@ -1,5 +1,7 @@
 #include "copernicus_terrain_provider.h"
 #include "copernicus_download_validation.h"
+#include "copernicus_resume_state.h"
+#include "copernicus_source_publish.h"
 
 #include <QDir>
 #include <QElapsedTimer>
@@ -247,12 +249,26 @@ SourceLoadResult downloadSourceTile(const QString &provider_cache_directory,
         return result;
     }
 
-    QSaveFile output(result.path);
-    if (!output.open(QIODevice::WriteOnly))
+    // The incoming response is never the published cache entry. A retained
+    // partial is usable only together with matching, atomically stored metadata.
+    const QString partial_path = result.path + QStringLiteral(".partial");
+    const QString metadata_path = result.path + QStringLiteral(".partial.meta");
+    const QString incoming_path = result.path + QStringLiteral(".incoming");
+    const std::optional<Internal::CopernicusPartialState> prior_state =
+        Internal::loadCopernicusPartialState(partial_path, metadata_path,
+                                             MaximumSourceDownloadBytes);
+    if (!prior_state)
+    {
+        QFile::remove(partial_path);
+        QFile::remove(metadata_path);
+    }
+    QFile::remove(incoming_path);
+    QFile output(incoming_path);
+    if (!output.open(QIODevice::WriteOnly | QIODevice::Truncate))
     {
         result.status = SourceLoadStatus::ReadError;
-        result.error_message = QStringLiteral("Failed to create Copernicus provider cache file %1: %2")
-                                   .arg(result.path, output.errorString());
+        result.error_message = QStringLiteral("Failed to stage Copernicus source %1: %2")
+                                   .arg(incoming_path, output.errorString());
         return result;
     }
 
@@ -279,6 +295,12 @@ SourceLoadResult downloadSourceTile(const QString &provider_cache_directory,
     request.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
 #endif
     request.setRawHeader("User-Agent", "AOWIS-SERVER-MAP terrain-provider");
+    if (prior_state)
+    {
+        request.setRawHeader("Range", "bytes=" +
+            QByteArray::number(prior_state->downloaded_bytes) + "-");
+        request.setRawHeader("If-Range", prior_state->strong_etag);
+    }
 
     QNetworkReply *reply = network_manager.get(request);
     if (upstream_mutex != nullptr && upstream_active_replies != nullptr)
@@ -354,61 +376,55 @@ SourceLoadResult downloadSourceTile(const QString &provider_cache_directory,
             *upstream_cancel_generation != request_cancel_generation;
     }
 
-    if (canceled)
-    {
-        output.cancelWriting();
-        reply->deleteLater();
-        result.status = SourceLoadStatus::Cancelled;
-        result.error_message = QStringLiteral("Copernicus upstream download canceled");
-        return result;
-    }
-
     if (!write_failed)
     {
-        const QByteArray remaining_data = reply->readAll();
-        downloaded_bytes += remaining_data.size();
+        const QByteArray trailing = reply->readAll();
+        downloaded_bytes += trailing.size();
         if (downloaded_bytes > MaximumSourceDownloadBytes ||
-            output.write(remaining_data) != remaining_data.size())
-        {
+            output.write(trailing) != trailing.size())
             write_failed = true;
-        }
     }
 
     const int http_status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
     const QVariant content_length_header = reply->header(QNetworkRequest::ContentLengthHeader);
+    bool valid_content_length = false;
+    const qint64 content_length = content_length_header.toLongLong(&valid_content_length);
+    const QByteArray etag = reply->rawHeader("ETag");
+    const QByteArray content_range = reply->rawHeader("Content-Range");
     const QNetworkReply::NetworkError network_error = reply->error();
     const QString network_error_text = reply->errorString();
     const QUrl request_url = reply->url();
     reply->deleteLater();
+    output.close();
 
-    if (connection_expired || deadline_expired)
+    const auto discard_incoming = [&]() { QFile::remove(incoming_path); };
+    const auto discard_partial = [&]()
     {
-        output.cancelWriting();
-        result.status = SourceLoadStatus::NetworkError;
-        result.error_message = QStringLiteral("Copernicus upstream download exceeded the %1-second %2 timeout: %3")
-                                   .arg((connection_expired ? connect_timeout_ms : download_deadline_ms) / 1000)
-                                   .arg(connection_expired ? QStringLiteral("connection")
-                                                           : QStringLiteral("overall"))
-                                   .arg(request_url.toString());
+        QFile::remove(partial_path);
+        QFile::remove(metadata_path);
+    };
+    if (canceled)
+    {
+        discard_incoming();
+        result.status = SourceLoadStatus::Cancelled;
+        result.error_message = QStringLiteral("Copernicus upstream download canceled");
         return result;
     }
-
     if (write_failed)
     {
-        output.cancelWriting();
+        discard_incoming();
         result.status = SourceLoadStatus::ReadError;
         result.error_message = downloaded_bytes > MaximumSourceDownloadBytes
             ? QStringLiteral("Copernicus source tile exceeded the %1 MiB safety limit: %2")
                   .arg(MaximumSourceDownloadBytes / (1024LL * 1024LL))
                   .arg(request_url.toString())
-            : QStringLiteral("Failed to write Copernicus provider cache file: %1")
-                  .arg(result.path);
+            : QStringLiteral("Failed to stage Copernicus provider source: %1").arg(incoming_path);
         return result;
     }
-
     if (http_status == 404 || network_error == QNetworkReply::ContentNotFoundError)
     {
-        output.cancelWriting();
+        discard_incoming();
+        discard_partial();
         result.status = SourceLoadStatus::Unavailable;
         result.source_confirmed_unavailable = true;
         result.error_message = QStringLiteral("Copernicus GLO-30 source tile is unavailable: %1")
@@ -416,44 +432,86 @@ SourceLoadResult downloadSourceTile(const QString &provider_cache_directory,
         return result;
     }
 
-    if (network_error != QNetworkReply::NoError || http_status < 200 || http_status >= 300)
+    // Preserve a failed full response only when the server identifies an
+    // immutable entity and the expected size. Interrupted resumptions leave
+    // their previously validated prefix untouched.
+    if (network_error != QNetworkReply::NoError || connection_expired || deadline_expired)
     {
-        output.cancelWriting();
+        if (http_status == 200 && downloaded_bytes > 0 &&
+            valid_content_length && content_length > downloaded_bytes &&
+            content_length <= MaximumSourceDownloadBytes &&
+            Internal::validCopernicusStrongEtag(etag))
+        {
+            discard_partial();
+            if (QFile::rename(incoming_path, partial_path))
+            {
+                const Internal::CopernicusPartialState state{downloaded_bytes,
+                                                              content_length, etag};
+                if (!Internal::saveCopernicusPartialState(metadata_path, state,
+                                                          MaximumSourceDownloadBytes))
+                    discard_partial();
+            }
+            else
+                discard_incoming();
+        }
+        else
+            discard_incoming();
         result.status = SourceLoadStatus::NetworkError;
-        result.error_message = QStringLiteral("Failed to download Copernicus GLO-30 source tile %1: HTTP %2, %3")
-                                   .arg(request_url.toString())
-                                   .arg(http_status)
-                                   .arg(network_error_text);
+        result.error_message = QStringLiteral("Copernicus transfer interrupted: %1 (%2)")
+                                   .arg(request_url.toString(), network_error_text);
         return result;
     }
 
-    // A full GET must yield a complete 200 entity. In particular, 206 is not
-    // acceptable until validated HTTP Range resumption is implemented.
-    bool valid_content_length = false;
-    const qint64 content_length = content_length_header.toLongLong(&valid_content_length);
-    if (!Internal::completeCopernicusResponse(
-            http_status, downloaded_bytes,
-            valid_content_length ? content_length : -1))
+    if (http_status != 200 && http_status != 206)
     {
-        output.cancelWriting();
+        discard_incoming();
+        if (http_status == 416)
+            discard_partial();
         result.status = SourceLoadStatus::NetworkError;
-        result.error_message = QStringLiteral(
-            "Copernicus response was partial or incomplete (HTTP %1, received %2 bytes, declared %3 bytes): %4")
-                                   .arg(http_status)
-                                   .arg(downloaded_bytes)
-                                   .arg(valid_content_length ? content_length : -1)
+        result.error_message = QStringLiteral("Copernicus upstream rejected request: HTTP %1, %2")
+                                   .arg(http_status).arg(request_url.toString());
+        return result;
+    }
+
+    bool append_prior = false;
+    if (http_status == 206 && prior_state)
+    {
+        append_prior = Internal::classifyCopernicusResumeResponse(
+            http_status, prior_state->downloaded_bytes, downloaded_bytes,
+            content_range, prior_state->strong_etag, etag,
+            MaximumSourceDownloadBytes) == Internal::CopernicusResumeAction::AppendVerifiedRange;
+        if (append_prior && prior_state->downloaded_bytes + downloaded_bytes !=
+                prior_state->total_bytes)
+            append_prior = false;
+    }
+    const bool complete_full = Internal::completeCopernicusResponse(
+        http_status, downloaded_bytes, valid_content_length ? content_length : -1);
+    if ((!append_prior && !complete_full) ||
+        (append_prior && valid_content_length && content_length != downloaded_bytes))
+    {
+        discard_incoming();
+        if (http_status == 206)
+            discard_partial();
+        result.status = SourceLoadStatus::NetworkError;
+        result.error_message = QStringLiteral("Copernicus returned incomplete or inconsistent source bytes: %1")
                                    .arg(request_url.toString());
         return result;
     }
 
-    if (!output.commit())
+    // Publish only after the entire response (and optional verified prefix)
+    // has been copied into QSaveFile. A failed commit leaves the old cache
+    // entry untouched. Copy in chunks to avoid allocating a whole GeoTIFF.
+    if (!Internal::publishCopernicusSource(result.path, incoming_path,
+                                            append_prior ? partial_path : QString()))
     {
+        discard_incoming();
         result.status = SourceLoadStatus::ReadError;
-        result.error_message = QStringLiteral("Failed to commit Copernicus provider cache file %1: %2")
-                                   .arg(result.path, output.errorString());
+        result.error_message = QStringLiteral("Failed to publish complete Copernicus source: %1")
+                                   .arg(result.path);
         return result;
     }
-
+    discard_incoming();
+    discard_partial();
     result.status = SourceLoadStatus::Ready;
     result.downloaded = true;
     result.error_message.clear();

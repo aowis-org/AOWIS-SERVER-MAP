@@ -69,11 +69,16 @@ and 1800 seconds respectively by default. Slow but progressing connections
 can continue within the total deadline. The source-file lock wait checks for
 cancellation so shutdown does not have to wait for the entire lock timeout.
 
-An interrupted transfer currently restarts rather than resuming with HTTP
-Range. Until resumable downloads are implemented, the downloader accepts only
-complete HTTP 200 responses (not 206 Partial Content) and verifies the received
-byte count when the server supplies Content-Length. Empty bodies are rejected;
-failed responses are not committed to the native source cache. Native COGs already in cache, and normalized tiles already generated,
+Interrupted full downloads with a strong ETag and a known total size can retain
+verified partial data. On the next attempt, the downloader sends `Range` and
+`If-Range`. It accepts resumed bytes only when the returned `206 Content-Range`,
+strong ETag and exact byte counts match; otherwise the attempt fails safely.
+A server that ignores `Range` and responds with a complete `200 OK` is handled
+as a fresh full download. The completed file is published atomically; partial
+files are never used as terrain source cache entries. Transfers without a
+usable validator may still need to restart from byte zero.
+
+Native COGs already in cache, and normalized tiles already generated,
 remain usable when Internet access is unavailable or remote fetching is
 disabled. Upstream acquisition still runs within terrain worker operations;
 it is not yet isolated in an independent network worker pool. For concurrency
@@ -143,22 +148,24 @@ The HTTP terrain route runs read-through generation on QtConcurrent rather than 
 server's main event loop. Cache-fill locking deduplicates matching requests without globally
 serializing unrelated terrain generation.
 
-### Interrupted download recovery status
+### Interrupted download recovery
 
-The current source downloader requests complete HTTP entities and publishes a COG
-only after successful full-response validation and atomic commit. Failed or
-interrupted downloads are not retained for resumption, so a later request starts
-from byte zero. This keeps the offline cache safe but may use extra bandwidth
-on unreliable links.
+A failed HTTP 200 transfer can retain its downloaded prefix in a separate
+`.partial` file, accompanied by atomic `.partial.meta` metadata containing the
+strong ETag, total size and exact saved byte count. A mismatched or corrupt
+metadata pair is discarded, and the source is downloaded from the beginning.
 
-Strict HTTP `Content-Range` and strong-ETag matching rules are implemented and
-regression-tested. A separate, versioned partial-state metadata format now also
-validates persisted byte counts against the actual partial-file length, enforces
-a strong ETag and a total-size limit, and writes metadata atomically. These
-helpers are not yet connected to upstream downloads: the downloader **still
-starts from byte zero after interruption** and never publishes partial files.
-The next stage is to stage interrupted data, issue conditional Range requests,
-validate complete 206 responses, and publish only fully assembled source files.
+A later request issues `Range: bytes=<offset>-` with `If-Range: <ETag>`.
+A valid `206 Partial Content` must begin at the requested offset, end at the
+recorded total length, and carry the same strong ETag. The validated prefix
+and suffix are assembled into the final `.tif` using atomic `QSaveFile`
+publication. A complete `200 OK` response is accepted as a new full entity
+when the provider ignores the range request.
+
+Resumption is best-effort. If the provider omits a strong ETag or total length,
+failed transfers are not retained. Range responses with inconsistent metadata
+are rejected rather than risk corrupting a terrain source. There is currently
+no independently scheduled upstream I/O pool or automatic background retry.
 
 ## Licensing and attribution
 

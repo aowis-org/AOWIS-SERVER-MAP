@@ -2,6 +2,7 @@
 #include <aowis/map/terrain_provider.h>
 #include "../src/lib/copernicus_download_validation.h"
 #include "../src/lib/copernicus_resume_state.h"
+#include "../src/lib/copernicus_source_publish.h"
 
 #include <QDir>
 #include <QFile>
@@ -236,6 +237,47 @@ int main()
                      .has_value(),
                  "Mismatched Copernicus partial bytes were accepted"))
         return 1;
+
+    // Complete sources are published atomically; verified prefix + incoming
+    // bytes create exactly one source, while a missing segment never replaces
+    // an existing cache file.
+    const QString final_path = temporary_directory.filePath("complete.tif");
+    const QString incoming_path = temporary_directory.filePath("incoming.part");
+    {
+        QFile incoming(incoming_path);
+        if (!require(incoming.open(QIODevice::WriteOnly) &&
+                     incoming.write("EFGH", 4) == 4,
+                     "Failed to create incoming source segment"))
+            return 1;
+    }
+    {
+        QFile prefix(partial_path);
+        if (!require(prefix.open(QIODevice::WriteOnly | QIODevice::Truncate) &&
+                     prefix.write("ABCD", 4) == 4,
+                     "Failed to create source prefix"))
+            return 1;
+    }
+    if (!require(Internal::publishCopernicusSource(final_path, incoming_path, partial_path),
+                 "Failed to assemble a complete resumed source"))
+        return 1;
+    {
+        QFile complete(final_path);
+        if (!require(complete.open(QIODevice::ReadOnly) &&
+                     complete.readAll() == QByteArray("ABCDEFGH"),
+                     "Resumed source was assembled incorrectly"))
+            return 1;
+    }
+    if (!require(!Internal::publishCopernicusSource(
+                     final_path, temporary_directory.filePath("absent.segment"), partial_path),
+                 "Missing segment should not be published"))
+        return 1;
+    {
+        QFile complete(final_path);
+        if (!require(complete.open(QIODevice::ReadOnly) &&
+                     complete.readAll() == QByteArray("ABCDEFGH"),
+                     "Failed publication replaced a valid cached source"))
+            return 1;
+    }
 
     TerrainData::Config config;
     config.enabled = true;

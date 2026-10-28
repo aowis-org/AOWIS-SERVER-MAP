@@ -72,7 +72,7 @@ download_deadline_seconds=1800
 
 The connection limit bounds waiting for response progress, the inactivity limit detects stalled transfers, and the **30-minute absolute deadline** allows slow but continuously progressing downloads to continue much longer than two minutes. All three are bounded; these are not unlimited downloads. Source-lock acquisition can be canceled while waiting. Incomplete downloads are not published as complete cache objects.
 
-A failed or interrupted COG download currently must be started again; **HTTP Range resume is not implemented**. Despite the available timeout controls, Copernicus downloads can still occupy terrain workers until they finish, fail or are canceled. A dedicated network I/O scheduler is a future architectural improvement, not a current feature.
+Interrupted Copernicus COG downloads can resume from validated partial files when a strong ETag and known total length are available. Transfers without suitable validators restart from byte zero. Despite the available timeout controls, Copernicus downloads can still occupy terrain workers until they finish, fail or are canceled. A dedicated network I/O scheduler is a future architectural improvement, not a current feature.
 
 To enforce offline use while retaining cached data, configure `terrain/remote_fetch_enabled=false` independently from `downloads/remote_fetch_enabled=false` for imagery. Restricting download coverage does **not** forbid reading already cached data outside that coverage.
 
@@ -120,7 +120,7 @@ The supplied `tools/apply_patch.sh` accepts `aowis-server-map-*.zip` archives wi
 These are **open engineering goals**, not descriptions of the present server:
 
 1. Separate blocking Copernicus upstream acquisition from terrain CPU workers; introduce independent I/O concurrency, backpressure and fairness.
-2. Support validated, bounded resumable source downloads where providers accept `Range` requests, without ever publishing partial data.
+2. Strengthen resumable source downloads with integration coverage for unstable real-world upstreams, bounded partial-file retention, and optional retry scheduling.
 3. Account for all terrain intermediate/native raster memory and response payloads, not just grid output reservations.
 4. Add comprehensive per-stage metrics, disconnect-aware waiter cleanup, retry/circuit-breaker policies and operational dashboards where justified.
 5. Run sustained mixed workload, slow-upstream, shutdown, client-disconnect, sanitizer, and endurance tests; record repeatable before/after benchmarks before claiming performance gains.
