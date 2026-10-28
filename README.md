@@ -42,7 +42,12 @@ registered native tests:
 ```
 
 Use `--release` for release-mode validation and performance work, or `--both`
-for major changes and release qualification. To build the ordinary executable
+for major changes. For a complete Release qualification (including lifecycle
+repetitions and configuration CLI checks), run `./tools/qualify_release.sh`.
+AddressSanitizer/UndefinedBehaviorSanitizer checks are available separately
+with `./tools/qualify_release.sh --sanitizers`; `--all` runs both gates. The
+qualification script never starts the server listener and records logs in
+`build-linux-qualification/`. To build the ordinary executable
 without attempting to bind its listener:
 
 ```bash
@@ -86,17 +91,20 @@ See [Debian service instructions](configs/systemd/README.md) and
 
 The server keeps QHttpServer's asynchronous response model. Map imagery uses a
 256 MiB memory cache, asynchronous cold-cache disk reads, asynchronous bounded
-atomic writes, and deduplicated upstream requests. Terrain requests use a
-dedicated worker pool with explicit admission, shared in-flight jobs for
-identical terrain tile, elevation and grid requests, and a separate 64 MiB
-estimated grid-output reservation budget.
+atomic writes, and deduplicated upstream requests. Terrain requests use
+separate cached-processing and remote-capable pools with explicit admission,
+shared in-flight jobs for identical terrain tile,
+elevation and grid requests, and a separate 64 MiB estimated grid-output
+reservation budget.
 
 Default resource controls include two cache-read and two cache-write workers,
 64 pending operations and 64 MiB pending payloads in each cache-I/O domain,
-32 active raster downloads, four terrain workers and 128 admitted terrain
-jobs. These are **independent limits**, not a promise of fixed throughput.
-Blocking Copernicus source downloads can still occupy terrain workers; they
-are not yet handled by a separate network I/O executor.
+32 active raster downloads, four cached-processing terrain workers, two
+remote-capable terrain workers, and 128 admitted terrain jobs (at most 64
+remote-capable). These are **independent limits**, not a promise of fixed
+throughput. Copernicus acquisition occupies remote-capable workers while it
+waits for source data; normalized-cache hits and post-acquisition CPU
+continuations use the processing pool.
 
 For poor connections, Copernicus acquisition has configurable connection,
 network-inactivity and total-duration limits (30 seconds, 120 seconds and

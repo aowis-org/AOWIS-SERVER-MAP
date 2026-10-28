@@ -95,6 +95,48 @@ From the repository root:
 
 `compile_linux.sh` starts the executable unless `--no-run` is passed. If another instance already listens at `127.0.0.1:8122`, a bind error after a successful compilation is expected and is not a compilation failure.
 
+### Phase 07 release qualification (no listener started)
+
+Run the dedicated gate from the project root:
+
+```bash
+./tools/qualify_release.sh                 # Release build, all tests, lifecycle stress and config smoke
+./tools/qualify_release.sh --sanitizers    # opt-in ASan + UBSan Debug build and tests
+./tools/qualify_release.sh --all           # both gates, independently reported
+./tools/qualify_release.sh --release --quick  # shorter smoke; NOT release qualification
+```
+
+The Release gate builds **the production server binary and all registered tests** in
+`build-linux-tests-release/`, runs the 15-test suite, validates a disposable
+printed/written default configuration with `--check-config`, verifies that
+writing the defaults refuses to overwrite an existing file, repeats the
+lifecycle test with 20 cycles, and runs 100 fresh lifecycle-test processes.
+The short `--quick` smoke instead uses 3 cycles and 5 processes. The smoke
+only checks the CLI using a temporary user-data directory, **not** the
+administrator's `/etc/aowis-server-map/map-server.ini` or systemd state.
+Nothing starts an HTTP listener, changes the production service, or contacts
+public upstream data sources.
+
+The opt-in sanitizer gate configures a separate
+`build-linux-tests-sanitizers/` directory with AddressSanitizer and
+UndefinedBehaviorSanitizer, builds the server and tests, runs the native
+suite, checks the configuration CLI and repeats the lifecycle regression
+(5 cycles and 10 process restarts, or 2 and 2 with `--quick`). The compiler
+and runtime must support `-fsanitize=address,undefined`; uninstrumented Qt
+and libtiff binaries are not covered internally. LeakSanitizer is enabled by
+default on supported Linux setups; externally supplied `ASAN_OPTIONS` and
+`UBSAN_OPTIONS` are honored. A sanitizer finding or unsupported runtime is
+a **failed gate**, not a silent skip; inspect the logs and diagnose whether
+a failure is in the project or a dependency.
+
+Logs and a pass/fail summary are retained under
+`build-linux-qualification/<UTC timestamp>-<PID>/`. These directories are
+ignored by the source snapshot ZIP export. A passing sanitizer suite is
+additional evidence, not proof that all possible races or leaks are absent.
+ThreadSanitizer is **not** enabled by this script, because it requires its own
+separate toolchain/runtime qualification and can conflict with third-party
+Qt internals.
+
 ### HTTP benchmark harness
 
 Use `tools/benchmark_http.py` against a **controlled local instance and fixture**:
@@ -126,8 +168,8 @@ These are **open engineering goals**, not descriptions of the present server:
 1. Refine I/O concurrency, backpressure, fairness, and elevation fallback acquisition across zoom levels.
 2. Strengthen resumable source downloads with integration coverage for unstable real-world upstreams, bounded partial-file retention, and optional retry scheduling.
 3. Profile and bound libtiff internals, response payloads and other intermediate buffers; the retained-block and temporary-decode budgets do not impose a process-wide RSS ceiling.
-4. Add comprehensive per-stage metrics, disconnect-aware waiter cleanup, retry/circuit-breaker policies and operational dashboards where justified.
-5. Run sustained mixed workload, slow-upstream, shutdown, client-disconnect, sanitizer, and endurance tests; record repeatable before/after benchmarks before claiming performance gains.
+4. Add comprehensive per-stage metrics, retry/circuit-breaker policies and operational dashboards where justified.
+5. Expand sustained mixed-workload and real-upstream soak tests and sanitizer coverage; the bounded loopback shutdown/client-disconnect stress suite is already implemented.
 
 The architectural objective is to keep cached requests responsive under pressure while bounding work and resource usage. There are no published throughput or latency guarantees yet.
 
