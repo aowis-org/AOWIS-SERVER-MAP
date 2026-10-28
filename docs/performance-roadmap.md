@@ -60,7 +60,7 @@ Identical concurrent requests to normalized terrain tiles, point elevation, and 
 
 The grid byte budget accounts for both float-result storage and serialized HTTP bytes (8 bytes per sample). Float results are released before queuing HTTP delivery; the reservation remains held until completion. The response fan-out shares implicitly copied byte storage among single-flight waiters, though Qt/network internals may allocate additional buffers. Each opened Copernicus GeoTIFF also has a **32 MiB decoded-block cache**, evicting older blocks as needed. A single TIFF tile or strip exceeding 32 MiB of decoded data fails with a source read error rather than allocating an unbounded block. A thread-safe **128 MiB shared budget** also caps retained decoded TIFF blocks across concurrent readers. A reader that cannot reserve shared cache space still decodes and samples its requested block without retaining it. A separate **128 MiB shared in-flight decode-buffer budget** reserves each temporary decoded tile or strip before allocation, releasing the reservation when the sample finishes. Exhausting this budget returns a source-read error instead of allocating more decoded output. Normalized `.aowterrain` cache reads are bounded to their fixed-format maximum (64-byte header, up to 128 dataset bytes, and 65×65 uint16 samples); oversized entries are treated as corrupt and can be repaired from native source data. These limits are **not a total process RSS ceiling**: libtiff internal allocations, response payloads and other intermediate buffers remain outside this accounting and need profiling. Terrain cache deletion and upstream cancellation have their own endpoint semantics; do not assume every route is coalesced.
 
-On shutdown, the server stops listening, requests upstream cancellation, drains outstanding response promises and joins both terrain pools before destroying terrain dependencies. A blocked operation that does not respond to cancellation may still delay shutdown. Terrain tile, elevation and grid HTTP requests now track their accepted TCP connections (Qt 6.5+): closing a client connection resolves and removes its abandoned response waiter, immediately freeing its pending-response slot without affecting other single-flight clients. When the last client disconnects, its flight is removed from the registry and a per-job cancellation token is set. A replacement client starts an independent flight with a distinct identity; stale completion callbacks cannot drain its waiters. Remote Copernicus acquisition checks this token while waiting for source locks and polls it during an active HTTP transfer, aborting only the orphaned reply (the provider-wide shutdown cancellation remains separate). Queued CPU work checks cancellation before starting; CPU work already executing is not yet preempted. Workers release their admission reservations on exit, and grid jobs release their byte reservations even when their completion is stale. A replacement may temporarily overlap the departing flight and remains subject to the normal admission limits. Absolute CPU-stage cancellation deadlines and longer stress testing remain future work.
+On shutdown, the server stops listening, requests upstream cancellation, drains outstanding response promises and joins both terrain pools before destroying terrain dependencies. A blocked operation that does not respond to cancellation may still delay shutdown. Terrain tile, elevation and grid HTTP requests now track their accepted TCP connections (Qt 6.5+): closing a client connection resolves and removes its abandoned response waiter, immediately freeing its pending-response slot without affecting other single-flight clients. When the last client disconnects, its flight is removed from the registry and a per-job cancellation token is set. A replacement client starts an independent flight with a distinct identity; stale completion callbacks cannot drain its waiters. Remote Copernicus acquisition checks this token while waiting for source locks and polls it during an active HTTP transfer, aborting only the orphaned reply (the provider-wide shutdown cancellation remains separate). Queued CPU work checks cancellation before starting; CPU work already executing is not yet preempted. Workers release their admission reservations on exit, and grid jobs release their byte reservations even when their completion is stale. A replacement may temporarily overlap the departing flight and remains subject to the normal admission limits. Absolute CPU-stage cancellation deadlines and sustained soak tests beyond the bounded lifecycle stress remain future work.
 
 ## Slow-network and offline behavior
 
@@ -133,7 +133,25 @@ The architectural objective is to keep cached requests responsive under pressure
 
 ### Live acquisition contention regression
 
-The terrain HTTP integration test uses an in-process-only Copernicus source URL to hold two real loopback GeoTIFF transfers open while a normalized cached tile is served. The test repeats that scenario three times with new server instances and cache roots. Destroying each server must cancel both transfers, close both upstream sockets, and complete both pending terrain futures. This checks repeated shutdown cleanup, not a long-duration soak test. The URL override exists only in programmatic configuration for tests; the INI parser does not expose it, and the default production Copernicus URL remains fixed.
+The terrain HTTP integration test uses an in-process-only Copernicus source URL to hold two real loopback GeoTIFF transfers open while a normalized cached tile is served. The lifecycle regressions repeat **three cycles by default**. Each cycle exercises a surviving single-flight waiter and a late joiner on all three HTTP terrain routes (tile/elevation/grid), a disconnected last waiter followed by a replacement request on the same long-lived server and flight key, selective upstream abort of one of two independent stalled downloads (alternating which client drops first), and a fresh-server shutdown while two actual upstream transfers are stalled. The tests require all waiter/cancellation registries and admission reservations to drain after orphan cleanup, and require shutdown to close both upstream sockets and complete both futures. The test URL override exists only in programmatic configuration for tests; the INI parser does not expose it, and the production Copernicus URL remains fixed.
+
+To run **extended lifecycle stress** without changing the normal Debug suite, set the cycle count (clamped to 1–50):
+
+```sh
+AOWIS_TERRAIN_LIFECYCLE_REPETITIONS=20 \
+  ctest --test-dir build-linux-tests-debug \
+  -R '^aowis-server-map-terrain-singleflight-http$' --output-on-failure
+```
+
+For repeated test-process restarts and separate server lifetimes, use CTest's repeat mode:
+
+```sh
+ctest --test-dir build-linux-tests-debug \
+  -R '^aowis-server-map-terrain-singleflight-http$' \
+  --repeat until-fail:100 --output-on-failure
+```
+
+These are bounded loopback cancellation/shutdown regressions, not a long-duration production soak test or proof of race freedom.
 
 ### Linux terrain RSS benchmark
 

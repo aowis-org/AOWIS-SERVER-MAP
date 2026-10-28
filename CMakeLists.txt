@@ -273,8 +273,10 @@ if(AOWIS_SERVER_MAP_BUILD_SERVER)
             PRIVATE cxx_std_20)
         add_test(NAME aowis-server-map-terrain-singleflight-http
             COMMAND aowis-server-map-terrain-singleflight-http-test)
+        # Extended lifecycle stress can repeat all cancellation/shutdown cases
+        # up to 50 times via AOWIS_TERRAIN_LIFECYCLE_REPETITIONS.
         set_tests_properties(aowis-server-map-terrain-singleflight-http
-            PROPERTIES TIMEOUT 15)
+            PROPERTIES TIMEOUT 60)
     endif()
 endif()
 
