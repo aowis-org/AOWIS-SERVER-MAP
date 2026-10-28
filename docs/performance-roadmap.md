@@ -205,3 +205,13 @@ Deletion may still wait for an *overlapping* write in progress; making that
 operation fully nonblocking requires an asynchronous deletion API and distinct
 HTTP completion semantics. Test this behavior under heavy write/delete traffic
 before considering it production-qualified.
+
+## Completed-write deletion regression
+
+The cache-reuse integration test now deletes an asynchronously persisted tile,
+checks it does not reappear after the event loop processes delayed callbacks,
+and verifies that a neighboring tile is preserved. This covers the completed
+write path; **it does not deterministically force deletion to overlap an active
+`QSaveFile::commit()`**. A controllable write-pause test seam or dedicated
+worker-level harness is still needed before declaring the active-write race
+fully stress-tested.

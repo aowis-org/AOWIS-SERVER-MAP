@@ -318,6 +318,33 @@ int main(int argc, char **argv)
             "Disk cache unexpectedly scheduled a refresh after restart");
     require(request_count == 1, "Repeat access unexpectedly downloaded another tile");
 
+    // Regression: selective cache deletion after asynchronous persistence must
+    // not resurrect the tile through delayed worker completion, and must
+    // preserve a neighboring cached tile.
+    {
+        MapTiles deletion_checker(online_cache.path(), 2, 8);
+        deletion_checker.configureProviders(providers, {}, {});
+        const QString downloaded_path = QDir(online_cache.path()).filePath(
+            QStringLiteral("maptiles/%1/6/30/20.png").arg(provider_id));
+        const QString neighbor_path = QDir(online_cache.path()).filePath(
+            QStringLiteral("maptiles/%1/6/30/21.png").arg(provider_id));
+        const QByteArray neighbor_data("neighbor-must-survive");
+        writeFile(neighbor_path, neighbor_data);
+        require(deletion_checker.deleteTiles(provider_id, 6, 30, 30, 20, 20) == 1,
+                "Deleting asynchronously persisted tile failed");
+        require(!QFile::exists(downloaded_path),
+                "Deleted tile still exists immediately after deletion");
+        QEventLoop deletion_drain_loop;
+        QTimer::singleShot(30, &deletion_drain_loop, &QEventLoop::quit);
+        deletion_drain_loop.exec();
+        require(!QFile::exists(downloaded_path),
+                "Late cache write recreated a deleted tile");
+        QFile neighbor_file(neighbor_path);
+        require(neighbor_file.open(QIODevice::ReadOnly) &&
+                neighbor_file.readAll() == neighbor_data,
+                "Selective deletion affected an unrelated tile");
+    }
+
     std::cout << "Permanent raster cache reuse tests passed\n";
     return EXIT_SUCCESS;
 }
