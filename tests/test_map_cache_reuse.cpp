@@ -87,6 +87,10 @@ int main(int argc, char **argv)
         require(first_async.status == MapTiles::TileRequestStatus::Pending &&
                 second_async.status == MapTiles::TileRequestStatus::Pending,
                 "HTTP cold disk reads should be pending without blocking the caller");
+        // Invalid administrative input must neither block behind unrelated
+        // reads nor cancel valid pending HTTP responses.
+        require(async_reader.deleteTiles(provider_id, -1, 31, 31, 20, 20) == -1,
+                "Malformed cache deletion must fail");
         read_timeout.start(5000);
         read_loop.exec();
         require(first_result == old_bytes && second_result == old_bytes,

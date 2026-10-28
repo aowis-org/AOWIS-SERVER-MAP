@@ -171,3 +171,14 @@ accidental upstream refetches and stale response delivery after administrative
 invalidation. Genuine read failures with an unchanged cache generation retain
 the existing fallback behavior. The cache reuse regression test covers deletion
 while a read completion is queued.
+
+### Phase 03: nonblocking cache-read invalidation during deletion
+
+Administrative tile deletion no longer waits for all cache-read workers. Each
+read operates on its own file handle and the generation guard on completion
+cancels results invalidated by a deletion. Cache-write workers still require a
+completion barrier before filesystem removal; eliminating that barrier safely
+requires a follow-up per-tile write/delete coordinator. Invalid deletion
+parameters are now rejected before mutating the cache generation, preserving
+unrelated pending reads. The existing cache-reuse regression exercises both
+pending-read invalidation and invalid deletion input.

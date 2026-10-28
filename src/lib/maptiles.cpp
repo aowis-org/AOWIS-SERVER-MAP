@@ -415,23 +415,28 @@ MapTiles::TileRequestResult MapTiles::getTileForHttp(
 int MapTiles::deleteTiles(const QString &provider, int zoom, int tile_x_min, int tile_x_max,
                           int tile_y_min, int tile_y_max)
 {
-    ++this->cache_generation;
-    this->cache_read_pool.waitForDone();
-    // Serialize destructive cache maintenance against outstanding atomic writes.
-    // Cache deletion is an administrative operation, not a tile hot path.
-    this->cache_write_pool.waitForDone();
-    const QString cache_path = providerCachePath(provider);
-    if (cache_path.isEmpty() || zoom < 0 || zoom > 30 ||
-        tile_x_min > tile_x_max || tile_y_min > tile_y_max)
-    {
+    // Reject malformed requests before invalidating unrelated pending reads or
+    // waiting for any outstanding writes. The provider path may be empty for
+    // an unknown provider, so validate it before changing cache state.
+    if (zoom < 0 || zoom > 30 || tile_x_min > tile_x_max ||
+        tile_y_min > tile_y_max)
         return -1;
-    }
+    const QString cache_path = providerCachePath(provider);
+    if (cache_path.isEmpty()) return -1;
 
     const int tile_count = 1 << zoom;
     const int bounded_y_min = qMax(0, tile_y_min);
     const int bounded_y_max = qMin(tile_count - 1, tile_y_max);
     if (bounded_y_min > bounded_y_max)
         return 0;
+
+    // Invalidate outstanding cold reads without waiting for disk workers.
+    // They only read independent file paths; their completion callback checks
+    // this generation before publishing bytes or retrying a remote request.
+    ++this->cache_generation;
+    // Writers can still publish files: keep the write barrier until cache
+    // persistence is coordinated per tile with deletion.
+    this->cache_write_pool.waitForDone();
 
     {
         QMutexLocker locker(&this->downloads_mutex);
