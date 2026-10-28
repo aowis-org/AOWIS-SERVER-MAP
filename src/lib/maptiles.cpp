@@ -23,6 +23,7 @@ constexpr int TileMemoryCacheMaximumCostKiB = 256 * 1024;
 constexpr int MaximumActiveDownloadsPerOrigin = 6;
 constexpr int MaximumPendingCacheWrites = 64;
 constexpr int MaximumPendingCacheReads = 64;
+constexpr qint64 MaximumPendingCacheReadBytes = 64LL * 1024 * 1024;
 constexpr qint64 MaximumPendingCacheWriteBytes = 64LL * 1024 * 1024;
 
 QString downloadOrigin(const QString &url)
@@ -352,12 +353,21 @@ MapTiles::TileRequestResult MapTiles::getTileForHttp(
     if (this->cache_reads_pending.size() >= MaximumPendingCacheReads)
         return { TileRequestStatus::ServerBusy, {} };
 
+    // Reserve bytes before scheduling a worker, not after the read completes.
+    // Large or growing files must not exhaust memory beyond the job-count limit.
+    const qint64 file_size = QFileInfo(read_path).size();
+    if (file_size <= 0 || file_size > MaximumPendingCacheReadBytes ||
+        file_size > MaximumPendingCacheReadBytes - this->pending_cache_read_bytes)
+        return { TileRequestStatus::ServerBusy, {} };
+
+    this->pending_cache_read_bytes += file_size;
     this->cache_reads_pending.insert(read_key, QStringList{key});
     const quint64 generation = this->cache_generation;
     QFutureWatcher<QByteArray> *watcher = new QFutureWatcher<QByteArray>(this);
     connect(watcher, &QFutureWatcher<QByteArray>::finished, this,
-            [this, watcher, read_key, canonical_key, generation, permanent, provider, z, wrapped_x, y]()
+            [this, watcher, read_key, canonical_key, generation, permanent, provider, z, wrapped_x, y, file_size]()
     {
+        this->pending_cache_read_bytes -= file_size;
         const QStringList request_keys = this->cache_reads_pending.take(read_key);
         const QByteArray data = watcher->result();
         watcher->deleteLater();
@@ -381,10 +391,14 @@ MapTiles::TileRequestResult MapTiles::getTileForHttp(
                 emit tileFailed(response_key, TileFailureReason::UpstreamError);
         }
     });
-    watcher->setFuture(QtConcurrent::run(&this->cache_read_pool, [read_path]()
+    watcher->setFuture(QtConcurrent::run(&this->cache_read_pool, [read_path, file_size]()
     {
         QFile file(read_path);
-        return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
+        if (!file.open(QIODevice::ReadOnly)) return QByteArray();
+        // An externally modified file can grow after admission; cap the actual
+        // allocation and reject it rather than loading an arbitrary amount.
+        const QByteArray data = file.read(file_size + 1);
+        return data.size() == file_size && file.atEnd() ? data : QByteArray();
     }));
     return { TileRequestStatus::Pending, {} };
 }

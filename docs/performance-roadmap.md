@@ -154,3 +154,11 @@ existing busy response. Missing paths still follow the existing download path.
 **Follow-up:** move provider cache-path metadata initialization and permanent
 cache existence probes off the event loop as well, and evaluate byte-budgeted
 read admission under representative large-file workloads.
+
+### Cold cache read memory admission
+
+Asynchronous cold-cache reads are limited to 64 unique jobs and a combined
+64 MiB reserved file payload budget. Disk files larger than this limit are
+rejected with the existing busy status instead of being loaded into memory.
+The read worker also bounds the actual read if a file changes after admission.
+

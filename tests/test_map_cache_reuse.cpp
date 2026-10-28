@@ -100,6 +100,29 @@ int main(int argc, char **argv)
                 "Asynchronous disk hit unexpectedly contacted upstream");
     }
 
+    // A sparse oversized cache file must be rejected before any disk worker
+    // tries to allocate its content. This verifies the read byte budget.
+    {
+        QTemporaryDir oversized_cache;
+        require(oversized_cache.isValid(), "Cannot create oversized tile cache");
+        const QString oversized_path = QDir(oversized_cache.path()).filePath(
+            QStringLiteral("maptiles/%1/6/31/22.png").arg(provider_id));
+        require(QDir().mkpath(QFileInfo(oversized_path).absolutePath()),
+                "Cannot create oversized cache fixture directories");
+        QFile oversized_file(oversized_path);
+        require(oversized_file.open(QIODevice::WriteOnly), "Cannot create oversized cache file");
+        require(oversized_file.resize(65LL * 1024 * 1024), "Cannot resize oversized cache file");
+        oversized_file.close();
+        MapTiles limited_reader(oversized_cache.path(), 2, 8);
+        limited_reader.configureProviders(providers, {}, {});
+        const MapTiles::TileRequestResult rejected = limited_reader.getTileForHttp(
+            provider_id, 6, 31, 22, QStringLiteral("oversized-read"));
+        require(rejected.status == MapTiles::TileRequestStatus::ServerBusy,
+                "Oversized cold cache tile should be rejected by memory admission");
+        require(limited_reader.upstreamActivity().active == 0,
+                "Oversized cached tile must not schedule an upstream download");
+    }
+
     // A cold disk hit with expired metadata must not even schedule a download.
     MapTiles existing(cache.path(), 2, 8);
     existing.configureProviders(providers, {}, {});

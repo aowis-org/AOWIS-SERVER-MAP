@@ -117,6 +117,7 @@ private:
     QThreadPool cache_read_pool;
     QHash<QString, QStringList> cache_reads_pending;
     quint64 cache_generation = 0;
+    qint64 pending_cache_read_bytes = 0;
     int pending_cache_writes = 0;
     qint64 pending_cache_write_bytes = 0;
     QSet<QString> cache_writes_pending_keys;
