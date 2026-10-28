@@ -22,6 +22,28 @@ int main()
     admission.release();
     CHECK(admission.count() == 0);
 
+    // Independent remote admission preserves slots for local/cache-hit work.
+    TerrainAdmission global_jobs(8);
+    TerrainAdmission remote_jobs(4);
+    for (int index = 0; index < 4; ++index)
+    {
+        CHECK(remote_jobs.tryAcquire());
+        CHECK(global_jobs.tryAcquire());
+    }
+    CHECK(!remote_jobs.tryAcquire());
+    for (int index = 0; index < 4; ++index)
+        CHECK(global_jobs.tryAcquire());
+    CHECK(!global_jobs.tryAcquire());
+    for (int index = 0; index < 4; ++index)
+    {
+        global_jobs.release();
+        remote_jobs.release();
+    }
+    for (int index = 0; index < 4; ++index)
+        global_jobs.release();
+    CHECK(global_jobs.count() == 0);
+    CHECK(remote_jobs.count() == 0);
+
     TerrainAdmission concurrent(1);
     std::atomic<int> success {0};
     std::vector<std::thread> threads;

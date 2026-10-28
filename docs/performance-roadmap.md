@@ -43,18 +43,19 @@ Cached tiles and already available terrain remain usable without external networ
 
 ## Terrain execution and concurrency
 
-Asynchronous terrain routes use separate cached-work and remote-capable `QThreadPool` instances. The remote-capable pool defaults to two workers and shares the existing terrain admission budget. Current defaults:
+Asynchronous terrain routes use separate cached-work and remote-capable `QThreadPool` instances. The remote-capable pool defaults to two workers. Remote-capable jobs have a separate admission cap of half the global terrain job limit (64 of 128 by default), as well as sharing the global budget. This reserves capacity for cache-hit and maintenance work when slow remote requests accumulate. Current defaults:
 
 | Budget | Default | Meaning |
 | --- | ---: | --- |
 | `terrain/maximum_workers` | 4 | Cached terrain processing and maintenance pool size; clamped to the job budget |
 | `terrain/maximum_remote_workers` | 2 | Independent remote-capable pool size, clamped to the shared job budget; slow upstream transfers occupy these workers |
 | `terrain/maximum_jobs` | 128 | Total admitted unique/ordinary terrain tasks, including queued tasks |
+| Remote-capable job admission | 64 | At most `max(1, maximum_jobs / 2)` remote-capable queued or running jobs, also counted against the global budget |
 | `server/max_pending_requests` | 2048 | Upper bound used for pending HTTP response waiters; shared by terrain tile, elevation and grid single-flight requests |
 | In-flight terrain grid reservation | 64 MiB | Estimated float32 output bytes for distinct admitted grid jobs |
 | Analysis grid dimensions | 512 × 512 | Maximum samples per HTTP analysis-grid request |
 
-Identical concurrent requests to normalized terrain tiles, point elevation, and analysis grids share an in-flight computation. The request identity includes the relevant dataset, coordinates/bounds, dimensions, and vertical datum where applicable. Each waiting client gets its own HTTP response; identical requests do not consume additional terrain job admission slots or an additional grid-byte reservation. Different requests still compete for admission. At capacity, the server responds **503 Service Unavailable** (with `Retry-After: 1` in admission paths).
+Identical concurrent requests to normalized terrain tiles, point elevation, and analysis grids share an in-flight computation. The request identity includes the relevant dataset, coordinates/bounds, dimensions, and vertical datum where applicable. Each waiting client gets its own HTTP response; identical requests do not consume additional terrain job admission slots or an additional grid-byte reservation. Different requests still compete for admission. Remote requests can reach their own admission limit while global slots remain for cached terrain. At capacity, the server responds **503 Service Unavailable** (with `Retry-After: 1` in admission paths).
 
 The grid byte budget accounts for estimated float-buffer output, **not** every intermediate decoder allocation, native raster buffer, waiting response or provider-cache allocation. These still need production memory profiling. Terrain cache deletion and upstream cancellation have their own endpoint semantics; do not assume every route is coalesced.
 

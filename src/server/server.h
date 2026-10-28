@@ -103,6 +103,8 @@ private:
     // Slow source acquisition is isolated from cached terrain processing.
     QThreadPool terrain_remote_pool;
     TerrainAdmission terrain_admission;
+    // Bounds queued and running remote-capable jobs independently of all terrain jobs.
+    TerrainAdmission terrain_remote_admission;
     TerrainByteAdmission terrain_grid_bytes;
     MapTiles *maptiles;
     Aowis::Map::TerrainData *terrain_data;

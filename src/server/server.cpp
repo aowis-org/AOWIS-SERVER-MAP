@@ -247,6 +247,7 @@ Server::Server(const Config &config, QObject *parent)
       config(config),
       tcp(new QTcpServer(this)),
       terrain_admission(qMax(1, config.maximum_terrain_jobs)),
+      terrain_remote_admission(qMax(1, config.maximum_terrain_jobs / 2)),
       terrain_grid_bytes(64ULL * 1024 * 1024),
       maptiles(new MapTiles(config.cache_directory, config.maximum_active_downloads,
                             config.maximum_pending_requests, this)),
@@ -389,9 +390,23 @@ QFuture<QHttpServerResponse> Server::submitTerrainTile(
         QLatin1Char('/') + QString::number(tile_x) + QLatin1Char('/') +
         QString::number(tile_y);
     const bool existing = this->pending_terrain_tiles.contains(key);
+    Aowis::Map::TerrainTileAddress address;
+    address.zoom = zoom;
+    address.x = quint32(tile_x);
+    address.y = quint32(tile_y);
+    const bool remote_job = this->terrain_data->isRemoteFetchEnabled() &&
+        !QFileInfo::exists(this->terrain_data->normalizedTilePath(dataset, address));
+    const bool remote_admitted = existing || (!this->shutting_down &&
+        this->pending_terrain_tile_count < this->config.maximum_pending_requests &&
+        (!remote_job ||
+        this->terrain_remote_admission.tryAcquire()));
+    const bool overall_admitted = existing ||
+        (remote_admitted && this->terrain_admission.tryAcquire());
+    if (!existing && remote_job && remote_admitted && !overall_admitted)
+        this->terrain_remote_admission.release();
     if (this->shutting_down ||
         this->pending_terrain_tile_count >= this->config.maximum_pending_requests ||
-        (!existing && !this->terrain_admission.tryAcquire()))
+        !overall_admitted)
     {
         QHttpServerResponse response(
             "Terrain service busy; retry later",
@@ -414,19 +429,12 @@ QFuture<QHttpServerResponse> Server::submitTerrainTile(
     if (existing)
         return future;
 
-    Aowis::Map::TerrainTileAddress address;
-    address.zoom = zoom;
-    address.x = quint32(tile_x);
-    address.y = quint32(tile_y);
     // A normalized cache hit never waits behind slow upstream transfers.
     // A cache miss runs on the separately bounded remote-capable pool.
     // This is workload isolation, not yet a split acquisition/CPU pipeline.
-    const QString normalized_path = this->terrain_data->normalizedTilePath(dataset, address);
-    QThreadPool *execution_pool =
-        this->terrain_data->isRemoteFetchEnabled() &&
-        !QFileInfo::exists(normalized_path)
-            ? &this->terrain_remote_pool : &this->terrain_worker_pool;
-    execution_pool->start([this, key, dataset, address]()
+    QThreadPool *execution_pool = remote_job
+        ? &this->terrain_remote_pool : &this->terrain_worker_pool;
+    execution_pool->start([this, key, dataset, address, remote_job]()
     {
         Aowis::Map::TerrainTileLookupResult result;
         try
@@ -439,6 +447,8 @@ QFuture<QHttpServerResponse> Server::submitTerrainTile(
             result.error_message = QStringLiteral("Terrain processing failed");
         }
         this->terrain_admission.release();
+        if (remote_job)
+            this->terrain_remote_admission.release();
         QMetaObject::invokeMethod(this, [this, key, result = std::move(result)]() mutable
         {
             const PendingPromises waiters = this->pending_terrain_tiles.take(key);
@@ -476,9 +486,17 @@ QFuture<QHttpServerResponse> Server::submitTerrainElevation(
             ? Aowis::Map::terrainVerticalDatumId(*requested_vertical_datum)
             : QStringLiteral("native"));
     const bool existing = this->pending_terrain_elevations.contains(key);
+    const bool remote_job = this->terrain_data->isRemoteFetchEnabled();
+    const bool remote_admitted = existing || (!this->shutting_down &&
+        this->pending_terrain_tile_count < this->config.maximum_pending_requests &&
+        (!remote_job || this->terrain_remote_admission.tryAcquire()));
+    const bool overall_admitted = existing ||
+        (remote_admitted && this->terrain_admission.tryAcquire());
+    if (!existing && remote_job && remote_admitted && !overall_admitted)
+        this->terrain_remote_admission.release();
     if (this->shutting_down ||
         this->pending_terrain_tile_count >= this->config.maximum_pending_requests ||
-        (!existing && !this->terrain_admission.tryAcquire()))
+        !overall_admitted)
     {
         QHttpServerResponse response(
             "Terrain service busy; retry later",
@@ -501,10 +519,10 @@ QFuture<QHttpServerResponse> Server::submitTerrainElevation(
     if (existing)
         return future;
 
-    QThreadPool *execution_pool = this->terrain_data->isRemoteFetchEnabled()
+    QThreadPool *execution_pool = remote_job
         ? &this->terrain_remote_pool : &this->terrain_worker_pool;
     execution_pool->start(
-        [this, key, dataset, latitude_deg, longitude_deg, requested_vertical_datum]()
+        [this, key, dataset, latitude_deg, longitude_deg, requested_vertical_datum, remote_job]()
     {
         Aowis::Map::TerrainElevationLookupResult result;
         try
@@ -518,6 +536,8 @@ QFuture<QHttpServerResponse> Server::submitTerrainElevation(
             result.error_message = QStringLiteral("Terrain processing failed");
         }
         this->terrain_admission.release();
+        if (remote_job)
+            this->terrain_remote_admission.release();
         QMetaObject::invokeMethod(this, [this, key, result = std::move(result)]() mutable
         {
             const PendingPromises waiters = this->pending_terrain_elevations.take(key);
@@ -554,14 +574,21 @@ QFuture<QHttpServerResponse> Server::submitTerrainGrid(
     // accumulating more than 64 MiB of estimated output buffers.
     const std::uint64_t estimated_bytes =
         std::uint64_t(request.columns) * std::uint64_t(request.rows) * sizeof(float);
+    const bool remote_job = this->terrain_data->isRemoteFetchEnabled();
     bool admitted = existing;
     if (!existing && !this->shutting_down &&
         this->pending_terrain_tile_count < this->config.maximum_pending_requests &&
         this->terrain_grid_bytes.tryAcquire(estimated_bytes))
     {
-        admitted = this->terrain_admission.tryAcquire();
+        const bool remote_admitted = !remote_job ||
+            this->terrain_remote_admission.tryAcquire();
+        admitted = remote_admitted && this->terrain_admission.tryAcquire();
         if (!admitted)
+        {
+            if (remote_job && remote_admitted)
+                this->terrain_remote_admission.release();
             this->terrain_grid_bytes.release(estimated_bytes);
+        }
     }
     if (this->shutting_down ||
         this->pending_terrain_tile_count >= this->config.maximum_pending_requests ||
@@ -588,9 +615,9 @@ QFuture<QHttpServerResponse> Server::submitTerrainGrid(
     if (existing)
         return future;
 
-    QThreadPool *execution_pool = this->terrain_data->isRemoteFetchEnabled()
+    QThreadPool *execution_pool = remote_job
         ? &this->terrain_remote_pool : &this->terrain_worker_pool;
-    execution_pool->start([this, key, request, estimated_bytes]()
+    execution_pool->start([this, key, request, estimated_bytes, remote_job]()
     {
         Aowis::Map::TerrainAnalysisGridResult result;
         try
@@ -617,6 +644,8 @@ QFuture<QHttpServerResponse> Server::submitTerrainGrid(
             }
         }
         this->terrain_admission.release();
+        if (remote_job)
+            this->terrain_remote_admission.release();
         QMetaObject::invokeMethod(this,
             [this, key, estimated_bytes, result = std::move(result), bytes = std::move(bytes)]() mutable
         {
