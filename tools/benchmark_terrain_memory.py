@@ -3,6 +3,7 @@
 import argparse
 import concurrent.futures
 import json
+import os
 import statistics
 import random
 import threading
@@ -19,6 +20,27 @@ def rss_kib(pid):
             if line.startswith('VmRSS:'):
                 return int(line.split()[1])
     raise RuntimeError('VmRSS unavailable for PID {}'.format(pid))
+
+
+
+def process_counters(pid):
+    """Read Linux process CPU time, actual disk bytes and thread count."""
+    with open('/proc/{}/stat'.format(pid), encoding='ascii') as stream:
+        line = stream.read()
+    # comm is parenthesized and may contain spaces or closing parentheses.
+    end_comm = line.rfind(')')
+    if end_comm < 0:
+        raise RuntimeError('Malformed /proc/{}/stat'.format(pid))
+    fields = line[end_comm + 2:].split()
+    ticks = float(os.sysconf('SC_CLK_TCK'))
+    cpu_seconds = (int(fields[11]) + int(fields[12])) / ticks
+    threads = int(fields[17])
+    with open('/proc/{}/io'.format(pid), encoding='ascii') as stream:
+        io_values = dict(line.strip().split(': ', 1) for line in stream if ': ' in line)
+    return {'cpu_seconds': cpu_seconds, 'threads': threads,
+            'read_bytes': int(io_values['read_bytes']),
+            'write_bytes': int(io_values['write_bytes'])}
+
 
 
 def percentile(values, fraction):
@@ -95,6 +117,7 @@ def run_stage(name, url, count, concurrency, timeout, pid, interval, recovery,
             stop.wait(interval)
 
     before = rss_kib(pid)
+    counters_before = process_counters(pid)
     watcher = threading.Thread(target=monitor, daemon=True)
     watcher.start()
     started = time.perf_counter()
@@ -105,6 +128,7 @@ def run_stage(name, url, count, concurrency, timeout, pid, interval, recovery,
         stop.set()
         watcher.join()
     elapsed = time.perf_counter() - started
+    counters_after = process_counters(pid)
     immediate = rss_kib(pid)
     if recovery:
         time.sleep(recovery)
@@ -123,6 +147,14 @@ def run_stage(name, url, count, concurrency, timeout, pid, interval, recovery,
             'mean': round(statistics.mean(times), 3),
             'p50': percentile(times, .5), 'p95': percentile(times, .95),
             'p99': percentile(times, .99), 'max': round(max(times), 3),
+        },
+        'process_activity': {
+            'cpu_seconds': round(counters_after['cpu_seconds'] - counters_before['cpu_seconds'], 3),
+            'cpu_cores_used': round((counters_after['cpu_seconds'] - counters_before['cpu_seconds']) / elapsed, 3),
+            'disk_read_bytes': counters_after['read_bytes'] - counters_before['read_bytes'],
+            'disk_write_bytes': counters_after['write_bytes'] - counters_before['write_bytes'],
+            'threads_before': counters_before['threads'],
+            'threads_after': counters_after['threads'],
         },
         'statuses': dict(sorted(statuses.items())),
         'errors': dict(sorted(errors.items())),
@@ -222,6 +254,12 @@ def main():
                         stage['latency_ms']['p95'], stage['rss_kib']['peak_observed'],
                         stage['statuses'], stage['errors'],
                         'PASS' if stage['passed'] else 'FAIL'), flush=True)
+                    print('  cpu={:.2f} cores disk_read={}KiB disk_write={}KiB threads={}→{}'.format(
+                        stage['process_activity']['cpu_cores_used'],
+                        stage['process_activity']['disk_read_bytes'] // 1024,
+                        stage['process_activity']['disk_write_bytes'] // 1024,
+                        stage['process_activity']['threads_before'],
+                        stage['process_activity']['threads_after']), flush=True)
                 # First-round warm-up can legitimately retain allocator pages; report both
                 # full-run growth and additional growth after the first round.
                 growth = last_recovered - baseline

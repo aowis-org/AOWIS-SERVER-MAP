@@ -190,6 +190,17 @@ python3 tools/benchmark_terrain_memory.py \
   --max-rss-growth-kib 16384 --output terrain-endurance.json
 ```
 
+Every stage also reports `process_activity`: server CPU-seconds, average CPU
+cores consumed during the request window, actual disk read/write bytes from
+Linux `/proc/<pid>/io`, and server thread counts before/after. High CPU core
+usage points toward computation; high disk bytes point toward physical I/O;
+low CPU and low disk I/O with rising response latency warrants investigating
+admission queues, locks, or upstream waits. The counters cover the **entire
+server process**, so benchmark a dedicated instance without unrelated traffic.
+Linux `read_bytes` does not include reads served from the page cache, and
+`cpu_cores_used` is an average, not a per-worker saturation measure. Disk
+counter access may require appropriate `/proc` permissions.
+
 Results list each round and a per-workload/concurrency summary. The RSS
 threshold compares recovered RSS after the *first* round to recovered RSS
 after the *last*, allowing for initial allocator warm-up; all rounds also
