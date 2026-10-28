@@ -48,6 +48,7 @@ public:
         int maximum_pending_requests = 2048;
         int maximum_terrain_jobs = 128;
         int maximum_terrain_workers = 4;
+        int maximum_terrain_remote_workers = 2;
         int terrain_connect_timeout_seconds = 30;
         int terrain_inactivity_timeout_seconds = 120;
         int terrain_download_deadline_seconds = 1800;

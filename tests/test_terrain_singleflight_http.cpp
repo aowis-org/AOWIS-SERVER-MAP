@@ -32,6 +32,11 @@ public:
         });
     }
 
+    static int remoteWorkerLimit(const Server &server)
+    {
+        return server.terrain_remote_pool.maxThreadCount();
+    }
+
     static void blockRemoteWorker(Server &server, QSemaphore &entered, QSemaphore &release)
     {
         server.terrain_remote_pool.start([&entered, &release]()
@@ -101,6 +106,12 @@ int main(int argc, char **argv)
     if (!server.start())
     {
         std::cerr << "Failed to start test server\n";
+        return 1;
+    }
+
+    if (TerrainSingleFlightTestAccess::remoteWorkerLimit(server) != 1)
+    {
+        std::cerr << "Remote worker limit must respect the shared job admission cap\n";
         return 1;
     }
 
@@ -404,6 +415,7 @@ int main(int argc, char **argv)
         isolation_config.terrain_remote_fetch_enabled = true;
         isolation_config.maximum_terrain_workers = 1;
         isolation_config.maximum_terrain_jobs = 4;
+        isolation_config.maximum_terrain_remote_workers = 2;
         isolation_config.maximum_pending_requests = 6;
         Server isolated_server(isolation_config);
         if (!isolated_server.start())

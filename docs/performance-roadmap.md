@@ -48,7 +48,7 @@ Asynchronous terrain routes use separate cached-work and remote-capable `QThread
 | Budget | Default | Meaning |
 | --- | ---: | --- |
 | `terrain/maximum_workers` | 4 | Cached terrain processing and maintenance pool size; clamped to the job budget |
-| Remote-capable terrain workers | 2 | Independently bounded pool for requests that can acquire upstream data; not yet separately configurable |
+| `terrain/maximum_remote_workers` | 2 | Independent remote-capable pool size, clamped to the shared job budget; slow upstream transfers occupy these workers |
 | `terrain/maximum_jobs` | 128 | Total admitted unique/ordinary terrain tasks, including queued tasks |
 | `server/max_pending_requests` | 2048 | Upper bound used for pending HTTP response waiters; shared by terrain tile, elevation and grid single-flight requests |
 | In-flight terrain grid reservation | 64 MiB | Estimated float32 output bytes for distinct admitted grid jobs |
@@ -66,6 +66,7 @@ Copernicus GLO-30 uses native source COGs, normalized `.aowterrain` cache files 
 
 ```ini
 [terrain]
+maximum_remote_workers=2
 connect_timeout_seconds=30
 inactivity_timeout_seconds=120
 download_deadline_seconds=1800

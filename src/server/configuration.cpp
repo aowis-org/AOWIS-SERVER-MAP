@@ -323,6 +323,10 @@ bool MapServerConfiguration::loadConfigFile(const QString &path, Server::Config 
                          256, &config->maximum_terrain_workers, error_message))
         return false;
 
+    if (!readPositiveInt(&settings, QStringLiteral("terrain/maximum_remote_workers"),
+                         256, &config->maximum_terrain_remote_workers, error_message))
+        return false;
+
     if (!readPositiveInt(&settings, QStringLiteral("terrain/connect_timeout_seconds"),
                          3600, &config->terrain_connect_timeout_seconds, error_message) ||
         !readPositiveInt(&settings, QStringLiteral("terrain/inactivity_timeout_seconds"),
@@ -599,7 +603,7 @@ QByteArray MapServerConfiguration::defaultConfigText()
         "coverage=\n\n"
         "[terrain]\n"
         "enabled=true\nremote_fetch_enabled=true\n"
-        "default_dataset=%5\nmaximum_jobs=%6\nmaximum_workers=%7\n"
+        "default_dataset=%5\nmaximum_jobs=%6\nmaximum_workers=%7\nmaximum_remote_workers=%8\n"
         "connect_timeout_seconds=30\ninactivity_timeout_seconds=120\n"
         "download_deadline_seconds=1800\ncache_directory=\ncoverage=\n\n"
         "[storage]\n"
@@ -647,7 +651,8 @@ QByteArray MapServerConfiguration::defaultConfigText()
      .arg(defaults.maximum_active_downloads)
      .arg(defaults.terrain_default_dataset)
      .arg(defaults.maximum_terrain_jobs)
-     .arg(defaults.maximum_terrain_workers).toUtf8();
+     .arg(defaults.maximum_terrain_workers)
+     .arg(defaults.maximum_terrain_remote_workers).toUtf8();
 }
 
 bool MapServerConfiguration::writeDefaultConfigFile(const QString &path, bool overwrite,

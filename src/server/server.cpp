@@ -273,7 +273,7 @@ Server::Server(const Config &config, QObject *parent)
         qMax(1, qMin(config.maximum_terrain_workers, config.maximum_terrain_jobs)));
     this->terrain_remote_pool.setObjectName(QStringLiteral("aowis-map-terrain-remote"));
     this->terrain_remote_pool.setMaxThreadCount(
-        qMax(1, qMin(2, config.maximum_terrain_jobs)));
+        qMax(1, qMin(config.maximum_terrain_remote_workers, config.maximum_terrain_jobs)));
     this->maptiles->setRemoteFetchEnabled(config.map_remote_fetch_enabled);
     this->maptiles->setPermanentDataDirectory(config.permanent_data_directory);
     this->maptiles->configureProviders(config.map_providers, config.download_coverage,
