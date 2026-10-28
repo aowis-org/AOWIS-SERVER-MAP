@@ -1,331 +1,128 @@
-# Performance roadmap — QHttpServer
+# Performance, concurrency and operations
 
-## Milestone 0: reproducible baseline
+This document describes the **current implementation** of AOWIS-SERVER-MAP. It is not a patch history or a claim that particular throughput targets have been measured. For endpoints, authentication, cache locations, provider configuration and deployment, start with the [README](../README.md).
 
-The tool `tools/benchmark_http.py` measures throughput, response status counts,
-network errors and client-observed p50/p95/p99 latency. It is intentionally
-client-side only and uses Python's standard library.
+## Architecture at a glance
 
-Start the map server with a local test configuration and populate an authorized
-cache fixture. For example, substitute an existing cached endpoint and run:
-
-```sh
-python3 tools/benchmark_http.py 'http://127.0.0.1:PORT/EXISTING/TILE' --requests 1000 --concurrency 16
+```text
+Apache / trusted local clients
+          |
+    QHttpServer (Qt event loop)
+          |
+   route validation / admission / QFuture responses
+          |
+          +-- raster tiles: RAM -> async disk read -> async upstream download
+          |                   \-> bounded async atomic disk write
+          |
+          +-- terrain tiles / elevation / grids
+                   |  shared HTTP waiter budget
+                   |  per-operation single-flight registry
+                   |  bounded unique-job admission
+                   |  grid output-byte reservations
+                   v
+              dedicated terrain QThreadPool
+                   |
+             TerrainData + Copernicus provider
+                   |
+            normalized/native caches -> upstream COG
 ```
 
-Run identical benchmarks against the direct local listener and, separately,
-Apache. Record server configuration, hardware, tile size, cache state,
-concurrency and CPU/RSS alongside JSON output. Test RAM-warm, disk-warm,
-cold-cache (using a **local mock upstream**, never a public tile provider),
-and mixed-map/terrain loads. Results are not interchangeable between runs
-with different request mixes.
+The frontend stays event-driven: waiting HTTP tile responses use `QFuture`/`QPromise` rather than dedicating a worker to every waiter. Network downloads for raster imagery use Qt's asynchronous network APIs. Terrain computation runs in a dedicated, bounded server-owned pool; Copernicus source acquisition **still uses a worker-local event loop** and can occupy a terrain worker while downloading. Terrain upstream I/O and CPU computation are **not yet separate execution domains**.
 
-The harness makes **one new HTTP connection per request** (urllib); it does not
-measure keep-alive reuse, event-loop lag, server memory, or per-stage queue
-times. It is a starting baseline, not a complete load-test suite. Keep tests
-local by default, and avoid benchmark traffic against public providers.
+## Raster tile delivery
 
-## Milestone 1: safe cache fast path
+Raster tiles are validated by provider ID and XYZ address, then looked up in a 256 MiB `QCache` memory cache (with permanent-data precedence preserved), permanent data and filesystem cache. The HTTP path uses `getTileForHttp()` so cold disk reads can complete asynchronously; the public library's `getTile()` remains synchronous for its existing callers.
 
-`MapTiles::getTile()` validates provider and coordinates first, then returns
-known memory-cache hits before resolving the provider's filesystem cache path.
-When a permanent cache directory is configured and the key is not known to
-be permanent, the existing permanent-file precedence is preserved.
+* Cold HTTP reads use a two-thread pool, at most **64 distinct queued/running reads**, and at most **64 MiB total reserved payload bytes**. Concurrent HTTP reads for the same tile are coalesced. Oversized cached files are rejected before loading them into memory.
+* Downloaded raster tiles are persisted through a separate two-thread pool, with at most **64 queued/running writes** and **64 MiB pending payload bytes**. Writes use atomic file publication. If the write queue or byte budget is full, the fetched tile can still be delivered but disk persistence is skipped.
+* Normal map downloads are asynchronous with a global active-download limit (default **32**), additional per-origin restrictions and deduplication of identical downloads. Limits for pending HTTP responses and queued upstream work must not be confused with active download capacity.
+* Cache deletion invalidates stale asynchronous disk reads. Pending writes overlapping a deletion are coordinated individually: queued invalidated writes do not publish deleted files, and active overlapping writes are synchronized before deletion. This does not make every deletion call nonblocking; an active overlapping commit can still delay it.
+* Cache-first clients can request `?delivery=cache-first` or `X-AOWIS-Tile-Delivery: cache-first`. An uncached request in progress may return **202 Accepted**, instead of holding the HTTP response open. See the README for endpoint and response behavior.
 
-## Remaining milestones (not yet implemented)
+Cached tiles and already available terrain remain usable without external network access. Raster and terrain have independent remote-fetch switches and download-coverage rules. Cache retention and licensing policy are documented in the README.
 
-1. Audit pending-response completion, disconnects, cancellation and shutdown.
-2. Add low-overhead internal counters and event-loop latency instrumentation.
-3. Offload bounded disk reads/writes while preserving atomic cache updates.
-4. Create a bounded dedicated terrain scheduler and isolate upstream I/O.
-5. Add terrain single-flight and fair work scheduling.
-6. Implement independent queue and memory budgets and overload handling.
-7. Improve upstream failure isolation and retry/negative-cache policy.
-8. Validate HTTP caching/Apache behavior and operational metrics.
-9. Run race, failure, stress and endurance tests before production release.
+## Terrain execution and concurrency
 
-No unmeasured performance improvement or production readiness is claimed by
-this initial patch.
+All asynchronous terrain routes run via a dedicated server-owned `QThreadPool`. Current defaults:
 
+| Budget | Default | Meaning |
+| --- | ---: | --- |
+| `terrain/maximum_workers` | 4 | Maximum concurrently executing terrain tasks; clamped to the job budget |
+| `terrain/maximum_jobs` | 128 | Total admitted unique/ordinary terrain tasks, including queued tasks |
+| `server/max_pending_requests` | 2048 | Upper bound used for pending HTTP response waiters; shared by terrain tile, elevation and grid single-flight requests |
+| In-flight terrain grid reservation | 64 MiB | Estimated float32 output bytes for distinct admitted grid jobs |
+| Analysis grid dimensions | 512 × 512 | Maximum samples per HTTP analysis-grid request |
 
-## Native test runner and loop-stall diagnostics
+Identical concurrent requests to normalized terrain tiles, point elevation, and analysis grids share an in-flight computation. The request identity includes the relevant dataset, coordinates/bounds, dimensions, and vertical datum where applicable. Each waiting client gets its own HTTP response; identical requests do not consume additional terrain job admission slots or an additional grid-byte reservation. Different requests still compete for admission. At capacity, the server responds **503 Service Unavailable** (with `Retry-After: 1` in admission paths).
 
-Run the complete native test suite from the repository root:
+The grid byte budget accounts for estimated float-buffer output, **not** every intermediate decoder allocation, native raster buffer, waiting response or provider-cache allocation. These still need production memory profiling. Terrain cache deletion and upstream cancellation have their own endpoint semantics; do not assume every route is coalesced.
+
+On shutdown, the server stops listening, requests upstream cancellation, drains outstanding response promises and joins its terrain pool before destroying terrain dependencies. A blocked operation that does not respond to cancellation may still delay shutdown. Connection-disconnect tracking, absolute job deadlines and cancellation semantics merit further stress testing.
+
+## Slow-network and offline behavior
+
+Copernicus GLO-30 uses native source COGs, normalized `.aowterrain` cache files and interprocess source locks. Download timeouts are independently configurable:
+
+```ini
+[terrain]
+connect_timeout_seconds=30
+inactivity_timeout_seconds=120
+download_deadline_seconds=1800
+```
+
+The connection limit bounds waiting for response progress, the inactivity limit detects stalled transfers, and the **30-minute absolute deadline** allows slow but continuously progressing downloads to continue much longer than two minutes. All three are bounded; these are not unlimited downloads. Source-lock acquisition can be canceled while waiting. Incomplete downloads are not published as complete cache objects.
+
+A failed or interrupted COG download currently must be started again; **HTTP Range resume is not implemented**. Despite the available timeout controls, Copernicus downloads can still occupy terrain workers until they finish, fail or are canceled. A dedicated network I/O scheduler is a future architectural improvement, not a current feature.
+
+To enforce offline use while retaining cached data, configure `terrain/remote_fetch_enabled=false` independently from `downloads/remote_fetch_enabled=false` for imagery. Restricting download coverage does **not** forbid reading already cached data outside that coverage.
+
+## Building and testing
+
+From the repository root:
 
 ```bash
-./compile_linux_tests.sh
-./compile_linux_tests.sh --debug
-./compile_linux_tests.sh --release
-./compile_linux_tests.sh --both
+./compile_linux_tests.sh --debug   # normal development gate, includes production server build
+./compile_linux_tests.sh --release # performance/release-mode checks
+./compile_linux_tests.sh --both    # major changes and release qualification
+./compile_linux.sh --no-run        # build without trying to bind the default port
 ```
 
-The runner configures CMake with Ninja and `BUILD_TESTING=ON`, builds the
-`aowis-server-map-tests` aggregate target, ensures that CTest has at least one
-test labeled `aowis`, and runs all such tests with failure output.
-With `AOWIS_SERVER_MAP_BUILD_SERVER=OFF`, the provider-state test is omitted.
+`compile_linux_tests.sh` builds the `aowis-server-map-tests` aggregate target (including the production executable when enabled), verifies that CTest registers tests labeled `aowis`, and runs them with failure output. The present suite contains **14 registered native tests**, including asynchronous cache reuse, provider state, terrain source lock/cancellation, HTTP single-flight concurrency and overload, terrain admission, and grid byte admission. The 14/14 Debug result was reported on 2026-10-28; it is not a benchmark or proof of race freedom.
 
-Event-loop stall diagnostics are opt-in. To log event-loop scheduling delays
-exceeding 100 ms, start the server with:
+`compile_linux.sh` starts the executable unless `--no-run` is passed. If another instance already listens at `127.0.0.1:8122`, a bind error after a successful compilation is expected and is not a compilation failure.
+
+### HTTP benchmark harness
+
+Use `tools/benchmark_http.py` against a **controlled local instance and fixture**:
+
+```bash
+python3 tools/benchmark_http.py 'http://127.0.0.1:8122/EXISTING/TILE' --requests 1000 --concurrency 16
+```
+
+It reports client-observed throughput, status codes, network errors and latency percentiles. It opens a fresh HTTP connection per request, so it does **not** measure persistent-connection reuse, internal event-loop lag, memory, queue residency or stage-level latency. Always record the hardware, cache warmth, dataset, tile size, configuration and whether traffic passed through Apache. Use a local mock upstream for cold-cache load tests; **do not load-test public tile providers**.
+
+Opt-in event-loop delay warnings:
 
 ```bash
 AOWIS_MAP_EVENT_LOOP_WARN_MS=100 ./build-linux/aowis-server-map
 ```
 
-This measurement detects delays between timer callbacks; it is not a precise
-per-request latency metric. Logs are throttled to one warning every 30 seconds,
-and the monitor is disabled when the environment variable is absent.
+These are timer-scheduling delay warnings, not precise request latency measurements. Output is throttled; no warnings are produced by default.
 
-## Lifecycle increment: pending map responses on shutdown
+## Deployment and safe operation
 
-The server now closes its listener, detaches map download callbacks, cancels upstream map downloads, and completes outstanding map-tile response promises with HTTP 503 in its destructor. New pending registrations are rejected once shutdown begins. This does not yet cover terrain worker lifetime and does not imply full graceful shutdown support.
+Use QHttpServer on loopback/private networks, with Apache or another appropriately configured TLS reverse proxy for public access. Both read and delete API keys have separate purposes. **The provider catalog PUT endpoint currently has no API-key authentication**: limit it to trusted clients at the network/proxy boundary. See [systemd](../configs/systemd/README.md) and [Apache](../configs/apache/README.md) deployment guidance.
 
-After successful application, `tools/apply_patch.sh` runs `tools/zip_map_server.sh` automatically to regenerate the adjacent `map.zip` source archive. If that export fails, the apply command reports failure even though the files have already been extracted.
+The supplied `tools/apply_patch.sh` accepts `aowis-server-map-*.zip` archives with repository-root-relative contents; after a successful application it calls `tools/zip_map_server.sh` to generate a fresh adjacent `map.zip` snapshot. The test runner is the normal validation gate after a patch.
 
-## Lifecycle increment: terrain worker ownership
+## Further engineering work (not implemented)
 
-All five asynchronous terrain HTTP routes now submit work to a dedicated
-`QThreadPool` owned by `Server`, rather than the global Qt thread pool. Its
-initial maximum concurrency is `max(1, idealThreadCount / 2)`.
+These are **open engineering goals**, not descriptions of the present server:
 
-During shutdown, the listener is closed, upstream cancellation is requested,
-and the terrain pool is joined before `TerrainData` is destroyed. This prevents
-terrain route lambdas from retaining a dangling `Server`/`TerrainData` pointer.
+1. Separate blocking Copernicus upstream acquisition from terrain CPU workers; introduce independent I/O concurrency, backpressure and fairness.
+2. Support validated, bounded resumable source downloads where providers accept `Range` requests, without ever publishing partial data.
+3. Account for all terrain intermediate/native raster memory and response payloads, not just grid output reservations.
+4. Add comprehensive per-stage metrics, disconnect-aware waiter cleanup, retry/circuit-breaker policies and operational dashboards where justified.
+5. Run sustained mixed workload, slow-upstream, shutdown, client-disconnect, sanitizer, and endurance tests; record repeatable before/after benchmarks before claiming performance gains.
 
-This is *not* yet a bounded queue or job-admission mechanism: `QThreadPool`
-can still queue work without an application-level limit, and an upstream
-operation that ignores cancellation can delay shutdown. These remain next
-steps. Re-run `./compile_linux_tests.sh --both` after applying the patch.
-
-## Terrain job admission (Phase 01 continuation)
-
-All five asynchronous terrain handlers now share a nonblocking admission budget.
-`[terrain] maximum_jobs=128` limits the combined number of running and queued
-terrain requests; when full, the frontend responds immediately with HTTP 503
-`Service Unavailable` and `Retry-After: 1`. Admission tokens are released
-when worker tasks exit, including through exceptions. This is a count limit,
-not yet a byte-weighted memory budget, single-flight scheduler, or timeout.
-The CTest `aowis-server-map-terrain-admission` exercises saturation, token
-release and concurrent acquisition.
-
-### Cache write isolation (Phase 03, first increment)
-
-Completed upstream map tiles now use a dedicated two-thread cache-write pool for
-`QSaveFile` persistence. Up to 64 pending writes are admitted; beyond that,
-responses still deliver the downloaded bytes but persistence is skipped rather
-than allocating an unbounded write backlog. The downloaded tile is published
-to RAM immediately to avoid duplicate downloads. The `tileReady` signal remains
-deferred until the disk-save attempt finishes for admitted writes. Cache
-removal serializes against pending writes. This deliberately does **not** yet
-move cold disk-cache reads or provider-path initialization off the event loop.
-
-### Build and persistence regression gate
-
-The `aowis-server-map-tests` aggregate target now also compiles the production
-`aowis-server-map-server` executable when server builds are enabled. Both Debug
-and Release test runs thus catch Qt HTTP API compilation errors in production
-handlers, even when no HTTP integration test exercises them. The cache-reuse
-test also checks that `tileReady` is not emitted before an admitted asynchronous
-cache write has published its complete file. This is a correctness gate for the
-cache-I/O work; asynchronous cold-cache reads remain a subsequent milestone.
-
-### Phase 03: bounded cache-write memory
-
-Asynchronous map cache persistence is limited to 64 outstanding writes **and**
-64 MiB of queued/in-flight payload bytes. When either budget is exhausted,
-the tile is returned without persistent storage; this protects the HTTP
-event loop against an oversized cache-write backlog. These are independent
-of the 256 MiB memory-tile cache budget. Cold disk cache reads remain
-synchronous and are the next separate migration step.
-
-### Phase 03: asynchronous cold HTTP cache reads
-
-The HTTP tile endpoint now calls `MapTiles::getTileForHttp()`. Warm RAM
-hits return immediately; established cold disk hits use a dedicated two-worker
-read pool. Up to 64 unique cold reads can be outstanding; simultaneous
-requests for the same canonical tile share one disk read. The original
-`getTile()` API remains synchronous for existing native callers and tests.
-
-Files are read in a worker, but cache publication, signal delivery and network
-fallback remain in the owning Qt event-loop thread. A configuration/deletion
-generation prevents publishing file contents obtained from an obsolete cache
-configuration. When the read queue is saturated the HTTP route returns its
-existing busy response. Missing paths still follow the existing download path.
-
-**Follow-up:** move provider cache-path metadata initialization and permanent
-cache existence probes off the event loop as well, and evaluate byte-budgeted
-read admission under representative large-file workloads.
-
-### Cold cache read memory admission
-
-Asynchronous cold-cache reads are limited to 64 unique jobs and a combined
-64 MiB reserved file payload budget. Disk files larger than this limit are
-rejected with the existing busy status instead of being loaded into memory.
-The read worker also bounds the actual read if a file changes after admission.
-
-
-### Phase 03: invalidated cold reads
-
-Cache deletion and provider reconfiguration now cancel pending asynchronous
-cache reads rather than interpreting them as ordinary disk misses. This avoids
-accidental upstream refetches and stale response delivery after administrative
-invalidation. Genuine read failures with an unchanged cache generation retain
-the existing fallback behavior. The cache reuse regression test covers deletion
-while a read completion is queued.
-
-### Phase 03: nonblocking cache-read invalidation during deletion
-
-Administrative tile deletion no longer waits for all cache-read workers. Each
-read operates on its own file handle and the generation guard on completion
-cancels results invalidated by a deletion. Cache-write workers still require a
-completion barrier before filesystem removal; eliminating that barrier safely
-requires a follow-up per-tile write/delete coordinator. Invalid deletion
-parameters are now rejected before mutating the cache generation, preserving
-unrelated pending reads. The existing cache-reuse regression exercises both
-pending-read invalidation and invalid deletion input.
-
-### Phase 03: narrow cache-write deletion barrier
-
-Cache deletion no longer waits for outstanding asynchronous cache writes
-when none of their canonical tile keys overlap the requested provider,
-zoom, and coordinate ranges. A matching write still triggers the existing
-write-pool drain before filesystem removal to prevent a deleted tile from
-reappearing. This is a limited optimization rather than fully asynchronous
-delete handling: overlapping deletion may still block while unrelated
-workers finish, and the filesystem traversal itself remains synchronous.
-
-## Cache write/delete coordination
-
-Cache writes now carry independent synchronization states. Deletion marks only
-writes overlapping the requested tile range as invalidated and synchronizes
-with their per-write mutexes before deleting the files. In-flight writes that
-have already begun publishing complete before deletion removes their files;
-queued invalidated writes skip publication. This replaces the global cache
-write-pool `waitForDone()` barrier, avoiding waits on unrelated writes.
-Deletion may still wait for an *overlapping* write in progress; making that
-operation fully nonblocking requires an asynchronous deletion API and distinct
-HTTP completion semantics. Test this behavior under heavy write/delete traffic
-before considering it production-qualified.
-
-## Completed-write deletion regression
-
-The cache-reuse integration test now deletes an asynchronously persisted tile,
-checks it does not reappear after the event loop processes delayed callbacks,
-and verifies that a neighboring tile is preserved. This covers the completed
-write path; **it does not deterministically force deletion to overlap an active
-`QSaveFile::commit()`**. A controllable write-pause test seam or dedicated
-worker-level harness is still needed before declaring the active-write race
-fully stress-tested.
-
-## Deterministic per-write invalidation regression
-
-The cache-reuse test now uses a test-only friend accessor to inject a pending
-write state, holds the production per-write mutex in a worker, then deletes
-the overlapping tile. The worker checks the invalidation marker before any
-publication; deletion must wait for the worker and leave no tile behind. A
-five-second watchdog prevents an invalidation regression from hanging the
-test indefinitely. This is a deterministic synchronization test, **not** a
-controlled test inside `QSaveFile::commit()` itself. Filesystem failure and
-crash-consistency tests remain future work.
-
-## Phase 04: independently bounded terrain workers
-
-`[terrain] maximum_workers=4` limits simultaneously executing terrain tasks
-(independently of `[terrain] maximum_jobs=128`, which bounds running plus queued
-requests). The actual pool limit is clamped to `maximum_jobs`. Valid worker
-settings are 1..256; invalid configurations fail validation. This prevents
-large hosts from automatically launching half their logical CPUs worth of
-blocking terrain fetches. The pool still mixes I/O and CPU; splitting terrain
-upstream retrieval into an asynchronous domain remains future work.
-
-## Phase 04: terrain tile single-flight (initial increment)
-
-Identical in-flight GET requests for an `.aowterrain` tile now share one
-terrain worker operation and one terrain admission slot. Each HTTP request
-retains its own response promise; the completed tile data (or error) is sent
-to every waiter on the server event-loop thread. Waiting responses are capped
-by `maximum_pending_requests`. Shutdown completes outstanding tile waiters with
-503 after the terrain worker pool drains. Other terrain endpoints retain the
-existing independent-job behavior; deduplication for grid and elevation
-operations is still pending.
-
-The new concurrency path requires a full Qt production-server compile and an
-integration test using multiple concurrent terrain HTTP requests before it
-can be considered fully qualified.
-
-### Terrain single-flight overload regression
-
-The HTTP integration test now uses a six-response pending budget and a
-single admitted terrain job. While the terrain worker is deliberately blocked,
-it verifies that six requests share the same job, a seventh request for the
-same tile returns HTTP 503, and a different tile is also rejected with HTTP
-503. Rejection must not increase the pending-response count, unique-job count,
-or admitted-job count. Once unblocked, all original waiters must finish and the
-single-flight registry must be empty. This verifies the overload behavior at
-actual HTTP request boundaries, not just the admission counter.
-
-### Terrain admission recovery regression
-
-After the single-flight overload test releases the blocked worker and all
-six shared requests complete, the integration test checks that no pending
-waiters, unique jobs, or terrain admission slots remain. It then requests a
-previously rejected different tile and requires the normal offline 404
-response, followed by another zero-capacity-leak check. This catches stale
-registration or admission leaks that only become visible after overload.
-
-### Elevation HTTP single-flight
-
-The `/terrain/v1/elevation` GET route now shares in-flight computations for
-identical numeric latitude/longitude, default dataset and requested vertical
-datum. It uses the same pending-response budget and terrain job admission
-counter as terrain tile single-flight. Each waiting client owns its own
-response promise, and shutdown drains the elevation registry after workers
-complete. The terrain HTTP integration test exercises deduplication, overload,
-completion and capacity recovery for elevation requests.
-
-### Phase 04 — Terrain analysis grid single-flight
-
-Identical concurrent analysis-grid GET requests now share a single terrain
-computation and a single admitted job. The canonical request key includes the
-resolved dataset, all four numeric bounds, columns, and rows. Grid requests
-share the existing pending-HTTP-response limit with terrain tiles and
-individual elevation lookups, and preserve the existing status-code and binary
-float32 little-endian output contract. Each result is serialized once for its
-waiting clients. Grid dimensions remain limited to 512×512 (at most 1 MiB of
-binary float samples per unique grid result); the configured terrain job count
-limits concurrent unique computations. HTTP regression coverage verifies
-identical and numerically equivalent queries, overload, and cleanup.
-
-### Phase 04 — Grid output memory admission
-
-Unique in-flight analysis grids now reserve `columns * rows * sizeof(float)`
-bytes against a 64 MiB budget, in addition to the normal terrain job budget.
-Identical HTTP requests share one reservation. Memory reservations remain held
-until the event-loop completion callback delivers the results and are released
-on success or failure. This budget bounds estimated float output data only; it
-does not cap provider-internal raster decompression, cache usage, or multiple
-client response copies. The byte counter is independently regression-tested.
-
-## Phase 04: cancellation-aware Copernicus source lock waits
-
-Copernicus source downloads use a cross-process `.lock` file to avoid
-concurrent writes to the same GeoTIFF. Waiting for this lock previously
-blocked a terrain worker for up to three minutes even after upstream
-cancellation. The lock wait now checks the provider cancellation generation
-at least once per approximately 100 ms lock-attempt interval. The total
-lock timeout, successful download behavior, and lock lifetime are unchanged.
-The terrain-provider test holds the source lock while issuing a request,
-cancels the provider, and verifies that the request returns promptly. This
-does not yet separate upstream I/O from CPU worker capacity.
-
-## Phase 04: absolute Copernicus download deadline
-
-Copernicus source transfers now have a 120-second elapsed-time deadline in
-addition to Qt's inactivity-based transfer timeout. The timer aborts a reply
-that continuously dribbles bytes without completing; incomplete `QSaveFile`
-content is discarded, and the provider reports a network error. Explicit
-shutdown cancellation still takes precedence. The worker-local event loop and
-terrain CPU/I/O isolation remain separate future work. Test against a controlled
-slow upstream before relying on this for production recovery guarantees.
-
-### Slow-network terrain downloads
-Copernicus source downloads now have independent configurable connect, inactivity and total timeouts (30 / 120 / 1800 seconds by default). Already cached sources remain usable offline. Incomplete transfers are discarded atomically. Resumable Range downloads are not yet implemented.
+The architectural objective is to keep cached requests responsive under pressure while bounding work and resource usage. There are no published throughput or latency guarantees yet.

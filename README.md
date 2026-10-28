@@ -13,6 +13,7 @@ are disabled or geographically restricted.
 ## Contents
 
 - [Build, run and test](#build-run-and-test)
+- [Performance and concurrency](#performance-and-concurrency)
 - [Configuration and command line](#configuration-and-command-line)
 - [Provider management](#provider-management)
 - [Geographic download coverage](#geographic-download-coverage)
@@ -32,11 +33,20 @@ WebSockets, HttpServer and Concurrent), and libtiff. On Debian-based systems:
 ```
 
 The first command installs build dependencies and compiles without starting the
-service; the second builds and starts it. For subsequent build-only runs:
+service; the second builds and starts it. For everyday development and regression testing, use the project-root test
+runner. It builds the test suite **and production server** and then runs the
+registered native tests:
+
+```bash
+./compile_linux_tests.sh --debug
+```
+
+Use `--release` for release-mode validation and performance work, or `--both`
+for major changes and release qualification. To build the ordinary executable
+without attempting to bind its listener:
 
 ```bash
 ./compile_linux.sh --no-run
-ctest --test-dir build-linux --output-on-failure
 ```
 
 The executable is `build-linux/aowis-server-map`. On non-Debian Linux systems,
@@ -71,6 +81,32 @@ configuration does not already exist**. It does not overwrite an existing
 administrator configuration. Apache site templates are installed disabled.
 See [Debian service instructions](configs/systemd/README.md) and
 [Debian package notes](debian/aowis-server-map.README.Debian).
+
+## Performance and concurrency
+
+The server keeps QHttpServer's asynchronous response model. Map imagery uses a
+256 MiB memory cache, asynchronous cold-cache disk reads, asynchronous bounded
+atomic writes, and deduplicated upstream requests. Terrain requests use a
+dedicated worker pool with explicit admission, shared in-flight jobs for
+identical terrain tile, elevation and grid requests, and a separate 64 MiB
+estimated grid-output reservation budget.
+
+Default resource controls include two cache-read and two cache-write workers,
+64 pending operations and 64 MiB pending payloads in each cache-I/O domain,
+32 active raster downloads, four terrain workers and 128 admitted terrain
+jobs. These are **independent limits**, not a promise of fixed throughput.
+Blocking Copernicus source downloads can still occupy terrain workers; they
+are not yet handled by a separate network I/O executor.
+
+For poor connections, Copernicus acquisition has configurable connection,
+network-inactivity and total-duration limits (30 seconds, 120 seconds and
+30 minutes by default). Complete cached data remains usable offline. HTTP
+Range resume for interrupted source downloads is **not yet implemented**.
+
+See [Performance, concurrency and operations](docs/performance-roadmap.md) for
+the current execution model, admission behavior, testing, limitations, and
+future work. That document describes the current system, not individual patch
+history.
 
 ## Configuration and command line
 
@@ -116,7 +152,7 @@ The main settings are:
 | INI section/key | Meaning |
 | --- | --- |
 | `server/listen_address`, `server/port` | Bind address and TCP port (`127.0.0.1:8122` by default) |
-| `server/max_pending_requests` | Maximum pending HTTP raster requests (default 2048) |
+| `server/max_pending_requests` | Limit on pending raster responses and shared terrain single-flight HTTP waiters (default 2048) |
 | `downloads/cache_directory` | Root of the raster/terrain cache; empty selects the runtime default |
 | `downloads/max_active_downloads` | Simultaneous raster upstream downloads (default 32) |
 | `downloads/remote_fetch_enabled` | Permit **2D raster** upstream requests (default `true`) |
@@ -125,6 +161,10 @@ The main settings are:
 | `terrain/remote_fetch_enabled` | Permit **terrain** upstream requests (default `true`) |
 | `terrain/default_dataset` | Dataset for point-elevation queries (`copernicus-glo30`) |
 | `terrain/cache_directory`, `terrain/coverage` | Terrain cache root and default coverage policy |
+| `terrain/maximum_jobs`, `terrain/maximum_workers` | Terrain queued/running job limit (128) and execution concurrency (4) |
+| `terrain/connect_timeout_seconds` | Copernicus connection/initial-response timeout (30 s) |
+| `terrain/inactivity_timeout_seconds` | Copernicus transfer inactivity timeout (120 s) |
+| `terrain/download_deadline_seconds` | Copernicus absolute download deadline (1800 s) |
 | `storage/permanent_data_directory` | Read-only-in-practice administrator-supplied data outside disposable caches |
 | `storage/provider_state_file` | API-managed provider catalog path; normally set automatically |
 | `regions/geojson_file` | Optional GeoJSON definitions for named geographic regions |

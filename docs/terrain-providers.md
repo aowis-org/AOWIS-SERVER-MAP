@@ -60,6 +60,23 @@ GLO-30 Public is not complete in a small number of areas/countries. The provider
 `copernicus-glo30` dataset identifier would misrepresent the resolution and
 source metadata. GLO-90 is not a configured dataset in this implementation.
 
+### Slow connections, cancellation and offline operation
+
+Provider-native source files are published only after successful complete
+acquisition. Copernicus downloads use separately configurable connection,
+inactivity and absolute-duration limits in `[terrain]`: 30 seconds, 120 seconds
+and 1800 seconds respectively by default. Slow but progressing connections
+can continue within the total deadline. The source-file lock wait checks for
+cancellation so shutdown does not have to wait for the entire lock timeout.
+
+An interrupted transfer currently restarts rather than resuming with HTTP
+Range. Native COGs already in cache, and normalized tiles already generated,
+remain usable when Internet access is unavailable or remote fetching is
+disabled. Upstream acquisition still runs within terrain worker operations;
+it is not yet isolated in an independent network worker pool. For concurrency
+budgets and remaining limitations see
+[Performance, concurrency and operations](performance-roadmap.md).
+
 ### Dataset catalog
 
 `CopernicusTerrainProvider::datasets()` describes the dataset for `GET /terrain/v1/datasets`:
