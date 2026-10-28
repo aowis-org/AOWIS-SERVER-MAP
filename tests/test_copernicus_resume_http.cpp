@@ -4,6 +4,7 @@
 #include <QCoreApplication>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QTemporaryDir>
@@ -82,6 +83,124 @@ MockUpstream launchUpstream(int step, const QByteArray &payload)
     mock.port = port.get();
     return mock;
 }
+
+
+// Exercise a real Range request against servers that send a full replacement
+// or a mismatched partial response. A nonmatching 206 must never be published.
+MockUpstream launchRecoveryUpstream(int scenario, const QByteArray &payload)
+{
+    std::promise<quint16> ready;
+    std::promise<bool> completed;
+    MockUpstream mock;
+    mock.outcome = completed.get_future();
+    std::future<quint16> port = ready.get_future();
+    mock.thread = std::thread([scenario, payload, ready = std::move(ready),
+                               completed = std::move(completed)]() mutable
+    {
+        QTcpServer server;
+        if (!server.listen(QHostAddress::LocalHost, 0))
+        {
+            ready.set_value(0);
+            completed.set_value(false);
+            return;
+        }
+        ready.set_value(server.serverPort());
+        if (!server.waitForNewConnection(7000))
+        {
+            completed.set_value(false);
+            return;
+        }
+        QTcpSocket *socket = server.nextPendingConnection();
+        QByteArray request;
+        while (!request.contains("\r\n\r\n") && request.size() < 16384)
+        {
+            if (!socket->waitForReadyRead(7000))
+                break;
+            request += socket->readAll();
+        }
+        const QByteArray normalized = request.toLower();
+        const bool headers_ok = normalized.contains("range: bytes=300-") &&
+                                normalized.contains("if-range: \"v1\"");
+        QByteArray response;
+        if (scenario == 0 || scenario == 1)
+        {
+            // 200 with a different validator models a changed upstream entity;
+            // 200 with the original validator models a server ignoring Range.
+            response = "HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nETag: ";
+            response += scenario == 0 ? "\"v2\"\r\n" : "\"v1\"\r\n";
+            response += "Connection: close\r\n\r\n";
+            response += payload;
+        }
+        else
+        {
+            // Wrong entity validator in 206: data may be internally complete,
+            // but must not be appended to a prefix from a different entity.
+            response = "HTTP/1.1 206 Partial Content\r\n"
+                       "Content-Length: 700\r\n"
+                       "Content-Range: bytes 300-999/1000\r\n"
+                       "ETag: \"v2\"\r\nConnection: close\r\n\r\n";
+            response += payload.mid(300);
+        }
+        socket->write(response);
+        socket->flush();
+        socket->waitForBytesWritten(5000);
+        socket->disconnectFromHost();
+        socket->waitForDisconnected(2000);
+        completed.set_value(headers_ok);
+    });
+    mock.port = port.get();
+    return mock;
+}
+
+bool verifyRecoveryScenario(const QString &root, int scenario,
+                            const QByteArray &old_payload,
+                            const QByteArray &new_payload)
+{
+    const QString directory = QDir(root).filePath(QStringLiteral("recovery-%1").arg(scenario));
+    const QString source = QDir(directory).filePath(
+        "copernicus/glo30/Copernicus_DSM_COG_10_N50_00_E008_00_DEM.tif");
+    const QString partial = source + ".partial";
+    const QString metadata = source + ".partial.meta";
+    if (!QDir().mkpath(QFileInfo(source).absolutePath()))
+        return require(false, "Unable to create source directory");
+    QFile prefix(partial);
+    if (!require(prefix.open(QIODevice::WriteOnly) &&
+                 prefix.write(old_payload.left(300)) == 300,
+                 "Unable to seed partial source"))
+        return false;
+    prefix.close();
+    const Aowis::Map::Internal::CopernicusPartialState state{300, 1000, "\"v1\""};
+    if (!require(Aowis::Map::Internal::saveCopernicusPartialState(
+                     metadata, state, 256LL * 1024LL * 1024LL),
+                 "Unable to seed resume metadata"))
+        return false;
+
+    MockUpstream mock = launchRecoveryUpstream(scenario, new_payload);
+    if (!require(mock.port != 0, "Recovery mock upstream could not bind"))
+    {
+        mock.thread.join();
+        return false;
+    }
+    QString error;
+    const bool success = Aowis::Map::Internal::fetchCopernicusSourceForIntegrationTest(
+        directory, QUrl(QStringLiteral("http://127.0.0.1:%1/source.tif").arg(mock.port)),
+        &error);
+    const bool headers_ok = mock.outcome.get();
+    mock.thread.join();
+    if (!require(headers_ok, "Recovery request omitted Range or If-Range") ||
+        !require(success == (scenario != 2), "Incorrect recovery response result"))
+        return false;
+    if (scenario == 2)
+        return require(!QFile::exists(source), "Mismatched range was published") &&
+               require(!QFile::exists(partial) && !QFile::exists(metadata),
+                       "Invalid partial state was retained");
+    QFile published(source);
+    return require(published.open(QIODevice::ReadOnly) &&
+                   published.readAll() == new_payload,
+                   "Full replacement did not publish the new source") &&
+           require(!QFile::exists(partial) && !QFile::exists(metadata),
+                   "Partial state survived full replacement");
+}
 }
 
 int main(int argc, char **argv)
@@ -129,6 +248,13 @@ int main(int argc, char **argv)
                  "Resumed source bytes differ from original") ||
         !require(!QFile::exists(partial) && !QFile::exists(metadata),
                  "Partial state remained after successful publication"))
+        return 1;
+    QByteArray changed_payload(1000, '\0');
+    for (qsizetype i = 0; i < changed_payload.size(); ++i)
+        changed_payload[i] = char('a' + i % 26);
+    if (!verifyRecoveryScenario(temp.path(), 0, payload, changed_payload) ||
+        !verifyRecoveryScenario(temp.path(), 1, payload, payload) ||
+        !verifyRecoveryScenario(temp.path(), 2, payload, changed_payload))
         return 1;
     return 0;
 }

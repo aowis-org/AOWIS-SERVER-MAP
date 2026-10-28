@@ -199,5 +199,6 @@ The `aowis-server-map-copernicus-resume-http` CTest case uses a loopback HTTP
 server to exercise the production source downloader without external internet.
 It interrupts a full response and a subsequent range response, verifies
 `Range`/`If-Range`, and checks that only the completed concatenated source is
-published. The source URL override is an internal test seam; production
-Copernicus URLs remain fixed.
+published. It also verifies full-response fallback when a server ignores Range,
+a changed upstream ETag, and rejection of a mismatched 206 response. The source
+URL override is an internal test seam; production Copernicus URLs remain fixed.
