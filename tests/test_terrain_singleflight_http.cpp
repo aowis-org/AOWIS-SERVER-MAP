@@ -38,6 +38,25 @@ public:
         return server.submitTerrainTile(dataset, zoom, x, y);
     }
 
+    static QFuture<QHttpServerResponse> submitElevationDirect(Server &server)
+    {
+        return server.submitTerrainElevation(
+            QStringLiteral("copernicus-glo30"), 48.0, 11.0, std::nullopt);
+    }
+
+    static QFuture<QHttpServerResponse> submitGridDirect(Server &server)
+    {
+        Aowis::Map::TerrainAnalysisGridRequest request;
+        request.dataset = QStringLiteral("copernicus-glo30");
+        request.bounds.west_deg = 10.0;
+        request.bounds.south_deg = 48.0;
+        request.bounds.east_deg = 10.1;
+        request.bounds.north_deg = 48.1;
+        request.columns = 2;
+        request.rows = 2;
+        return server.submitTerrainGrid(request);
+    }
+
     static bool reserveRemoteJob(Server &server)
     {
         if (!server.terrain_remote_admission.tryAcquire())
@@ -821,6 +840,63 @@ int main(int argc, char **argv)
             std::cerr << "Shutdown did not drain queued terrain handoff future: queued="
                       << shutdown_queued << " finished=" << shutdown_future.isFinished()
                       << " results=" << shutdown_future.resultCount() << '\n';
+            return 1;
+        }
+    }
+    // Elevation and grid continuations have the same shutdown contract as
+    // tiles: remote acquisition may finish while CPU work is still queued.
+    for (int kind = 0; kind < 2; ++kind)
+    {
+        QTemporaryDir cache;
+        if (!cache.isValid())
+            return 1;
+        Server::Config config;
+        config.port = 0;
+        config.cache_directory = cache.path();
+        config.terrain_cache_directory = cache.path() + "/terrain";
+        config.map_remote_fetch_enabled = false;
+        config.terrain_remote_fetch_enabled = true;
+        config.copernicus_enabled = false;
+        config.maximum_terrain_workers = 1;
+        config.maximum_terrain_remote_workers = 1;
+        config.maximum_terrain_jobs = 2;
+        Server *server = new Server(config);
+        QSemaphore entered;
+        QSemaphore release;
+        TerrainSingleFlightTestAccess::blockWorker(*server, entered, release);
+        if (!entered.tryAcquire(1, 3000))
+        {
+            release.release();
+            delete server;
+            std::cerr << "Failed to occupy CPU worker for handoff shutdown test\n";
+            return 1;
+        }
+        QFuture<QHttpServerResponse> future = kind == 0
+            ? TerrainSingleFlightTestAccess::submitElevationDirect(*server)
+            : TerrainSingleFlightTestAccess::submitGridDirect(*server);
+        timer.restart();
+        bool queued = false;
+        while (timer.elapsed() < 3000)
+        {
+            app.processEvents(QEventLoop::AllEvents, 20);
+            queued = TerrainSingleFlightTestAccess::remoteAdmittedJobs(*server) == 0 &&
+                TerrainSingleFlightTestAccess::admittedJobs(*server) == 1 &&
+                (kind == 0 ? TerrainSingleFlightTestAccess::elevationJobs(*server) == 1
+                           : TerrainSingleFlightTestAccess::gridJobs(*server) == 1) &&
+                !future.isFinished();
+            if (queued)
+                break;
+            QThread::msleep(1);
+        }
+        release.release();
+        delete server;
+        if (!queued || !future.isFinished() || future.resultCount() != 1)
+        {
+            std::cerr << "Shutdown did not drain "
+                      << (kind == 0 ? "elevation" : "grid")
+                      << " handoff: queued=" << queued
+                      << " finished=" << future.isFinished()
+                      << " results=" << future.resultCount() << '\n';
             return 1;
         }
     }
