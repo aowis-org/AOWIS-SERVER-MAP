@@ -15,6 +15,7 @@
 #include <QNetworkRequest>
 #include <QSaveFile>
 #include <QSet>
+#include <QTimer>
 #include <QUrl>
 
 #include <tiffio.h>
@@ -35,6 +36,8 @@ constexpr int CopernicusMinimumNormalizedZoom = 8;
 constexpr int CopernicusMaximumNormalizedZoom = 14;
 constexpr double CopernicusNominalResolutionM = 30.0;
 constexpr int RemoteTransferTimeoutMs = 120000;
+// Absolute bound even when a peer sends data often enough to reset Qt's inactivity timer.
+constexpr int RemoteDownloadDeadlineMs = 120000;
 constexpr int ProviderSourceLockTimeoutMs = 180000;
 constexpr int ProviderSourceStaleLockMs = 10 * 60 * 1000;
 constexpr qint64 MaximumSourceDownloadBytes = 256LL * 1024LL * 1024LL;
@@ -288,6 +291,15 @@ SourceLoadResult downloadSourceTile(const QString &provider_cache_directory,
         }
     }
     QEventLoop event_loop;
+    QTimer download_deadline;
+    download_deadline.setSingleShot(true);
+    bool deadline_expired = false;
+    QObject::connect(&download_deadline, &QTimer::timeout, &event_loop,
+                     [&deadline_expired, reply]()
+    {
+        deadline_expired = true;
+        reply->abort();
+    });
     bool write_failed = false;
     qint64 downloaded_bytes = 0;
 
@@ -311,7 +323,10 @@ SourceLoadResult downloadSourceTile(const QString &provider_cache_directory,
         }
     });
     QObject::connect(reply, &QNetworkReply::finished, &event_loop, &QEventLoop::quit);
-    event_loop.exec();
+    download_deadline.start(RemoteDownloadDeadlineMs);
+    if (!reply->isFinished())
+        event_loop.exec();
+    download_deadline.stop();
 
     bool canceled = false;
     if (upstream_mutex != nullptr)
@@ -348,6 +363,16 @@ SourceLoadResult downloadSourceTile(const QString &provider_cache_directory,
     const QString network_error_text = reply->errorString();
     const QUrl request_url = reply->url();
     reply->deleteLater();
+
+    if (deadline_expired)
+    {
+        output.cancelWriting();
+        result.status = SourceLoadStatus::NetworkError;
+        result.error_message = QStringLiteral("Copernicus upstream download exceeded the %1-second deadline: %2")
+                                   .arg(RemoteDownloadDeadlineMs / 1000)
+                                   .arg(request_url.toString());
+        return result;
+    }
 
     if (write_failed)
     {

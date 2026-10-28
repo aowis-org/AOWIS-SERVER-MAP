@@ -316,3 +316,13 @@ lock timeout, successful download behavior, and lock lifetime are unchanged.
 The terrain-provider test holds the source lock while issuing a request,
 cancels the provider, and verifies that the request returns promptly. This
 does not yet separate upstream I/O from CPU worker capacity.
+
+## Phase 04: absolute Copernicus download deadline
+
+Copernicus source transfers now have a 120-second elapsed-time deadline in
+addition to Qt's inactivity-based transfer timeout. The timer aborts a reply
+that continuously dribbles bytes without completing; incomplete `QSaveFile`
+content is discarded, and the provider reports a network error. Explicit
+shutdown cancellation still takes precedence. The worker-local event loop and
+terrain CPU/I/O isolation remain separate future work. Test against a controlled
+slow upstream before relying on this for production recovery guarantees.
