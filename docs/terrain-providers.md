@@ -143,6 +143,20 @@ The HTTP terrain route runs read-through generation on QtConcurrent rather than 
 server's main event loop. Cache-fill locking deduplicates matching requests without globally
 serializing unrelated terrain generation.
 
+### Interrupted download recovery status
+
+The current source downloader requests complete HTTP entities and publishes a COG
+only after successful full-response validation and atomic commit. Failed or
+interrupted downloads are not retained for resumption, so a later request starts
+from byte zero. This keeps the offline cache safe but may use extra bandwidth
+on unreliable links.
+
+Strict HTTP `Content-Range` and strong-ETag matching rules are implemented and
+regression-tested as the validation foundation for future resumable acquisition.
+They **do not enable resumable transfers** yet. A future implementation must
+manage persistent partial files, validators, resume fallback, size limits and
+cross-process locking without ever publishing incomplete GeoTIFFs.
+
 ## Licensing and attribution
 
 Copernicus GLO-30 Public is distributed for public use under the Copernicus DEM licence. Any externally assembled offline package must retain appropriate dataset

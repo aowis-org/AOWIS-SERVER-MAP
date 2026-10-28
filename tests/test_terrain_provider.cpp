@@ -164,6 +164,41 @@ int main()
                  "Copernicus complete-response validation is incorrect"))
         return 1;
 
+    // A continuation is valid only for the same strong-ETag entity, with
+    // contiguous, fully received bytes and a bounded declared total.
+    using Internal::CopernicusResumeAction;
+    using Internal::classifyCopernicusResumeResponse;
+    const QByteArray strong_etag = "\"source-v1\"";
+    if (!require(
+            Internal::parseCopernicusContentRange("bytes 100-199/200").has_value() &&
+            !Internal::parseCopernicusContentRange("bytes 100-199/*").has_value() &&
+            !Internal::parseCopernicusContentRange("bytes 10-9/200").has_value() &&
+            !Internal::parseCopernicusContentRange("bytes 0-9223372036854775808/9223372036854775809").has_value() &&
+            classifyCopernicusResumeResponse(206, 100, 100, "bytes 100-199/200",
+                strong_etag, strong_etag, 1024) ==
+                CopernicusResumeAction::AppendVerifiedRange &&
+            classifyCopernicusResumeResponse(206, 100, 100, "bytes 101-200/201",
+                strong_etag, strong_etag, 1024) ==
+                CopernicusResumeAction::RejectResponse &&
+            classifyCopernicusResumeResponse(206, 100, 99, "bytes 100-199/200",
+                strong_etag, strong_etag, 1024) ==
+                CopernicusResumeAction::RejectResponse &&
+            classifyCopernicusResumeResponse(206, 100, 100, "bytes 100-199/200",
+                strong_etag, "\"source-v2\"", 1024) ==
+                CopernicusResumeAction::RejectResponse &&
+            classifyCopernicusResumeResponse(206, 100, 100, "bytes 100-199/200",
+                "W/\"source-v1\"", "W/\"source-v1\"", 1024) ==
+                CopernicusResumeAction::RejectResponse &&
+            classifyCopernicusResumeResponse(206, 100, 100, "bytes 100-199/200",
+                strong_etag, strong_etag, 150) ==
+                CopernicusResumeAction::RejectResponse &&
+            classifyCopernicusResumeResponse(200, 100, 200, "", "", "", 1024) ==
+                CopernicusResumeAction::RestartWithFullEntity &&
+            classifyCopernicusResumeResponse(416, 100, 0, "", "", "", 1024) ==
+                CopernicusResumeAction::RejectResponse,
+            "Copernicus HTTP Range resume validation is incorrect"))
+        return 1;
+
     QTemporaryDir temporary_directory;
     if (!require(temporary_directory.isValid(),
                  "Failed to create terrain provider test directory"))
