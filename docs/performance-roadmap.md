@@ -294,3 +294,13 @@ waiting clients. Grid dimensions remain limited to 512×512 (at most 1 MiB of
 binary float samples per unique grid result); the configured terrain job count
 limits concurrent unique computations. HTTP regression coverage verifies
 identical and numerically equivalent queries, overload, and cleanup.
+
+### Phase 04 — Grid output memory admission
+
+Unique in-flight analysis grids now reserve `columns * rows * sizeof(float)`
+bytes against a 64 MiB budget, in addition to the normal terrain job budget.
+Identical HTTP requests share one reservation. Memory reservations remain held
+until the event-loop completion callback delivers the results and are released
+on success or failure. This budget bounds estimated float output data only; it
+does not cap provider-internal raster decompression, cache usage, or multiple
+client response copies. The byte counter is independently regression-tested.

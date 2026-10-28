@@ -22,6 +22,7 @@
 #include <aowis/map/terrain_elevation.h>
 #include <aowis/map/terrain_provider.h>
 #include "terrain_admission.h"
+#include "terrain_byte_admission.h"
 
 #include <aowis/map/maptiles.h>
 #include <aowis/map/map_provider.h>
@@ -96,6 +97,7 @@ private:
     QTcpServer *tcp;
     QThreadPool terrain_worker_pool;
     TerrainAdmission terrain_admission;
+    TerrainByteAdmission terrain_grid_bytes;
     MapTiles *maptiles;
     Aowis::Map::TerrainData *terrain_data;
 

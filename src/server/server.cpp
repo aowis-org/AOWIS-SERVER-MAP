@@ -247,6 +247,7 @@ Server::Server(const Config &config, QObject *parent)
       config(config),
       tcp(new QTcpServer(this)),
       terrain_admission(qMax(1, config.maximum_terrain_jobs)),
+      terrain_grid_bytes(64ULL * 1024 * 1024),
       maptiles(new MapTiles(config.cache_directory, config.maximum_active_downloads,
                             config.maximum_pending_requests, this)),
       terrain_data(new Aowis::Map::TerrainData(
@@ -531,9 +532,23 @@ QFuture<QHttpServerResponse> Server::submitTerrainGrid(
         QString::number(request.columns) + QLatin1Char('/') +
         QString::number(request.rows);
     const bool existing = this->pending_terrain_grids.contains(key);
+    // Reserve each unique grid's float output until its HTTP completion
+    // callback has delivered the response. Prevents queued grid jobs from
+    // accumulating more than 64 MiB of estimated output buffers.
+    const std::uint64_t estimated_bytes =
+        std::uint64_t(request.columns) * std::uint64_t(request.rows) * sizeof(float);
+    bool admitted = existing;
+    if (!existing && !this->shutting_down &&
+        this->pending_terrain_tile_count < this->config.maximum_pending_requests &&
+        this->terrain_grid_bytes.tryAcquire(estimated_bytes))
+    {
+        admitted = this->terrain_admission.tryAcquire();
+        if (!admitted)
+            this->terrain_grid_bytes.release(estimated_bytes);
+    }
     if (this->shutting_down ||
         this->pending_terrain_tile_count >= this->config.maximum_pending_requests ||
-        (!existing && !this->terrain_admission.tryAcquire()))
+        !admitted)
     {
         QHttpServerResponse response(
             "Terrain service busy; retry later",
@@ -556,7 +571,7 @@ QFuture<QHttpServerResponse> Server::submitTerrainGrid(
     if (existing)
         return future;
 
-    this->terrain_worker_pool.start([this, key, request]()
+    this->terrain_worker_pool.start([this, key, request, estimated_bytes]()
     {
         Aowis::Map::TerrainAnalysisGridResult result;
         try
@@ -584,7 +599,7 @@ QFuture<QHttpServerResponse> Server::submitTerrainGrid(
         }
         this->terrain_admission.release();
         QMetaObject::invokeMethod(this,
-            [this, key, result = std::move(result), bytes = std::move(bytes)]() mutable
+            [this, key, estimated_bytes, result = std::move(result), bytes = std::move(bytes)]() mutable
         {
             const PendingPromises waiters = this->pending_terrain_grids.take(key);
             this->pending_terrain_tile_count -= waiters.size();
@@ -610,6 +625,7 @@ QFuture<QHttpServerResponse> Server::submitTerrainGrid(
                 }
                 waiter->finish();
             }
+            this->terrain_grid_bytes.release(estimated_bytes);
         }, Qt::QueuedConnection);
     });
     return future;

@@ -215,6 +215,7 @@ if(AOWIS_SERVER_MAP_BUILD_SERVER)
         src/server/server.cpp
         src/server/server.h
         src/server/terrain_admission.h
+        src/server/terrain_byte_admission.h
     )
 
     set_target_properties(aowis-server-map-server
@@ -296,6 +297,11 @@ if(BUILD_TESTING)
     add_test(NAME aowis-server-map-terrain-admission
         COMMAND aowis-server-map-terrain-admission-test)
     list(APPEND AOWIS_SERVER_MAP_TEST_TARGETS aowis-server-map-terrain-admission-test)
+    add_executable(aowis-server-map-terrain-byte-admission-test
+        tests/test_terrain_byte_admission.cpp)
+    add_test(NAME aowis-server-map-terrain-byte-admission
+        COMMAND aowis-server-map-terrain-byte-admission-test)
+    list(APPEND AOWIS_SERVER_MAP_TEST_TARGETS aowis-server-map-terrain-byte-admission-test)
     add_custom_target(aowis-server-map-tests
         DEPENDS ${AOWIS_SERVER_MAP_TEST_TARGETS})
     get_property(AOWIS_SERVER_MAP_REGISTERED_TESTS DIRECTORY PROPERTY TESTS)
