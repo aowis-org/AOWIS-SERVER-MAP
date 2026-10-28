@@ -202,3 +202,7 @@ It interrupts a full response and a subsequent range response, verifies
 published. It also verifies full-response fallback when a server ignores Range,
 a changed upstream ETag, and rejection of a mismatched 206 response. The source
 URL override is an internal test seam; production Copernicus URLs remain fixed.
+
+The local Copernicus HTTP integration test also exercises slow-but-progressing transfers
+and a stalled peer with shortened test-only timeouts. Production timeout defaults
+and the upstream URL are unchanged.

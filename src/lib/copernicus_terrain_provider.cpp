@@ -1028,11 +1028,15 @@ namespace Internal
 {
 bool fetchCopernicusSourceForIntegrationTest(const QString &directory,
                                              const QUrl &source_url,
-                                             QString *error_message)
+                                             QString *error_message,
+                                             int connect_timeout_ms,
+                                             int inactivity_timeout_ms,
+                                             int download_deadline_ms)
 {
     const CopernicusSourceAddress address{50, 8};
     const SourceLoadResult result = downloadSourceTile(directory, address, true,
-        nullptr, nullptr, nullptr, 0, 5000, 5000, 10000, source_url);
+        nullptr, nullptr, nullptr, 0, connect_timeout_ms, inactivity_timeout_ms,
+        download_deadline_ms, source_url);
     if (error_message != nullptr)
         *error_message = result.error_message;
     return result.status == SourceLoadStatus::Ready;
