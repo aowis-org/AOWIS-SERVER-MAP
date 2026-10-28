@@ -1,7 +1,11 @@
 #include "server.h"
+#include <aowis/map/terrain_data.h>
 
 #include <QCoreApplication>
 #include <QElapsedTimer>
+#include <QDir>
+#include <QFileInfo>
+#include <QSaveFile>
 #include <QEventLoop>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
@@ -26,6 +30,21 @@ public:
             entered.release();
             release.acquire();
         });
+    }
+
+    static void blockRemoteWorker(Server &server, QSemaphore &entered, QSemaphore &release)
+    {
+        server.terrain_remote_pool.start([&entered, &release]()
+        {
+            entered.release();
+            release.acquire();
+        });
+    }
+
+    static QString normalizedTilePath(const Server &server, const QString &dataset,
+                                      const Aowis::Map::TerrainTileAddress &address)
+    {
+        return server.terrain_data->normalizedTilePath(dataset, address);
     }
 
     static quint16 port(const Server &server)
@@ -365,6 +384,94 @@ int main(int argc, char **argv)
                   << " responses=" << grid_responses
                   << " cleared=" << grid_cleared << '\n';
         return 1;
+    }
+    // Remote worker starvation must not delay an already-normalized tile.
+    // Exercise the real HTTP route with remote fetching enabled and both
+    // remote-capable threads occupied; no upstream server is involved.
+    {
+        QTemporaryDir isolated_cache;
+        if (!isolated_cache.isValid())
+        {
+            std::cerr << "Failed to create isolation test cache\n";
+            return 1;
+        }
+
+        Server::Config isolation_config;
+        isolation_config.port = 0;
+        isolation_config.cache_directory = isolated_cache.path();
+        isolation_config.terrain_cache_directory = isolated_cache.path() + "/terrain";
+        isolation_config.map_remote_fetch_enabled = false;
+        isolation_config.terrain_remote_fetch_enabled = true;
+        isolation_config.maximum_terrain_workers = 1;
+        isolation_config.maximum_terrain_jobs = 4;
+        isolation_config.maximum_pending_requests = 6;
+        Server isolated_server(isolation_config);
+        if (!isolated_server.start())
+        {
+            std::cerr << "Failed to start isolation test server\n";
+            return 1;
+        }
+
+        Aowis::Map::TerrainTile cached_tile;
+        cached_tile.dataset = QStringLiteral("copernicus-glo30");
+        cached_tile.address.zoom = 5;
+        cached_tile.address.x = 11;
+        cached_tile.address.y = 12;
+        cached_tile.nominal_resolution_m = 30.0;
+        cached_tile.vertical_datum = Aowis::Map::TerrainVerticalDatum::Egm96;
+        cached_tile.elevations_m.fill(42.0f, Aowis::Map::TerrainTileSampleCount);
+        QString encoding_error;
+        const QByteArray encoded = Aowis::Map::encodeTerrainTile(cached_tile, &encoding_error);
+        const QString path = TerrainSingleFlightTestAccess::normalizedTilePath(isolated_server, 
+            cached_tile.dataset, cached_tile.address);
+        if (encoded.isEmpty() || !QDir().mkpath(QFileInfo(path).absolutePath()))
+        {
+            std::cerr << "Failed to prepare cached test tile\n";
+            return 1;
+        }
+        QSaveFile output(path);
+        if (!output.open(QIODevice::WriteOnly) ||
+            output.write(encoded) != encoded.size() || !output.commit())
+        {
+            std::cerr << "Failed to save cached test tile\n";
+            return 1;
+        }
+
+        QSemaphore remote_entered;
+        QSemaphore remote_release;
+        TerrainSingleFlightTestAccess::blockRemoteWorker(
+            isolated_server, remote_entered, remote_release);
+        TerrainSingleFlightTestAccess::blockRemoteWorker(
+            isolated_server, remote_entered, remote_release);
+        if (!remote_entered.tryAcquire(2, 3000))
+        {
+            remote_release.release(2);
+            std::cerr << "Failed to occupy both remote workers\n";
+            return 1;
+        }
+
+        QNetworkAccessManager isolation_network;
+        const QUrl cached_url(QStringLiteral(
+            "http://127.0.0.1:%1/terrain/v1/copernicus-glo30/5/11/12.aowterrain")
+            .arg(TerrainSingleFlightTestAccess::port(isolated_server)));
+        QNetworkReply *cached_reply = isolation_network.get(QNetworkRequest(cached_url));
+        timer.restart();
+        while (!cached_reply->isFinished() && timer.elapsed() < 3000)
+        {
+            app.processEvents(QEventLoop::AllEvents, 20);
+            QThread::msleep(1);
+        }
+        const bool isolation_passed = cached_reply->isFinished() &&
+            cached_reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() == 200 &&
+            cached_reply->readAll() == encoded;
+        // Always unblock before server destruction, even if the HTTP probe failed.
+        remote_release.release(2);
+        cached_reply->deleteLater();
+        if (!isolation_passed)
+        {
+            std::cerr << "Cached terrain request was starved by remote workers\n";
+            return 1;
+        }
     }
     return 0;
 }
