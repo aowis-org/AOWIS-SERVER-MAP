@@ -27,7 +27,7 @@ Apache / trusted local clients
             normalized/native caches -> upstream COG
 ```
 
-The frontend stays event-driven: waiting HTTP tile responses use `QFuture`/`QPromise` rather than dedicating a worker to every waiter. Network downloads for raster imagery use Qt's asynchronous network APIs. Terrain jobs run in two independently bounded server-owned pools: normalized-cache tile hits and deletion work use the CPU pool, while potentially remote-fetching work uses a two-thread remote-capable pool. Copernicus source acquisition still uses a worker-local event loop, but **normalized terrain tile cache misses now use a two-stage handoff**: the remote pool acquires source GeoTIFFs and enqueues CPU normalization on the processing pool without waiting. Elevation and grid workloads still combine acquisition and processing in remote workers; the pipeline is not yet universal.
+The frontend stays event-driven: waiting HTTP tile responses use `QFuture`/`QPromise` rather than dedicating a worker to every waiter. Network downloads for raster imagery use Qt's asynchronous network APIs. Terrain jobs run in two independently bounded server-owned pools: normalized-cache tile hits and deletion work use the CPU pool, while potentially remote-fetching work uses a two-thread remote-capable pool. Copernicus source acquisition still uses a worker-local event loop, but **normalized terrain tile cache misses now use a two-stage handoff**: the remote pool acquires source GeoTIFFs and enqueues CPU normalization on the processing pool without waiting. Analysis grids and elevation requests also use acquisition-to-CPU handoffs. Elevation acquisition targets the finest provider-backed tile; lower-zoom fallback sampling is CPU-only and may use existing cached tiles or locally acquired sources.
 
 ## Raster tile delivery
 
@@ -48,7 +48,7 @@ Asynchronous terrain routes use separate cached-work and remote-capable `QThread
 | Budget | Default | Meaning |
 | --- | ---: | --- |
 | `terrain/maximum_workers` | 4 | Cached terrain processing and maintenance pool size; clamped to the job budget |
-| `terrain/maximum_remote_workers` | 2 | Independent remote-capable pool size, clamped to the shared job budget; tile source acquisition and combined elevation/grid requests occupy these workers |
+| `terrain/maximum_remote_workers` | 2 | Independent remote-capable pool size, clamped to the shared job budget; source acquisition for tile, elevation and grid requests occupies these workers |
 | `terrain/maximum_jobs` | 128 | Total admitted unique/ordinary terrain tasks, including queued tasks |
 | Remote-capable job admission | 64 | At most `max(1, maximum_jobs / 2)` remote-capable queued or running jobs, also counted against the global budget |
 | `server/max_pending_requests` | 2048 | Upper bound used for pending HTTP response waiters; shared by terrain tile, elevation and grid single-flight requests |
@@ -75,7 +75,7 @@ download_deadline_seconds=1800
 
 The connection limit bounds waiting for response progress, the inactivity limit detects stalled transfers, and the **30-minute absolute deadline** allows slow but continuously progressing downloads to continue much longer than two minutes. All three are bounded; these are not unlimited downloads. Source-lock acquisition can be canceled while waiting. Incomplete downloads are not published as complete cache objects.
 
-Interrupted Copernicus COG downloads can resume from validated partial files when a strong ETag and known total length are available. Transfers without suitable validators restart from byte zero. Despite the available timeout controls, Copernicus downloads occupy remote-capable workers until they finish, fail or are canceled. Normalized cached tile hits use the separate processing pool. Grid requests now acquire the exact native source cells touched by their sample centres on the remote-capable pool, then enqueue CPU-only sampling without waiting; grid byte reservations and global job admission remain held across the handoff. Elevation requests still combine source acquisition and sampling on remote-capable workers when remote fetching is enabled.
+Interrupted Copernicus COG downloads can resume from validated partial files when a strong ETag and known total length are available. Transfers without suitable validators restart from byte zero. Despite the available timeout controls, Copernicus downloads occupy remote-capable workers until they finish, fail or are canceled. Normalized cached tile hits use the separate processing pool. Grid requests now acquire the exact native source cells touched by their sample centres on the remote-capable pool, then enqueue CPU-only sampling without waiting; grid byte reservations and global job admission remain held across the handoff. Elevation requests acquire sources for the highest provider-backed tile and hand off CPU-only sampling; cached lower-zoom fallback remains available, but additional remote fallback tiles are not proactively fetched.
 
 To enforce offline use while retaining cached data, configure `terrain/remote_fetch_enabled=false` independently from `downloads/remote_fetch_enabled=false` for imagery. Restricting download coverage does **not** forbid reading already cached data outside that coverage.
 
@@ -122,7 +122,7 @@ The supplied `tools/apply_patch.sh` accepts `aowis-server-map-*.zip` archives wi
 
 These are **open engineering goals**, not descriptions of the present server:
 
-1. Extend the implemented tile acquisition-to-CPU handoff to elevation and analysis grids; refine I/O concurrency, backpressure and fairness.
+1. Refine I/O concurrency, backpressure, fairness, and elevation fallback acquisition across zoom levels.
 2. Strengthen resumable source downloads with integration coverage for unstable real-world upstreams, bounded partial-file retention, and optional retry scheduling.
 3. Account for all terrain intermediate/native raster memory and response payloads, not just grid output reservations.
 4. Add comprehensive per-stage metrics, disconnect-aware waiter cleanup, retry/circuit-breaker policies and operational dashboards where justified.

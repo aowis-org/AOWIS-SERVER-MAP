@@ -902,11 +902,39 @@ TerrainTileLookupResult TerrainData::fetchAndStoreNormalizedTile(
     return result;
 }
 
+TerrainProviderFetchResult TerrainData::acquireElevationSources(
+    const QString &dataset, double latitude_deg, double longitude_deg) const
+{
+    TerrainProviderFetchResult result;
+    result.status = TerrainProviderFetchStatus::Ready;
+    if (!this->initialized || !this->config.remote_fetch_enabled ||
+        !isValidWgs84Coordinate(latitude_deg, longitude_deg))
+        return result;
+
+    // Match the first provider-backed address visited by sampleElevation.
+    // Cached lower-resolution tiles remain available to its CPU-only fallback.
+    for (int zoom = TerrainTileMaximumZoom; zoom >= 0; --zoom)
+    {
+        const std::optional<TerrainGridPosition> position =
+            terrainGridPosition(latitude_deg, longitude_deg, zoom);
+        if (!position.has_value())
+            continue;
+        for (const std::unique_ptr<TerrainProvider> &provider : this->providers)
+        {
+            if (provider->supportsDataset(dataset) &&
+                provider->supportsAddress(dataset, position->address))
+                return acquireTileSources(dataset, position->address);
+        }
+    }
+    return result;
+}
+
 TerrainElevationLookupResult TerrainData::sampleElevation(
     const QString &dataset,
     double latitude_deg,
     double longitude_deg,
-    std::optional<TerrainVerticalDatum> requested_vertical_datum) const
+    std::optional<TerrainVerticalDatum> requested_vertical_datum,
+    bool allow_remote_fetch) const
 {
     TerrainElevationLookupResult result;
     result.requested_vertical_datum = requested_vertical_datum;
@@ -962,7 +990,7 @@ TerrainElevationLookupResult TerrainData::sampleElevation(
             continue;
 
         const TerrainTileLookupResult tile_result =
-            terrainTile(dataset, grid_position->address);
+            terrainTile(dataset, grid_position->address, allow_remote_fetch);
         if (tile_result.status == TerrainTileLookupStatus::TileUnavailable)
             continue;
 

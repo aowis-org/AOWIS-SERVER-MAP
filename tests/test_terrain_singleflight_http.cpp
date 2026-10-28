@@ -692,5 +692,73 @@ int main(int argc, char **argv)
             return 1;
         }
     }
+    // Elevation acquisition releases remote admission before sampling starts.
+    // With no providers enabled, both stages are deterministic and offline.
+    {
+        QTemporaryDir elevation_handoff_cache;
+        if (!elevation_handoff_cache.isValid())
+            return 1;
+        Server::Config elevation_config;
+        elevation_config.port = 0;
+        elevation_config.cache_directory = elevation_handoff_cache.path();
+        elevation_config.terrain_cache_directory = elevation_handoff_cache.path() + "/terrain";
+        elevation_config.map_remote_fetch_enabled = false;
+        elevation_config.terrain_remote_fetch_enabled = true;
+        elevation_config.copernicus_enabled = false;
+        elevation_config.maximum_terrain_workers = 1;
+        elevation_config.maximum_terrain_remote_workers = 1;
+        elevation_config.maximum_terrain_jobs = 2;
+        Server elevation_server(elevation_config);
+        if (!elevation_server.start())
+            return 1;
+        QSemaphore elevation_cpu_entered;
+        QSemaphore elevation_cpu_release;
+        TerrainSingleFlightTestAccess::blockWorker(
+            elevation_server, elevation_cpu_entered, elevation_cpu_release);
+        if (!elevation_cpu_entered.tryAcquire(1, 3000))
+        {
+            elevation_cpu_release.release();
+            return 1;
+        }
+        QNetworkAccessManager elevation_network;
+        const QUrl elevation_url(QStringLiteral(
+            "http://127.0.0.1:%1/terrain/v1/elevation?dataset=copernicus-glo30&latitude=49&longitude=8")
+            .arg(TerrainSingleFlightTestAccess::port(elevation_server)));
+        QNetworkReply *elevation_reply = elevation_network.get(QNetworkRequest(elevation_url));
+        timer.restart();
+        bool elevation_queued = false;
+        while (timer.elapsed() < 3000)
+        {
+            app.processEvents(QEventLoop::AllEvents, 20);
+            elevation_queued = TerrainSingleFlightTestAccess::elevationJobs(elevation_server) == 1 &&
+                TerrainSingleFlightTestAccess::remoteAdmittedJobs(elevation_server) == 0 &&
+                TerrainSingleFlightTestAccess::admittedJobs(elevation_server) == 1 &&
+                !elevation_reply->isFinished();
+            if (elevation_queued)
+                break;
+            QThread::msleep(1);
+        }
+        elevation_cpu_release.release();
+        timer.restart();
+        while (!elevation_reply->isFinished() && timer.elapsed() < 3000)
+        {
+            app.processEvents(QEventLoop::AllEvents, 20);
+            QThread::msleep(1);
+        }
+        const bool elevation_finished = elevation_reply->isFinished();
+        const int elevation_status = elevation_finished
+            ? elevation_reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() : 0;
+        elevation_reply->deleteLater();
+        app.processEvents(QEventLoop::AllEvents, 20);
+        if (!elevation_queued || !elevation_finished || elevation_status == 200 ||
+            TerrainSingleFlightTestAccess::admittedJobs(elevation_server) != 0 ||
+            TerrainSingleFlightTestAccess::remoteAdmittedJobs(elevation_server) != 0)
+        {
+            std::cerr << "Elevation acquisition-to-CPU handoff regression failed: queued="
+                      << elevation_queued << " finished=" << elevation_finished
+                      << " status=" << elevation_status << '\n';
+            return 1;
+        }
+    }
     return 0;
 }

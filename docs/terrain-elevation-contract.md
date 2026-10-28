@@ -161,3 +161,7 @@ and source behavior. Offline-package mounting is not implemented here.
 ## Supported remote dataset
 
 `copernicus-glo30` is the Internet-backed terrain dataset currently supported. It is normalized from the public Copernicus GLO-30 COG distribution, records EGM2008 as its vertical datum and 30 m as nominal source resolution, and is a DSM rather than a guaranteed bare-earth DTM. See [`terrain-providers.md`](terrain-providers.md).
+
+## Remote acquisition and CPU sampling
+
+When remote terrain fetching is enabled, the HTTP elevation path acquires native sources for the finest supported normalized tile on the remote-capable worker pool, then queues CPU-only normalized-tile sampling on the terrain processing pool. The remote admission reservation is released at this handoff; global admission is held until sampling completes. The sampling loop continues to search coarser normalized tiles for available elevation data without initiating downloads from CPU workers. Cached lower-zoom tiles remain eligible, but missing coarser source regions are not proactively acquired. In fully offline mode, point sampling uses the CPU pool directly.

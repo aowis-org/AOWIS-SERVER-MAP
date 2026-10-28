@@ -551,16 +551,14 @@ QFuture<QHttpServerResponse> Server::submitTerrainElevation(
     if (existing)
         return future;
 
-    QThreadPool *execution_pool = remote_job
-        ? &this->terrain_remote_pool : &this->terrain_worker_pool;
-    execution_pool->start(
+    const std::function<void()> process_elevation =
         [this, key, dataset, latitude_deg, longitude_deg, requested_vertical_datum, remote_job]()
     {
         Aowis::Map::TerrainElevationLookupResult result;
         try
         {
             result = this->terrain_data->sampleElevation(
-                dataset, latitude_deg, longitude_deg, requested_vertical_datum);
+                dataset, latitude_deg, longitude_deg, requested_vertical_datum, !remote_job);
         }
         catch (...)
         {
@@ -568,8 +566,49 @@ QFuture<QHttpServerResponse> Server::submitTerrainElevation(
             result.error_message = QStringLiteral("Terrain processing failed");
         }
         this->terrain_admission.release();
-        if (remote_job)
-            this->terrain_remote_admission.release();
+        QMetaObject::invokeMethod(this, [this, key, result = std::move(result)]() mutable
+        {
+            const PendingPromises waiters = this->pending_terrain_elevations.take(key);
+            this->pending_terrain_tile_count -= waiters.size();
+            for (const PendingPromise &waiter : waiters)
+            {
+                waiter->addResult(makeTerrainElevationSuccessResponse(result));
+                waiter->finish();
+            }
+        }, Qt::QueuedConnection);
+    };
+    if (!remote_job)
+    {
+        this->terrain_worker_pool.start(process_elevation);
+        return future;
+    }
+    this->terrain_remote_pool.start(
+        [this, key, dataset, latitude_deg, longitude_deg, process_elevation]()
+    {
+        Aowis::Map::TerrainProviderFetchResult acquired;
+        try
+        {
+            acquired = this->terrain_data->acquireElevationSources(
+                dataset, latitude_deg, longitude_deg);
+        }
+        catch (...)
+        {
+            acquired.status = Aowis::Map::TerrainProviderFetchStatus::NetworkError;
+            acquired.error_message = QStringLiteral("Elevation source acquisition failed");
+        }
+        this->terrain_remote_admission.release();
+        if (acquired.status == Aowis::Map::TerrainProviderFetchStatus::Ready)
+        {
+            this->terrain_worker_pool.start(process_elevation);
+            return;
+        }
+        this->terrain_admission.release();
+        Aowis::Map::TerrainElevationLookupResult result;
+        result.status = acquired.status == Aowis::Map::TerrainProviderFetchStatus::NetworkError ||
+                        acquired.status == Aowis::Map::TerrainProviderFetchStatus::Cancelled
+            ? Aowis::Map::TerrainElevationLookupStatus::RemoteFetchError
+            : Aowis::Map::TerrainElevationLookupStatus::ProviderError;
+        result.error_message = acquired.error_message;
         QMetaObject::invokeMethod(this, [this, key, result = std::move(result)]() mutable
         {
             const PendingPromises waiters = this->pending_terrain_elevations.take(key);

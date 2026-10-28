@@ -149,11 +149,16 @@ public:
     TerrainProviderFetchResult acquireTileSources(
         const QString &dataset, const TerrainTileAddress &address) const;
 
+    // Acquire the highest-resolution point tile sources before CPU-only sampling.
+    TerrainProviderFetchResult acquireElevationSources(
+        const QString &dataset, double latitude_deg, double longitude_deg) const;
+
     TerrainElevationLookupResult sampleElevation(
         const QString &dataset,
         double latitude_deg,
         double longitude_deg,
-        std::optional<TerrainVerticalDatum> requested_vertical_datum = std::nullopt) const;
+        std::optional<TerrainVerticalDatum> requested_vertical_datum = std::nullopt,
+        bool allow_remote_fetch = true) const;
 
     // Every dataset of every registered provider, in provider order. Static
     // provider knowledge: available before initialize() and while the
