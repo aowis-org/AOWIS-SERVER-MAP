@@ -12,7 +12,8 @@ bool fetchCopernicusSourceForIntegrationTest(const QString &directory,
                                              QString *error_message,
                                              int connect_timeout_ms = 5000,
                                              int inactivity_timeout_ms = 5000,
-                                             int download_deadline_ms = 10000);
+                                             int download_deadline_ms = 10000,
+                                             int cancel_after_ms = -1);
 }
 
 #endif

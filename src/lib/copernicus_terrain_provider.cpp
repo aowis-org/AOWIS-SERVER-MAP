@@ -1039,12 +1039,39 @@ bool fetchCopernicusSourceForIntegrationTest(const QString &directory,
                                              QString *error_message,
                                              int connect_timeout_ms,
                                              int inactivity_timeout_ms,
-                                             int download_deadline_ms)
+                                             int download_deadline_ms,
+                                             int cancel_after_ms)
 {
     const CopernicusSourceAddress address{50, 8};
+    QMutex upstream_mutex;
+    QSet<QNetworkReply *> active_replies;
+    quint64 cancel_generation = 0;
+    QTimer cancellation_timer;
+    cancellation_timer.setSingleShot(true);
+    if (cancel_after_ms >= 0)
+    {
+        QObject::connect(&cancellation_timer, &QTimer::timeout,
+                         &cancellation_timer, [&]()
+        {
+            QMutexLocker locker(&upstream_mutex);
+            ++cancel_generation;
+            for (QNetworkReply *raw_reply : active_replies)
+            {
+                QPointer<QNetworkReply> reply(raw_reply);
+                QMetaObject::invokeMethod(raw_reply, [reply]()
+                {
+                    if (!reply.isNull() && !reply->isFinished())
+                        reply->abort();
+                }, Qt::QueuedConnection);
+            }
+        });
+        cancellation_timer.start(cancel_after_ms);
+    }
     const SourceLoadResult result = downloadSourceTile(directory, address, true,
-        nullptr, nullptr, nullptr, 0, connect_timeout_ms, inactivity_timeout_ms,
+        &upstream_mutex, &active_replies, &cancel_generation, 0,
+        connect_timeout_ms, inactivity_timeout_ms,
         download_deadline_ms, source_url);
+    cancellation_timer.stop();
     if (error_message != nullptr)
         *error_message = result.error_message;
     return result.status == SourceLoadStatus::Ready;

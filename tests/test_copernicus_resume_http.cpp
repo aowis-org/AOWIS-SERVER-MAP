@@ -242,6 +242,68 @@ bool verifySlowNetwork(const QString &root, int scenario)
                    "Slow but progressing transfer did not publish complete source");
 }
 
+// Cancellation must abort an active upstream reply promptly, without waiting
+// for the inactivity/absolute deadline or publishing an incomplete GeoTIFF.
+bool verifyActiveCancellation(const QString &root)
+{
+    const QString directory = QDir(root).filePath("active-cancellation");
+    std::promise<quint16> ready;
+    std::promise<bool> completed;
+    std::future<quint16> port = ready.get_future();
+    std::future<bool> outcome = completed.get_future();
+    std::thread upstream([ready = std::move(ready),
+                          completed = std::move(completed)]() mutable
+    {
+        QTcpServer server;
+        if (!server.listen(QHostAddress::LocalHost, 0))
+        {
+            ready.set_value(0);
+            completed.set_value(false);
+            return;
+        }
+        ready.set_value(server.serverPort());
+        if (!server.waitForNewConnection(5000))
+        {
+            completed.set_value(false);
+            return;
+        }
+        QTcpSocket *socket = server.nextPendingConnection();
+        QByteArray request;
+        while (!request.contains("\r\n\r\n") && request.size() < 16384)
+        {
+            if (!socket->waitForReadyRead(5000))
+                break;
+            request += socket->readAll();
+        }
+        socket->write("HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n"
+                      "ETag: \"cancel-v1\"\r\nConnection: close\r\n\r\n");
+        socket->write(QByteArray(100, 'C'));
+        socket->flush();
+        // The client should close the connection upon cancellation, long before
+        // its otherwise generous timeout. A bounded wait prevents test hangs.
+        const bool disconnected = socket->waitForDisconnected(2000);
+        completed.set_value(request.startsWith("GET ") && disconnected);
+    });
+    const quint16 upstream_port = port.get();
+    if (upstream_port == 0)
+    {
+        upstream.join();
+        return require(false, "Cancellation mock could not bind");
+    }
+    QString error;
+    const bool fetched = Aowis::Map::Internal::fetchCopernicusSourceForIntegrationTest(
+        directory, QUrl(QStringLiteral("http://127.0.0.1:%1/source.tif").arg(upstream_port)),
+        &error, 3000, 3000, 5000, 150);
+    const bool disconnected = outcome.get();
+    upstream.join();
+    const QString source = QDir(directory).filePath(
+        "copernicus/glo30/Copernicus_DSM_COG_10_N50_00_E008_00_DEM.tif");
+    return require(disconnected, "Active source cancellation did not close upstream connection") &&
+           require(!fetched && error.contains("cancel", Qt::CaseInsensitive),
+                   "Active source cancellation did not report cancellation") &&
+           require(!QFile::exists(source), "Canceled download published incomplete source");
+}
+
 bool verifyRecoveryScenario(const QString &root, int scenario,
                             const QByteArray &old_payload,
                             const QByteArray &new_payload)
@@ -342,7 +404,8 @@ int main(int argc, char **argv)
     QByteArray changed_payload(1000, '\0');
     for (qsizetype i = 0; i < changed_payload.size(); ++i)
         changed_payload[i] = char('a' + i % 26);
-    if (!verifySlowNetwork(temp.path(), 0) ||
+    if (!verifyActiveCancellation(temp.path()) ||
+        !verifySlowNetwork(temp.path(), 0) ||
         !verifySlowNetwork(temp.path(), 1) ||
         !verifySlowNetwork(temp.path(), 2) ||
         !verifyRecoveryScenario(temp.path(), 0, payload, changed_payload) ||
