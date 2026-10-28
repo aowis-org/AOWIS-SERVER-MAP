@@ -90,7 +90,7 @@ From the repository root:
 ./compile_linux.sh --no-run        # build without trying to bind the default port
 ```
 
-`compile_linux_tests.sh` builds the `aowis-server-map-tests` aggregate target (including the production executable when enabled), verifies that CTest registers tests labeled `aowis`, and runs them with failure output. The present suite contains **14 registered native tests**, including asynchronous cache reuse, provider state, terrain source lock/cancellation, HTTP single-flight concurrency and overload, terrain admission, and grid byte admission. The 14/14 Debug result was reported on 2026-10-28; it is not a benchmark or proof of race freedom.
+`compile_linux_tests.sh` builds the `aowis-server-map-tests` aggregate target (including the production executable when enabled), verifies that CTest registers tests labeled `aowis`, and runs them with failure output. The present suite contains **15 registered native tests**, including asynchronous cache reuse, provider state, terrain source lock/cancellation, HTTP single-flight concurrency and overload, terrain admission, and grid byte admission. The 15/15 Debug result was reported on 2026-10-28; it is not a benchmark or proof of race freedom.
 
 `compile_linux.sh` starts the executable unless `--no-run` is passed. If another instance already listens at `127.0.0.1:8122`, a bind error after a successful compilation is expected and is not a compilation failure.
 

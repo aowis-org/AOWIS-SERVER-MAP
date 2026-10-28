@@ -32,6 +32,12 @@ public:
         });
     }
 
+    static QFuture<QHttpServerResponse> submitTileDirect(
+        Server &server, const QString &dataset, int zoom, int x, int y)
+    {
+        return server.submitTerrainTile(dataset, zoom, x, y);
+    }
+
     static bool reserveRemoteJob(Server &server)
     {
         if (!server.terrain_remote_admission.tryAcquire())
@@ -757,6 +763,64 @@ int main(int argc, char **argv)
             std::cerr << "Elevation acquisition-to-CPU handoff regression failed: queued="
                       << elevation_queued << " finished=" << elevation_finished
                       << " status=" << elevation_status << '\n';
+            return 1;
+        }
+    }
+    // Destroying the server while a post-acquisition CPU continuation is
+    // queued must finish its future even when the queued completion callback
+    // has not been dispatched by the event loop.
+    {
+        QTemporaryDir shutdown_cache;
+        if (!shutdown_cache.isValid())
+            return 1;
+        Server::Config shutdown_config;
+        shutdown_config.port = 0;
+        shutdown_config.cache_directory = shutdown_cache.path();
+        shutdown_config.terrain_cache_directory = shutdown_cache.path() + "/terrain";
+        shutdown_config.map_remote_fetch_enabled = false;
+        shutdown_config.terrain_remote_fetch_enabled = true;
+        shutdown_config.copernicus_enabled = false;
+        shutdown_config.maximum_terrain_workers = 1;
+        shutdown_config.maximum_terrain_remote_workers = 1;
+        shutdown_config.maximum_terrain_jobs = 2;
+        Server *shutdown_server = new Server(shutdown_config);
+        QSemaphore shutdown_cpu_entered;
+        QSemaphore shutdown_cpu_release;
+        TerrainSingleFlightTestAccess::blockWorker(
+            *shutdown_server, shutdown_cpu_entered, shutdown_cpu_release);
+        if (!shutdown_cpu_entered.tryAcquire(1, 3000))
+        {
+            shutdown_cpu_release.release();
+            delete shutdown_server;
+            std::cerr << "Failed to occupy CPU worker in shutdown regression\n";
+            return 1;
+        }
+        QFuture<QHttpServerResponse> shutdown_future =
+            TerrainSingleFlightTestAccess::submitTileDirect(
+                *shutdown_server, QStringLiteral("copernicus-glo30"), 5, 11, 12);
+        timer.restart();
+        bool shutdown_queued = false;
+        while (timer.elapsed() < 3000)
+        {
+            app.processEvents(QEventLoop::AllEvents, 20);
+            shutdown_queued =
+                TerrainSingleFlightTestAccess::remoteAdmittedJobs(*shutdown_server) == 0 &&
+                TerrainSingleFlightTestAccess::admittedJobs(*shutdown_server) == 1 &&
+                !shutdown_future.isFinished();
+            if (shutdown_queued)
+                break;
+            QThread::msleep(1);
+        }
+        // No event-loop pumping after this release: the CPU task can finish,
+        // but its queued callback must be drained safely by server destruction.
+        shutdown_cpu_release.release();
+        delete shutdown_server;
+        if (!shutdown_queued || !shutdown_future.isFinished() ||
+            shutdown_future.resultCount() != 1)
+        {
+            std::cerr << "Shutdown did not drain queued terrain handoff future: queued="
+                      << shutdown_queued << " finished=" << shutdown_future.isFinished()
+                      << " results=" << shutdown_future.resultCount() << '\n';
             return 1;
         }
     }
