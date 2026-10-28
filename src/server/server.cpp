@@ -388,7 +388,7 @@ QFuture<QHttpServerResponse> Server::submitTerrainTile(
     address.zoom = zoom;
     address.x = quint32(tile_x);
     address.y = quint32(tile_y);
-    QtConcurrent::run(&this->terrain_worker_pool, [this, key, dataset, address]()
+    this->terrain_worker_pool.start([this, key, dataset, address]()
     {
         Aowis::Map::TerrainTileLookupResult result;
         try
