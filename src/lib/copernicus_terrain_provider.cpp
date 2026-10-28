@@ -1080,10 +1080,11 @@ bool fetchCopernicusSourceForIntegrationTest(const QString &directory,
 
 CopernicusTerrainProvider::CopernicusTerrainProvider(
     int connect_timeout_seconds, int inactivity_timeout_seconds,
-    int download_deadline_seconds)
+    int download_deadline_seconds, const QUrl &integration_source_url)
     : connect_timeout_ms(std::max(1, connect_timeout_seconds) * 1000),
       inactivity_timeout_ms(std::max(1, inactivity_timeout_seconds) * 1000),
-      download_deadline_ms(std::max(1, download_deadline_seconds) * 1000)
+      download_deadline_ms(std::max(1, download_deadline_seconds) * 1000),
+      integration_source_url(integration_source_url)
 {
 }
 
@@ -1168,7 +1169,7 @@ TerrainProviderFetchResult CopernicusTerrainProvider::acquireTileSources(
             provider_cache_directory, source, true, &this->upstream_mutex,
             &this->upstream_active_replies, &this->upstream_cancel_generation,
             request_generation, this->connect_timeout_ms, this->inactivity_timeout_ms,
-            this->download_deadline_ms);
+            this->download_deadline_ms, this->integration_source_url);
         if (acquired.status == SourceLoadStatus::Cancelled ||
             acquired.status == SourceLoadStatus::NetworkError ||
             acquired.status == SourceLoadStatus::ReadError)

@@ -17,7 +17,8 @@ class CopernicusTerrainProvider final : public TerrainProvider
 public:
     explicit CopernicusTerrainProvider(int connect_timeout_seconds = 30,
                                       int inactivity_timeout_seconds = 120,
-                                      int download_deadline_seconds = 1800);
+                                      int download_deadline_seconds = 1800,
+                                      const QUrl &integration_source_url = QUrl());
     QString providerId() const override;
     QVector<TerrainDatasetInfo> datasets() const override;
     bool supportsDataset(const QString &dataset) const override;
@@ -46,6 +47,8 @@ private:
     const int connect_timeout_ms;
     const int inactivity_timeout_ms;
     const int download_deadline_ms;
+    // In-process integration test only; production leaves this empty.
+    const QUrl integration_source_url;
     QHash<QString, QDateTime> unavailable_source_until;
     QMutex unavailable_source_mutex;
     mutable QMutex upstream_mutex;

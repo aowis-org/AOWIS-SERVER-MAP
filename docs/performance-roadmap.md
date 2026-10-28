@@ -129,3 +129,7 @@ These are **open engineering goals**, not descriptions of the present server:
 5. Run sustained mixed workload, slow-upstream, shutdown, client-disconnect, sanitizer, and endurance tests; record repeatable before/after benchmarks before claiming performance gains.
 
 The architectural objective is to keep cached requests responsive under pressure while bounding work and resource usage. There are no published throughput or latency guarantees yet.
+
+### Live acquisition contention regression
+
+The terrain HTTP integration test uses an in-process-only Copernicus source URL to hold a real loopback GeoTIFF transfer open while a normalized cached tile is served. Destroying the server must cancel that transfer, close the upstream socket, and complete its pending terrain future. The URL override exists only in programmatic configuration for tests; the INI parser does not expose it, and the default production Copernicus URL remains fixed.

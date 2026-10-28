@@ -8,6 +8,7 @@
 #include <QHash>
 #include <QHostAddress>
 #include <QHttpServer>
+#include <QUrl>
 #include <QHttpServerRequest>
 #include <QHttpServerResponse>
 #include <QList>
@@ -52,6 +53,8 @@ public:
         int terrain_connect_timeout_seconds = 30;
         int terrain_inactivity_timeout_seconds = 120;
         int terrain_download_deadline_seconds = 1800;
+        // In-process test injection only; not accepted from map-server.ini.
+        QUrl terrain_integration_source_url;
         int maximum_active_downloads = 32;
         bool map_remote_fetch_enabled = true;
         QString provider_state_file;

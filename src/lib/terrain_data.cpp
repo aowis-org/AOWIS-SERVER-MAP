@@ -280,7 +280,7 @@ TerrainData::TerrainData(const Config &config, QObject *parent)
     if (config.copernicus_enabled)
         this->providers.push_back(std::make_unique<CopernicusTerrainProvider>(
             config.connect_timeout_seconds, config.inactivity_timeout_seconds,
-            config.download_deadline_seconds));
+            config.download_deadline_seconds, config.integration_source_url));
 }
 
 TerrainData::~TerrainData() = default;

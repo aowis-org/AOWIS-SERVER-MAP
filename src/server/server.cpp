@@ -262,6 +262,7 @@ Server::Server(const Config &config, QObject *parent)
               config.terrain_connect_timeout_seconds,
               config.terrain_inactivity_timeout_seconds,
               config.terrain_download_deadline_seconds,
+              config.terrain_integration_source_url,
               config.terrain_coverage,
               config.download_coverage
           },

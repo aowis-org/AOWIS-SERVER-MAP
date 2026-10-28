@@ -11,6 +11,11 @@
 #include <QNetworkReply>
 #include <QNetworkRequest>
 #include <QSemaphore>
+#include <QTcpServer>
+#include <QTcpSocket>
+#include <atomic>
+#include <future>
+#include <thread>
 #include <QTemporaryDir>
 #include <QThread>
 #include <QUrl>
@@ -1060,6 +1065,149 @@ int main(int argc, char **argv)
                       << " handoff: queued=" << queued
                       << " finished=" << future.isFinished()
                       << " results=" << future.resultCount() << '\n';
+            return 1;
+        }
+    }
+
+    // Real loopback acquisition: an upstream holds a response open while a
+    // normalized cached tile must still be served by the CPU pool. Shutdown
+    // must cancel the active QNetworkReply and finish the outstanding future.
+    {
+        std::promise<quint16> listen_promise;
+        std::future<quint16> listen_future = listen_promise.get_future();
+        std::atomic<bool> upstream_connected{false};
+        std::atomic<bool> upstream_disconnected{false};
+        std::thread upstream([&listen_promise, &upstream_connected,
+                              &upstream_disconnected]()
+        {
+            QTcpServer upstream_server;
+            if (!upstream_server.listen(QHostAddress::LocalHost, 0))
+            {
+                listen_promise.set_value(0);
+                return;
+            }
+            listen_promise.set_value(upstream_server.serverPort());
+            if (!upstream_server.waitForNewConnection(5000))
+                return;
+            QTcpSocket *socket = upstream_server.nextPendingConnection();
+            QByteArray request;
+            while (!request.contains("\r\n\r\n") && request.size() < 16384)
+            {
+                if (!socket->waitForReadyRead(3000))
+                    break;
+                request += socket->readAll();
+            }
+            if (request.contains("GET "))
+            {
+                socket->write("HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n"
+                              "ETag: \"stalled\"\r\nConnection: close\r\n\r\n"
+                              "partial-data");
+                socket->flush();
+                upstream_connected.store(true);
+                // The client should disconnect on Server destruction, not
+                // because this mock peer prematurely completes its response.
+                QElapsedTimer deadline;
+                deadline.start();
+                while (socket->state() != QAbstractSocket::UnconnectedState &&
+                       deadline.elapsed() < 6000)
+                {
+                    socket->waitForDisconnected(100);
+                }
+                upstream_disconnected.store(
+                    socket->state() == QAbstractSocket::UnconnectedState);
+            }
+        });
+        const quint16 upstream_port = listen_future.get();
+        if (upstream_port == 0)
+        {
+            upstream.join();
+            std::cerr << "Failed to bind loopback terrain upstream\n";
+            return 1;
+        }
+        QTemporaryDir live_cache;
+        if (!live_cache.isValid())
+        {
+            upstream.join();
+            return 1;
+        }
+        Server::Config live_config;
+        live_config.port = 0;
+        live_config.cache_directory = live_cache.path();
+        live_config.terrain_cache_directory = live_cache.path() + "/terrain";
+        live_config.map_remote_fetch_enabled = false;
+        live_config.terrain_remote_fetch_enabled = true;
+        live_config.maximum_terrain_workers = 1;
+        live_config.maximum_terrain_remote_workers = 1;
+        live_config.maximum_terrain_jobs = 4;
+        live_config.terrain_integration_source_url = QUrl(
+            QStringLiteral("http://127.0.0.1:%1/source.tif").arg(upstream_port));
+        Server *live_server = new Server(live_config);
+        if (!live_server->start())
+        {
+            delete live_server;
+            upstream.join();
+            std::cerr << "Failed to start live acquisition test server\n";
+            return 1;
+        }
+        Aowis::Map::TerrainTile tile;
+        tile.dataset = QStringLiteral("copernicus-glo30");
+        tile.address = {8, 100, 100};
+        tile.nominal_resolution_m = 30.0;
+        tile.vertical_datum = Aowis::Map::TerrainVerticalDatum::Egm96;
+        tile.elevations_m.fill(31.0f, Aowis::Map::TerrainTileSampleCount);
+        QString tile_error;
+        const QByteArray cached_bytes = Aowis::Map::encodeTerrainTile(tile, &tile_error);
+        const QString cached_path = TerrainSingleFlightTestAccess::normalizedTilePath(
+            *live_server, tile.dataset, tile.address);
+        QDir().mkpath(QFileInfo(cached_path).absolutePath());
+        QSaveFile cached_output(cached_path);
+        const bool saved_cache = !cached_bytes.isEmpty() &&
+            cached_output.open(QIODevice::WriteOnly) &&
+            cached_output.write(cached_bytes) == cached_bytes.size() &&
+            cached_output.commit();
+        if (!saved_cache)
+        {
+            delete live_server;
+            upstream.join();
+            std::cerr << "Failed to seed cached live-test tile\n";
+            return 1;
+        }
+        QFuture<QHttpServerResponse> stalled_future =
+            TerrainSingleFlightTestAccess::submitTileDirect(
+                *live_server, QStringLiteral("copernicus-glo30"), 8, 101, 100);
+        QElapsedTimer waiting;
+        waiting.start();
+        while (!upstream_connected.load() && waiting.elapsed() < 3000)
+        {
+            app.processEvents(QEventLoop::AllEvents, 10);
+            QThread::msleep(1);
+        }
+        QNetworkAccessManager cached_network;
+        QNetworkReply *cached_reply = cached_network.get(QNetworkRequest(QUrl(
+            QStringLiteral("http://127.0.0.1:%1/terrain/v1/copernicus-glo30/8/100/100.aowterrain")
+                .arg(TerrainSingleFlightTestAccess::port(*live_server)))));
+        waiting.restart();
+        while (!cached_reply->isFinished() && waiting.elapsed() < 3000)
+        {
+            app.processEvents(QEventLoop::AllEvents, 10);
+            QThread::msleep(1);
+        }
+        const bool cached_ok = cached_reply->isFinished() &&
+            cached_reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() == 200 &&
+            cached_reply->readAll() == cached_bytes;
+        cached_reply->deleteLater();
+        const bool active_before_shutdown = upstream_connected.load() &&
+            !stalled_future.isFinished();
+        delete live_server;
+        upstream.join();
+        if (!active_before_shutdown || !cached_ok ||
+            !stalled_future.isFinished() || stalled_future.resultCount() != 1 ||
+            !upstream_disconnected.load())
+        {
+            std::cerr << "Live upstream contention/shutdown failed: active="
+                      << active_before_shutdown << " cached=" << cached_ok
+                      << " future=" << stalled_future.isFinished()
+                      << " disconnected=" << upstream_disconnected.load() << '\n';
             return 1;
         }
     }

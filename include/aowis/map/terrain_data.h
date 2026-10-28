@@ -6,6 +6,7 @@
 #include <aowis/map/download_coverage.h>
 
 #include <QObject>
+#include <QUrl>
 
 
 #include <QByteArray>
@@ -110,6 +111,8 @@ public:
         int connect_timeout_seconds = 30;
         int inactivity_timeout_seconds = 120;
         int download_deadline_seconds = 1800;
+        // Internal integration-test URL, never loaded from a configuration file.
+        QUrl integration_source_url;
         QString coverage_profile;
         DownloadCoverage download_coverage;
     };
