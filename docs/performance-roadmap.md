@@ -251,3 +251,14 @@ operations is still pending.
 The new concurrency path requires a full Qt production-server compile and an
 integration test using multiple concurrent terrain HTTP requests before it
 can be considered fully qualified.
+
+### Terrain single-flight overload regression
+
+The HTTP integration test now uses a six-response pending budget and a
+single admitted terrain job. While the terrain worker is deliberately blocked,
+it verifies that six requests share the same job, a seventh request for the
+same tile returns HTTP 503, and a different tile is also rejected with HTTP
+503. Rejection must not increase the pending-response count, unique-job count,
+or admitted-job count. Once unblocked, all original waiters must finish and the
+single-flight registry must be empty. This verifies the overload behavior at
+actual HTTP request boundaries, not just the admission counter.

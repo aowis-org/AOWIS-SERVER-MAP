@@ -67,7 +67,7 @@ int main(int argc, char **argv)
     config.terrain_remote_fetch_enabled = false;
     config.maximum_terrain_workers = 1;
     config.maximum_terrain_jobs = 1;
-    config.maximum_pending_requests = 16;
+    config.maximum_pending_requests = 6;
     Server server(config);
     if (!server.start())
     {
@@ -107,6 +107,35 @@ int main(int argc, char **argv)
         TerrainSingleFlightTestAccess::uniqueJobCount(server) == 1 &&
         TerrainSingleFlightTestAccess::admittedJobs(server) == 1;
 
+    // The shared job has six HTTP waiters, but only one admission slot.
+    // A seventh identical request and a new unique tile must both be
+    // rejected immediately while the worker remains occupied.
+    // Use a separate connection pool for overload probes. The first manager
+    // already has six outstanding responses and may queue further requests
+    // locally instead of sending them to the server.
+    QNetworkAccessManager overload_network;
+    QNetworkReply *excess_waiter = overload_network.get(QNetworkRequest(url));
+    const QUrl other_url(QStringLiteral(
+        "http://127.0.0.1:%1/terrain/v1/copernicus-glo30/5/11/13.aowterrain")
+        .arg(TerrainSingleFlightTestAccess::port(server)));
+    QNetworkReply *excess_job = overload_network.get(QNetworkRequest(other_url));
+    timer.restart();
+    while ((!excess_waiter->isFinished() || !excess_job->isFinished()) &&
+           timer.elapsed() < 5000)
+    {
+        app.processEvents(QEventLoop::AllEvents, 20);
+        QThread::msleep(1);
+    }
+    const bool overload_rejected =
+        excess_waiter->isFinished() && excess_job->isFinished() &&
+        excess_waiter->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() == 503 &&
+        excess_job->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() == 503 &&
+        TerrainSingleFlightTestAccess::waiterCount(server) == request_count &&
+        TerrainSingleFlightTestAccess::uniqueJobCount(server) == 1 &&
+        TerrainSingleFlightTestAccess::admittedJobs(server) == 1;
+    excess_waiter->deleteLater();
+    excess_job->deleteLater();
+
     // Always release the blocked worker before destroying the server.
     release_worker.release();
     timer.restart();
@@ -131,12 +160,13 @@ int main(int argc, char **argv)
         reply->deleteLater();
     }
 
-    if (!deduplicated || !response_ok ||
+    if (!deduplicated || !overload_rejected || !response_ok ||
         TerrainSingleFlightTestAccess::waiterCount(server) != 0 ||
         TerrainSingleFlightTestAccess::uniqueJobCount(server) != 0)
     {
         std::cerr << "Terrain tile single-flight HTTP regression failed: "
                   << "deduplicated=" << deduplicated
+                  << " overload_rejected=" << overload_rejected
                   << " all_finished=" << all_finished
                   << " valid_responses=" << response_ok << '\n';
         return 1;
