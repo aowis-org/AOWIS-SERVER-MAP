@@ -152,10 +152,13 @@ from byte zero. This keeps the offline cache safe but may use extra bandwidth
 on unreliable links.
 
 Strict HTTP `Content-Range` and strong-ETag matching rules are implemented and
-regression-tested as the validation foundation for future resumable acquisition.
-They **do not enable resumable transfers** yet. A future implementation must
-manage persistent partial files, validators, resume fallback, size limits and
-cross-process locking without ever publishing incomplete GeoTIFFs.
+regression-tested. A separate, versioned partial-state metadata format now also
+validates persisted byte counts against the actual partial-file length, enforces
+a strong ETag and a total-size limit, and writes metadata atomically. These
+helpers are not yet connected to upstream downloads: the downloader **still
+starts from byte zero after interruption** and never publishes partial files.
+The next stage is to stage interrupted data, issue conditional Range requests,
+validate complete 206 responses, and publish only fully assembled source files.
 
 ## Licensing and attribution
 

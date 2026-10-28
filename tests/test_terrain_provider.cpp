@@ -1,6 +1,7 @@
 #include <aowis/map/terrain_data.h>
 #include <aowis/map/terrain_provider.h>
 #include "../src/lib/copernicus_download_validation.h"
+#include "../src/lib/copernicus_resume_state.h"
 
 #include <QDir>
 #include <QFile>
@@ -205,6 +206,36 @@ int main()
     {
         return 1;
     }
+
+    // Partial source state survives process restarts only if both the source
+    // bytes and strong-ETag metadata agree. Never accept stale/altered bytes.
+    const QString partial_path = temporary_directory.filePath("source.partial");
+    const QString metadata_path = temporary_directory.filePath("source.partial.meta");
+    {
+        QFile partial(partial_path);
+        if (!require(partial.open(QIODevice::WriteOnly) &&
+                     partial.write("0123456789", 10) == 10,
+                     "Failed to create Copernicus partial test file"))
+            return 1;
+    }
+    const Internal::CopernicusPartialState partial_state{10, 20, "\"source-v1\""};
+    if (!require(Internal::saveCopernicusPartialState(metadata_path, partial_state, 1024) &&
+                 Internal::loadCopernicusPartialState(partial_path, metadata_path, 1024)
+                     .has_value() &&
+                 !Internal::saveCopernicusPartialState(metadata_path,
+                     {10, 20, "W/\"weak\""}, 1024),
+                 "Copernicus partial metadata validation failed"))
+        return 1;
+    {
+        QFile partial(partial_path);
+        if (!require(partial.open(QIODevice::Append) && partial.write("x", 1) == 1,
+                     "Failed to alter Copernicus partial test file"))
+            return 1;
+    }
+    if (!require(!Internal::loadCopernicusPartialState(partial_path, metadata_path, 1024)
+                     .has_value(),
+                 "Mismatched Copernicus partial bytes were accepted"))
+        return 1;
 
     TerrainData::Config config;
     config.enabled = true;
