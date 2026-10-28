@@ -267,8 +267,11 @@ if(BUILD_TESTING)
         aowis-server-map-terrain-cache-deletion-test
     )
     if(AOWIS_SERVER_MAP_BUILD_SERVER)
+        # Compiling only the unit tests misses API errors in server.cpp.
+        # The native test target must compile the production executable too.
         list(APPEND AOWIS_SERVER_MAP_TEST_TARGETS
-            aowis-server-map-provider-state-test)
+            aowis-server-map-provider-state-test
+            aowis-server-map-server)
     endif()
     add_executable(aowis-server-map-terrain-admission-test
         tests/test_terrain_admission.cpp)

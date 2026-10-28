@@ -117,3 +117,13 @@ to RAM immediately to avoid duplicate downloads. The `tileReady` signal remains
 deferred until the disk-save attempt finishes for admitted writes. Cache
 removal serializes against pending writes. This deliberately does **not** yet
 move cold disk-cache reads or provider-path initialization off the event loop.
+
+### Build and persistence regression gate
+
+The `aowis-server-map-tests` aggregate target now also compiles the production
+`aowis-server-map-server` executable when server builds are enabled. Both Debug
+and Release test runs thus catch Qt HTTP API compilation errors in production
+handlers, even when no HTTP integration test exercises them. The cache-reuse
+test also checks that `tileReady` is not emitted before an admitted asynchronous
+cache write has published its complete file. This is a correctness gate for the
+cache-I/O work; asynchronous cold-cache reads remain a subsequent milestone.

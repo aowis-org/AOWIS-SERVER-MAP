@@ -136,9 +136,14 @@ int main(int argc, char **argv)
 
     providers.first().url_template = QStringLiteral("http://127.0.0.1:%1/{z}/{x}/{y}.png")
         .arg(upstream.serverPort());
+    // Use a fresh cache root for the loopback provider. The earlier fixtures
+    // established a fingerprint for a different upstream URL, which correctly
+    // routes this provider into a variant-specific directory.
+    QTemporaryDir online_cache;
+    require(online_cache.isValid(), "Cannot create online cache test directory");
     const QString requested_key = QStringLiteral("missing-first-time");
     {
-        MapTiles online(cache.path(), 2, 8);
+        MapTiles online(online_cache.path(), 2, 8);
         online.configureProviders(providers, {}, {});
         QByteArray received;
         bool failed = false;
@@ -171,6 +176,16 @@ int main(int argc, char **argv)
         timeout.start(5000);
         loop.exec();
         require(!failed && received == image, "New tile did not download successfully");
+        // tileReady is emitted only after the asynchronous cache-write task
+        // completes. This also catches regressions that publish a response
+        // before an admitted write has committed its file.
+        const QString downloaded_path = QDir(online_cache.path()).filePath(
+            QStringLiteral("maptiles/%1/6/30/20.png").arg(provider_id));
+        QFile persisted_tile(downloaded_path);
+        require(persisted_tile.open(QIODevice::ReadOnly),
+                "tileReady fired before asynchronous disk persistence completed");
+        require(persisted_tile.readAll() == image,
+                "Asynchronously persisted tile differs from downloaded bytes");
         require(request_count == 1, "New tile must be downloaded exactly once");
         const MapTiles::TileRequestResult second =
             online.getTile(provider_id, 6, 30, 20, QStringLiteral("in-memory"));
@@ -180,7 +195,7 @@ int main(int argc, char **argv)
                 "Cached tile scheduled a refresh after max-age=0");
     }
 
-    MapTiles after_restart(cache.path(), 2, 8);
+    MapTiles after_restart(online_cache.path(), 2, 8);
     after_restart.configureProviders(providers, {}, {});
     const MapTiles::TileRequestResult after_restart_hit =
         after_restart.getTile(provider_id, 6, 30, 20, QStringLiteral("after-restart"));
