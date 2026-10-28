@@ -76,6 +76,8 @@ public:
     void cancelUpstreamDownloads();
 
 private:
+    friend class MapTilesCacheWriteTestAccess;
+
     struct CacheWriteState
     {
         QMutex mutex;

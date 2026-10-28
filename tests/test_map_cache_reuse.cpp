@@ -5,12 +5,17 @@
 #include <QDateTime>
 #include <QDir>
 #include <QEventLoop>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QHostAddress>
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QTemporaryDir>
+#include <QSemaphore>
+#include <QThread>
+#include <QtConcurrentRun>
+#include <atomic>
 #include <QTimer>
 
 #include <cstdlib>
@@ -35,6 +40,26 @@ void writeFile(const QString &path, const QByteArray &data)
     require(file.write(data) == data.size(), "Cannot write cache fixture");
 }
 }
+
+// Test-only friend: exercise the same write-state synchronization used by the
+// production worker without exposing test controls in the public map API.
+class MapTilesCacheWriteTestAccess
+{
+public:
+    static QSharedPointer<MapTiles::CacheWriteState> injectPendingWrite(
+        MapTiles &tiles, const QString &key)
+    {
+        const QSharedPointer<MapTiles::CacheWriteState> state =
+            QSharedPointer<MapTiles::CacheWriteState>::create();
+        tiles.cache_write_states.insert(key, state);
+        return state;
+    }
+
+    static bool persist(const QByteArray &bytes, const QString &path)
+    {
+        return MapTiles::saveMapTile(bytes, path);
+    }
+};
 
 int main(int argc, char **argv)
 {
@@ -150,6 +175,51 @@ int main(int argc, char **argv)
         require(!QFile::exists(tile_path), "Deleted tile unexpectedly reappeared");
         require(reader.upstreamActivity().active == 0 && reader.upstreamActivity().queued == 0,
                 "Invalidated cache read restarted an upstream download");
+    }
+
+    // Force an overlapping write to be active while administrative deletion
+    // begins. The background worker holds the exact same per-write mutex as
+    // production persistence. It releases only after deletion invalidates it.
+    // This is deterministic: no file sizes or arbitrary delay select the race.
+    {
+        QTemporaryDir race_cache;
+        require(race_cache.isValid(), "Cannot create active-write race cache");
+        const QString tile_path = QDir(race_cache.path()).filePath(
+            QStringLiteral("maptiles/%1/6/31/20.png").arg(provider_id));
+        writeFile(tile_path, QByteArray("pre-existing-data"));
+        MapTiles writer(race_cache.path(), 2, 8);
+        writer.configureProviders(providers, {}, {});
+        const QString canonical_key = QStringLiteral("%1/6/31/20").arg(provider_id);
+        const auto state = MapTilesCacheWriteTestAccess::injectPendingWrite(writer, canonical_key);
+        QSemaphore worker_locked;
+        std::atomic_bool release_observed{false};
+        QFuture<void> active_write = QtConcurrent::run(
+            [state, &worker_locked, &release_observed, tile_path]()
+        {
+            QMutexLocker locker(&state->mutex);
+            worker_locked.release();
+            // The deleting thread marks invalidated before acquiring mutex.
+            // The worker checks the marker before committing, as production does.
+            QElapsedTimer deadline;
+            deadline.start();
+            while (!state->invalidated.load(std::memory_order_acquire) &&
+                   deadline.elapsed() < 5000)
+                QThread::yieldCurrentThread();
+            release_observed.store(
+                state->invalidated.load(std::memory_order_acquire),
+                std::memory_order_release);
+            if (!state->invalidated.load(std::memory_order_acquire))
+                MapTilesCacheWriteTestAccess::persist(QByteArray("late-data"), tile_path);
+        });
+        require(worker_locked.tryAcquire(1, 5000),
+                "Active-write test worker did not acquire its mutex");
+        require(writer.deleteTiles(provider_id, 6, 31, 31, 20, 20) == 1,
+                "Deletion failed while overlapping write was active");
+        active_write.waitForFinished();
+        require(release_observed.load(std::memory_order_acquire),
+                "Deletion did not invalidate active write before waiting");
+        require(!QFile::exists(tile_path),
+                "Active invalidated writer resurrected a deleted tile");
     }
 
     // A sparse oversized cache file must be rejected before any disk worker

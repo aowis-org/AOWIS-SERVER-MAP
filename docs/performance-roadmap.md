@@ -215,3 +215,14 @@ write path; **it does not deterministically force deletion to overlap an active
 `QSaveFile::commit()`**. A controllable write-pause test seam or dedicated
 worker-level harness is still needed before declaring the active-write race
 fully stress-tested.
+
+## Deterministic per-write invalidation regression
+
+The cache-reuse test now uses a test-only friend accessor to inject a pending
+write state, holds the production per-write mutex in a worker, then deletes
+the overlapping tile. The worker checks the invalidation marker before any
+publication; deletion must wait for the worker and leave no tile behind. A
+five-second watchdog prevents an invalidation regression from hanging the
+test indefinitely. This is a deterministic synchronization test, **not** a
+controlled test inside `QSaveFile::commit()` itself. Filesystem failure and
+crash-consistency tests remain future work.
