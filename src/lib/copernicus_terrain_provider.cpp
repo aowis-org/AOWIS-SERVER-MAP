@@ -679,6 +679,16 @@ private:
                 return std::nullopt;
             }
 
+            Internal::CopernicusTemporaryDecodeReservation decode_reservation(
+                Internal::sharedCopernicusTemporaryDecodeBudget(), qsizetype(tile_bytes));
+            if (!decode_reservation.acquired())
+            {
+                if (error_message != nullptr)
+                    *error_message = QStringLiteral(
+                        "Copernicus temporary TIFF decode memory budget exhausted: %1")
+                                         .arg(this->path);
+                return std::nullopt;
+            }
             QByteArray decoded(int(tile_bytes), '\0');
             if (TIFFReadEncodedTile(this->tiff, tile_index, decoded.data(), tile_bytes) < 0)
             {
@@ -722,6 +732,16 @@ private:
                 return std::nullopt;
             }
 
+            Internal::CopernicusTemporaryDecodeReservation decode_reservation(
+                Internal::sharedCopernicusTemporaryDecodeBudget(), qsizetype(strip_bytes));
+            if (!decode_reservation.acquired())
+            {
+                if (error_message != nullptr)
+                    *error_message = QStringLiteral(
+                        "Copernicus temporary TIFF decode memory budget exhausted: %1")
+                                         .arg(this->path);
+                return std::nullopt;
+            }
             QByteArray decoded(int(strip_bytes), '\0');
             if (TIFFReadEncodedStrip(this->tiff, strip_index, decoded.data(), strip_bytes) < 0)
             {

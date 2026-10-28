@@ -53,7 +53,39 @@ inline CopernicusDecodedBlockBudget &sharedCopernicusDecodedBlockBudget()
     return budget;
 }
 
-// Per-open-raster bound. Evict older decoded TIFF blocks instead of retaining
+// In-flight decoder output buffers are charged independently of retained cache
+// blocks. Reserving before allocation keeps concurrent cache misses bounded.
+inline CopernicusDecodedBlockBudget &sharedCopernicusTemporaryDecodeBudget()
+{
+    static CopernicusDecodedBlockBudget budget(128LL * 1024LL * 1024LL);
+    return budget;
+}
+
+class CopernicusTemporaryDecodeReservation
+{
+public:
+    CopernicusTemporaryDecodeReservation(CopernicusDecodedBlockBudget &budget,
+                                         qsizetype bytes)
+        : budget(budget), reserved_bytes(budget.reserve(bytes) ? bytes : 0)
+    {
+    }
+
+    ~CopernicusTemporaryDecodeReservation()
+    {
+        if (this->reserved_bytes > 0)
+            this->budget.release(this->reserved_bytes);
+    }
+
+    CopernicusTemporaryDecodeReservation(const CopernicusTemporaryDecodeReservation &) = delete;
+    CopernicusTemporaryDecodeReservation &operator=(const CopernicusTemporaryDecodeReservation &) = delete;
+
+    bool acquired() const { return this->reserved_bytes > 0; }
+
+private:
+    CopernicusDecodedBlockBudget &budget;
+    qsizetype reserved_bytes = 0;
+};
+
 // every block sampled by a large terrain grid for the lifetime of the request.
 class CopernicusDecodedBlockCache
 {

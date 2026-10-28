@@ -756,7 +756,26 @@ TerrainTileLookupResult TerrainData::readNormalizedTile(
         return result;
     }
 
-    const QByteArray data = file.readAll();
+    // Normalized tiles have a fixed 65x65 uint16 payload and at most a
+    // 128-byte dataset identifier. Never read an arbitrarily large cache file.
+    constexpr qint64 maximum_normalized_tile_bytes =
+        64 + TerrainTileMaximumDatasetIdBytes +
+        TerrainTileSampleCount * qint64(sizeof(quint16));
+    if (file.size() > maximum_normalized_tile_bytes)
+    {
+        result.status = TerrainTileLookupStatus::CorruptTile;
+        result.error_message = QStringLiteral("Normalized terrain tile exceeds format size limit: %1")
+                                   .arg(path);
+        return result;
+    }
+    const QByteArray data = file.read(maximum_normalized_tile_bytes + 1);
+    if (data.size() > maximum_normalized_tile_bytes)
+    {
+        result.status = TerrainTileLookupStatus::CorruptTile;
+        result.error_message = QStringLiteral("Normalized terrain tile exceeds format size limit: %1")
+                                   .arg(path);
+        return result;
+    }
     QString decode_error;
     const std::optional<TerrainTile> tile = decodeTerrainTile(data, &decode_error);
     if (!tile.has_value())

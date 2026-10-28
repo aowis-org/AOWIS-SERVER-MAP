@@ -432,6 +432,27 @@ int main()
         return 1;
     }
 
+    // A corrupt normalized cache file must not trigger an unbounded readAll().
+    // The provider should detect the oversized entry and repair it from the
+    // already cached native GeoTIFF, just as it repairs invalid checksums.
+    QFile oversized_normalized_file(normalized_path);
+    if (!require(oversized_normalized_file.open(QIODevice::WriteOnly | QIODevice::Append) &&
+                     oversized_normalized_file.write(QByteArray(1024 * 1024, 'x')) == 1024 * 1024,
+                 "Failed to create oversized normalized tile for bounded-read test"))
+    {
+        return 1;
+    }
+    oversized_normalized_file.close();
+    result = terrain_data.terrainTile(QStringLiteral("copernicus-glo30"), address);
+    if (!require(result.status == TerrainTileLookupStatus::Ready &&
+                     result.data == first_data &&
+                     QFileInfo(normalized_path).size() == first_data.size(),
+                 "Oversized normalized tile was not safely rejected and repaired"))
+    {
+        std::cerr << result.error_message.toStdString() << '\n';
+        return 1;
+    }
+
     TerrainTileAddress unsupported_address = address;
     unsupported_address.zoom = 15;
     unsupported_address.x *= 2;
@@ -629,6 +650,32 @@ int main()
     }
     if (!require(shared_budget.bytes() == 0,
                  "Destroyed raster caches leaked shared decoded-block reservations"))
+        return 1;
+
+    // Temporary TIFF output buffers have a separate shared, scoped budget.
+    // A failed reservation must not consume memory; all success/error scopes
+    // must release their reservation before the next decode starts.
+    Internal::CopernicusDecodedBlockBudget temporary_budget(12);
+    {
+        Internal::CopernicusTemporaryDecodeReservation first(temporary_budget, 8);
+        Internal::CopernicusTemporaryDecodeReservation refused(temporary_budget, 8);
+        Internal::CopernicusTemporaryDecodeReservation second(temporary_budget, 4);
+        if (!require(first.acquired() && !refused.acquired() && second.acquired() &&
+                     temporary_budget.bytes() == 12,
+                     "Temporary TIFF decode reservations exceeded shared budget"))
+            return 1;
+    }
+    if (!require(temporary_budget.bytes() == 0,
+                 "Temporary TIFF decode scope failed to release shared reservation"))
+        return 1;
+    {
+        Internal::CopernicusTemporaryDecodeReservation after_release(temporary_budget, 12);
+        if (!require(after_release.acquired() && temporary_budget.bytes() == 12,
+                     "Released temporary TIFF decode budget could not be reused"))
+            return 1;
+    }
+    if (!require(temporary_budget.bytes() == 0,
+                 "Temporary TIFF decode reservation leaked after reuse"))
         return 1;
 
     return 0;
