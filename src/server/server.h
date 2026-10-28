@@ -72,6 +72,8 @@ private:
 
     void setupRoutes();
     QFuture<QHttpServerResponse> submitTerrainJob(std::function<QHttpServerResponse()> task);
+    QFuture<QHttpServerResponse> submitTerrainTile(const QString &dataset,
+                                                   int zoom, int tile_x, int tile_y);
     bool isReadAuthorized(const QHttpServerRequest &request) const;
     bool isDeleteAuthorized(const QHttpServerRequest &request) const;
     bool requestContainsKey(const QHttpServerRequest &request, const QByteArray &expected_key) const;
@@ -86,6 +88,8 @@ private:
     MapTiles *maptiles;
     Aowis::Map::TerrainData *terrain_data;
 
+    QHash<QString, PendingPromises> pending_terrain_tiles;
+    int pending_terrain_tile_count = 0;
     QMutex mutex_pending;
     QHash<QString, PendingPromises> connections_pending;
     int pending_request_count;

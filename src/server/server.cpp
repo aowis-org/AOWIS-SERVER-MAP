@@ -296,6 +296,20 @@ Server::~Server()
     // before QObject child destruction starts; no new requests are accepted.
     this->terrain_worker_pool.waitForDone();
 
+    // Any queued terrain-tile completion callbacks are canceled on shutdown.
+    for (const PendingPromises &promises : std::as_const(this->pending_terrain_tiles))
+    {
+        for (const PendingPromise &promise : promises)
+        {
+            promise->addResult(QHttpServerResponse(
+                "Map server shutting down",
+                QHttpServerResponse::StatusCode::ServiceUnavailable));
+            promise->finish();
+        }
+    }
+    this->pending_terrain_tiles.clear();
+    this->pending_terrain_tile_count = 0;
+
     for (const PendingPromises &promises : std::as_const(pending))
     {
         for (const PendingPromise &promise : promises)
@@ -334,6 +348,79 @@ QFuture<QHttpServerResponse> Server::submitTerrainJob(std::function<QHttpServerR
         } release { &this->terrain_admission };
         return task();
     });
+}
+
+QFuture<QHttpServerResponse> Server::submitTerrainTile(
+    const QString &dataset, int zoom, int tile_x, int tile_y)
+{
+    // Called exclusively on the HTTP event-loop thread. Each HTTP request owns
+    // a distinct promise, but identical requests share one terrain worker job.
+    const QString key = dataset + QLatin1Char('/') + QString::number(zoom) +
+        QLatin1Char('/') + QString::number(tile_x) + QLatin1Char('/') +
+        QString::number(tile_y);
+    const bool existing = this->pending_terrain_tiles.contains(key);
+    if (this->shutting_down ||
+        this->pending_terrain_tile_count >= this->config.maximum_pending_requests ||
+        (!existing && !this->terrain_admission.tryAcquire()))
+    {
+        QHttpServerResponse response(
+            "Terrain service busy; retry later",
+            QHttpServerResponse::StatusCode::ServiceUnavailable);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
+        QHttpHeaders headers = response.headers();
+        headers.replaceOrAppend("Retry-After", "1");
+        response.setHeaders(std::move(headers));
+#else
+        response.setHeader("Retry-After", "1");
+#endif
+        return makeReadyResponse(std::move(response));
+    }
+
+    PendingPromise promise = PendingPromise::create();
+    promise->start();
+    QFuture<QHttpServerResponse> future = promise->future();
+    this->pending_terrain_tiles[key].append(promise);
+    ++this->pending_terrain_tile_count;
+    if (existing)
+        return future;
+
+    Aowis::Map::TerrainTileAddress address;
+    address.zoom = zoom;
+    address.x = quint32(tile_x);
+    address.y = quint32(tile_y);
+    QtConcurrent::run(&this->terrain_worker_pool, [this, key, dataset, address]()
+    {
+        Aowis::Map::TerrainTileLookupResult result;
+        try
+        {
+            result = this->terrain_data->terrainTile(dataset, address);
+        }
+        catch (...)
+        {
+            result.status = Aowis::Map::TerrainTileLookupStatus::ProviderError;
+            result.error_message = QStringLiteral("Terrain processing failed");
+        }
+        this->terrain_admission.release();
+        QMetaObject::invokeMethod(this, [this, key, result = std::move(result)]() mutable
+        {
+            const PendingPromises waiters = this->pending_terrain_tiles.take(key);
+            this->pending_terrain_tile_count -= waiters.size();
+            for (const PendingPromise &waiter : waiters)
+            {
+                if (result.status == Aowis::Map::TerrainTileLookupStatus::Ready)
+                {
+                    waiter->addResult(QHttpServerResponse(
+                        Aowis::Map::terrainTileMimeType().toUtf8(), result.data));
+                }
+                else
+                {
+                    waiter->addResult(makeTerrainTileErrorResponse(result));
+                }
+                waiter->finish();
+            }
+        }, Qt::QueuedConnection);
+    });
+    return future;
 }
 
 bool Server::start()
@@ -888,17 +975,7 @@ void Server::setupRoutes()
             return makeReadyResponse(makeTerrainTileErrorResponse(invalid_result));
         }
 
-        return submitTerrainJob( [this, dataset, address]()
-        {
-            const Aowis::Map::TerrainTileLookupResult terrain_result =
-                this->terrain_data->terrainTile(dataset, address);
-            if (terrain_result.status != Aowis::Map::TerrainTileLookupStatus::Ready)
-                return makeTerrainTileErrorResponse(terrain_result);
-
-            return QHttpServerResponse(
-                Aowis::Map::terrainTileMimeType().toUtf8(),
-                terrain_result.data);
-        });
+        return submitTerrainTile(dataset, zoom, tile_x, tile_y);
     });
 
     this->http.route("/terrain/v1/<arg>/<arg>/<arg>/<arg>.aowterrain",

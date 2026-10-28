@@ -236,3 +236,18 @@ settings are 1..256; invalid configurations fail validation. This prevents
 large hosts from automatically launching half their logical CPUs worth of
 blocking terrain fetches. The pool still mixes I/O and CPU; splitting terrain
 upstream retrieval into an asynchronous domain remains future work.
+
+## Phase 04: terrain tile single-flight (initial increment)
+
+Identical in-flight GET requests for an `.aowterrain` tile now share one
+terrain worker operation and one terrain admission slot. Each HTTP request
+retains its own response promise; the completed tile data (or error) is sent
+to every waiter on the server event-loop thread. Waiting responses are capped
+by `maximum_pending_requests`. Shutdown completes outstanding tile waiters with
+503 after the terrain worker pool drains. Other terrain endpoints retain the
+existing independent-job behavior; deduplication for grid and elevation
+operations is still pending.
+
+The new concurrency path requires a full Qt production-server compile and an
+integration test using multiple concurrent terrain HTTP requests before it
+can be considered fully qualified.
