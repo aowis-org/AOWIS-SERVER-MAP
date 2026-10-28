@@ -1264,6 +1264,78 @@ TerrainProviderFetchResult CopernicusTerrainProvider::fetchTile(
     return result;
 }
 
+TerrainProviderFetchResult CopernicusTerrainProvider::acquireGridSources(
+    const TerrainAnalysisGridRequest &request,
+    const QString &provider_cache_directory, bool allow_remote_fetch)
+{
+    TerrainProviderFetchResult result;
+    result.status = TerrainProviderFetchStatus::Ready;
+    if (!allow_remote_fetch)
+        return result;
+    if (!supportsDataset(request.dataset))
+    {
+        result.status = TerrainProviderFetchStatus::UnsupportedDataset;
+        result.error_message = QStringLiteral("Unknown Copernicus terrain dataset");
+        return result;
+    }
+    const TerrainGeographicBox &box = request.bounds;
+    if (request.columns < 1 || request.columns > 512 ||
+        request.rows < 1 || request.rows > 512 ||
+        !std::isfinite(box.west_deg) || !std::isfinite(box.east_deg) ||
+        !std::isfinite(box.south_deg) || !std::isfinite(box.north_deg) ||
+        box.west_deg < -180.0 || box.east_deg > 180.0 ||
+        box.south_deg < -85.0 || box.north_deg > 85.0 ||
+        box.west_deg >= box.east_deg || box.south_deg >= box.north_deg)
+    {
+        result.status = TerrainProviderFetchStatus::UnsupportedAddress;
+        result.error_message = QStringLiteral("Invalid source raster window (1..512 cells per axis)");
+        return result;
+    }
+    quint64 request_generation = 0;
+    {
+        QMutexLocker locker(&this->upstream_mutex);
+        request_generation = this->upstream_cancel_generation;
+    }
+    // Match fetchAnalysisGrid's native sample centres exactly. A grid may
+    // be sparse across a large box; downloading the entire box would consume
+    // vastly more bandwidth than the actual computation requires.
+    QHash<QString, CopernicusSourceAddress> source_addresses;
+    const double longitude_step = (box.east_deg - box.west_deg) / double(request.columns);
+    const double latitude_step = (box.north_deg - box.south_deg) / double(request.rows);
+    for (int row = 0; row < request.rows; ++row)
+    {
+        const double latitude = box.north_deg - (double(row) + 0.5) * latitude_step;
+        for (int column = 0; column < request.columns; ++column)
+        {
+            const double longitude = box.west_deg + (double(column) + 0.5) * longitude_step;
+            const CopernicusSourceAddress source = sourceAddressForCoordinate(latitude, longitude);
+            source_addresses.insert(sourceAddressKey(source), source);
+        }
+    }
+    for (const CopernicusSourceAddress &source : std::as_const(source_addresses))
+    {
+        const SourceLoadResult acquired = downloadSourceTile(
+            provider_cache_directory, source, true, &this->upstream_mutex,
+            &this->upstream_active_replies, &this->upstream_cancel_generation,
+            request_generation, this->connect_timeout_ms, this->inactivity_timeout_ms,
+            this->download_deadline_ms);
+        if (acquired.status == SourceLoadStatus::Cancelled ||
+            acquired.status == SourceLoadStatus::NetworkError ||
+            acquired.status == SourceLoadStatus::ReadError)
+        {
+            result.status = acquired.status == SourceLoadStatus::Cancelled
+                ? TerrainProviderFetchStatus::Cancelled
+                : acquired.status == SourceLoadStatus::NetworkError
+                    ? TerrainProviderFetchStatus::NetworkError
+                    : TerrainProviderFetchStatus::SourceReadError;
+            result.error_message = acquired.error_message;
+            return result;
+        }
+        // Unavailable source cells are represented as NaN by the CPU stage.
+    }
+    return result;
+}
+
 TerrainAnalysisGridResult CopernicusTerrainProvider::fetchAnalysisGrid(
     const TerrainAnalysisGridRequest &request,
     const QString &provider_cache_directory, bool allow_remote_fetch)

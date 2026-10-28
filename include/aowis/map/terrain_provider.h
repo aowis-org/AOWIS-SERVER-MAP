@@ -109,6 +109,19 @@ public:
                                                  const TerrainTileAddress &address,
                                                  const QString &provider_cache_directory,
                                                  bool allow_remote_fetch) = 0;
+    // Acquire exactly the native source cells sampled by an analysis grid,
+    // without allocating its output or reading raster pixels.
+    virtual TerrainProviderFetchResult acquireGridSources(
+        const TerrainAnalysisGridRequest &request,
+        const QString &provider_cache_directory, bool allow_remote_fetch)
+    {
+        Q_UNUSED(request);
+        Q_UNUSED(provider_cache_directory);
+        Q_UNUSED(allow_remote_fetch);
+        TerrainProviderFetchResult result;
+        result.status = TerrainProviderFetchStatus::Ready;
+        return result;
+    }
     virtual TerrainAnalysisGridResult fetchAnalysisGrid(
         const TerrainAnalysisGridRequest &request,
         const QString &provider_cache_directory, bool allow_remote_fetch) = 0;

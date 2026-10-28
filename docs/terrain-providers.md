@@ -83,8 +83,9 @@ usable validator may still need to restart from byte zero.
 
 Native COGs already in cache, and normalized tiles already generated,
 remain usable when Internet access is unavailable or remote fetching is
-disabled. Upstream acquisition still runs within terrain worker operations;
-it is not yet isolated in an independent network worker pool. For concurrency
+disabled. Normalized tiles and analysis grids now acquire missing native sources on the
+remote-capable pool and hand off to the CPU processing pool. Elevation requests
+still use remote-capable workers for both acquisition and sampling. For concurrency
 budgets and remaining limitations see
 [Performance, concurrency and operations](performance-roadmap.md).
 

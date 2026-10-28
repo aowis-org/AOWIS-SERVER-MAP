@@ -30,6 +30,9 @@ public:
                                          const TerrainTileAddress &address,
                                          const QString &provider_cache_directory,
                                          bool allow_remote_fetch) override;
+    TerrainProviderFetchResult acquireGridSources(
+        const TerrainAnalysisGridRequest &request,
+        const QString &provider_cache_directory, bool allow_remote_fetch) override;
     TerrainAnalysisGridResult fetchAnalysisGrid(
         const TerrainAnalysisGridRequest &request,
         const QString &provider_cache_directory, bool allow_remote_fetch) override;

@@ -558,7 +558,7 @@ TerrainCacheDeletionResult TerrainData::deleteSourceData(
 }
 
 TerrainAnalysisGridResult TerrainData::analysisGrid(
-    const TerrainAnalysisGridRequest &request) const
+    const TerrainAnalysisGridRequest &request, bool allow_remote_fetch) const
 {
     TerrainAnalysisGridResult result;
     if (!this->config.enabled || !this->initialized)
@@ -577,10 +577,25 @@ TerrainAnalysisGridResult TerrainData::analysisGrid(
     {
         if (provider->supportsDataset(request.dataset))
             return provider->fetchAnalysisGrid(request, this->storage_paths.providers,
-                                              this->config.remote_fetch_enabled);
+                                              this->config.remote_fetch_enabled && allow_remote_fetch);
     }
     result.status = TerrainProviderFetchStatus::UnsupportedDataset;
     result.error_message = QStringLiteral("Unrecognized terrain dataset");
+    return result;
+}
+
+TerrainProviderFetchResult TerrainData::acquireGridSources(
+    const TerrainAnalysisGridRequest &request) const
+{
+    TerrainProviderFetchResult result;
+    result.status = TerrainProviderFetchStatus::Ready;
+    if (!this->initialized || !this->config.remote_fetch_enabled)
+        return result;
+    for (const std::unique_ptr<TerrainProvider> &provider : this->providers)
+    {
+        if (provider->supportsDataset(request.dataset))
+            return provider->acquireGridSources(request, this->storage_paths.providers, true);
+    }
     return result;
 }
 

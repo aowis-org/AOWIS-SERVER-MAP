@@ -621,5 +621,76 @@ int main(int argc, char **argv)
             return 1;
         }
     }
+    // A grid acquisition must release remote admission before its CPU-only
+    // sampling stage runs; the global job and byte reservations survive the
+    // handoff. No providers are enabled, so this remains an offline test.
+    {
+        QTemporaryDir grid_handoff_cache;
+        if (!grid_handoff_cache.isValid())
+            return 1;
+        Server::Config grid_handoff_config;
+        grid_handoff_config.port = 0;
+        grid_handoff_config.cache_directory = grid_handoff_cache.path();
+        grid_handoff_config.terrain_cache_directory = grid_handoff_cache.path() + "/terrain";
+        grid_handoff_config.map_remote_fetch_enabled = false;
+        grid_handoff_config.terrain_remote_fetch_enabled = true;
+        grid_handoff_config.copernicus_enabled = false;
+        grid_handoff_config.maximum_terrain_workers = 1;
+        grid_handoff_config.maximum_terrain_remote_workers = 1;
+        grid_handoff_config.maximum_terrain_jobs = 2;
+        Server grid_handoff_server(grid_handoff_config);
+        if (!grid_handoff_server.start())
+            return 1;
+        QSemaphore grid_cpu_entered;
+        QSemaphore grid_cpu_release;
+        TerrainSingleFlightTestAccess::blockWorker(
+            grid_handoff_server, grid_cpu_entered, grid_cpu_release);
+        if (!grid_cpu_entered.tryAcquire(1, 3000))
+        {
+            grid_cpu_release.release();
+            return 1;
+        }
+        QNetworkAccessManager grid_handoff_network;
+        const QUrl grid_handoff_url(QStringLiteral(
+            "http://127.0.0.1:%1/terrain/v1/analysis/grid?west=8&south=49&east=9&north=50&columns=2&rows=2")
+            .arg(TerrainSingleFlightTestAccess::port(grid_handoff_server)));
+        QNetworkReply *grid_handoff_reply = grid_handoff_network.get(
+            QNetworkRequest(grid_handoff_url));
+        timer.restart();
+        bool grid_queued = false;
+        while (timer.elapsed() < 3000)
+        {
+            app.processEvents(QEventLoop::AllEvents, 20);
+            grid_queued = TerrainSingleFlightTestAccess::gridJobs(grid_handoff_server) == 1 &&
+                TerrainSingleFlightTestAccess::remoteAdmittedJobs(grid_handoff_server) == 0 &&
+                TerrainSingleFlightTestAccess::admittedJobs(grid_handoff_server) == 1 &&
+                !grid_handoff_reply->isFinished();
+            if (grid_queued)
+                break;
+            QThread::msleep(1);
+        }
+        grid_cpu_release.release();
+        timer.restart();
+        while (!grid_handoff_reply->isFinished() && timer.elapsed() < 3000)
+        {
+            app.processEvents(QEventLoop::AllEvents, 20);
+            QThread::msleep(1);
+        }
+        const bool grid_finished = grid_handoff_reply->isFinished();
+        const int grid_status = grid_finished
+            ? grid_handoff_reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt()
+            : 0;
+        grid_handoff_reply->deleteLater();
+        app.processEvents(QEventLoop::AllEvents, 20);
+        if (!grid_queued || !grid_finished || grid_status == 200 ||
+            TerrainSingleFlightTestAccess::admittedJobs(grid_handoff_server) != 0 ||
+            TerrainSingleFlightTestAccess::remoteAdmittedJobs(grid_handoff_server) != 0)
+        {
+            std::cerr << "Grid acquisition-to-CPU handoff regression failed: queued="
+                      << grid_queued << " finished=" << grid_finished
+                      << " status=" << grid_status << '\n';
+            return 1;
+        }
+    }
     return 0;
 }

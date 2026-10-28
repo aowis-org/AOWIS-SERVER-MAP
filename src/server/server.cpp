@@ -647,14 +647,12 @@ QFuture<QHttpServerResponse> Server::submitTerrainGrid(
     if (existing)
         return future;
 
-    QThreadPool *execution_pool = remote_job
-        ? &this->terrain_remote_pool : &this->terrain_worker_pool;
-    execution_pool->start([this, key, request, estimated_bytes, remote_job]()
+    const std::function<void()> process_grid = [this, key, request, estimated_bytes, remote_job]()
     {
         Aowis::Map::TerrainAnalysisGridResult result;
         try
         {
-            result = this->terrain_data->analysisGrid(request);
+            result = this->terrain_data->analysisGrid(request, !remote_job);
         }
         catch (...)
         {
@@ -676,8 +674,6 @@ QFuture<QHttpServerResponse> Server::submitTerrainGrid(
             }
         }
         this->terrain_admission.release();
-        if (remote_job)
-            this->terrain_remote_admission.release();
         QMetaObject::invokeMethod(this,
             [this, key, estimated_bytes, result = std::move(result), bytes = std::move(bytes)]() mutable
         {
@@ -703,6 +699,47 @@ QFuture<QHttpServerResponse> Server::submitTerrainGrid(
                         QHttpServerResponse::StatusCode::ServiceUnavailable;
                     waiter->addResult(QHttpServerResponse(result.error_message, status));
                 }
+                waiter->finish();
+            }
+            this->terrain_grid_bytes.release(estimated_bytes);
+        }, Qt::QueuedConnection);
+    };
+    if (!remote_job)
+    {
+        this->terrain_worker_pool.start(process_grid);
+        return future;
+    }
+    this->terrain_remote_pool.start([this, key, request, estimated_bytes, process_grid]()
+    {
+        Aowis::Map::TerrainProviderFetchResult acquired;
+        try
+        {
+            acquired = this->terrain_data->acquireGridSources(request);
+        }
+        catch (...)
+        {
+            acquired.status = Aowis::Map::TerrainProviderFetchStatus::NetworkError;
+            acquired.error_message = QStringLiteral("Grid source acquisition failed");
+        }
+        this->terrain_remote_admission.release();
+        if (acquired.status == Aowis::Map::TerrainProviderFetchStatus::Ready)
+        {
+            this->terrain_worker_pool.start(process_grid);
+            return;
+        }
+        this->terrain_admission.release();
+        QMetaObject::invokeMethod(this,
+            [this, key, estimated_bytes, acquired = std::move(acquired)]() mutable
+        {
+            const PendingPromises waiters = this->pending_terrain_grids.take(key);
+            this->pending_terrain_tile_count -= waiters.size();
+            const QHttpServerResponse::StatusCode status =
+                acquired.status == Aowis::Map::TerrainProviderFetchStatus::NetworkError
+                ? QHttpServerResponse::StatusCode::BadGateway
+                : QHttpServerResponse::StatusCode::ServiceUnavailable;
+            for (const PendingPromise &waiter : waiters)
+            {
+                waiter->addResult(QHttpServerResponse(acquired.error_message, status));
                 waiter->finish();
             }
             this->terrain_grid_bytes.release(estimated_bytes);
