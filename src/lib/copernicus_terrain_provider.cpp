@@ -40,7 +40,8 @@ constexpr int CopernicusMaximumNormalizedZoom = 14;
 constexpr double CopernicusNominalResolutionM = 30.0;
 // Timeouts are configured per provider instance to accommodate slow connections.
 constexpr int ProviderSourceLockTimeoutMs = 180000;
-constexpr int ProviderSourceStaleLockMs = 10 * 60 * 1000;
+constexpr int ProviderSourceMinimumStaleLockMs = 10 * 60 * 1000;
+constexpr int ProviderSourceLockGraceMs = 60 * 1000;
 constexpr qint64 MaximumSourceDownloadBytes = 256LL * 1024LL * 1024LL;
 
 const QString CopernicusDataset = QStringLiteral("copernicus-glo30");
@@ -192,7 +193,14 @@ SourceLoadResult downloadSourceTile(const QString &provider_cache_directory,
     }
 
     QLockFile source_lock(result.path + QStringLiteral(".lock"));
-    source_lock.setStaleLockTime(ProviderSourceStaleLockMs);
+    // A valid slow transfer can outlast the former fixed ten-minute stale-lock
+    // threshold. Do not allow another process to consider its source lock stale
+    // before the configured download deadline plus cleanup grace.
+    const qint64 source_stale_lock_ms = std::max(
+        qint64(ProviderSourceMinimumStaleLockMs),
+        qint64(download_deadline_ms) + ProviderSourceLockGraceMs);
+    source_lock.setStaleLockTime(int(std::min(
+        source_stale_lock_ms, qint64(std::numeric_limits<int>::max()))));
     // Poll the cross-process source lock rather than blocking for up to three
     // minutes without noticing a shutdown/cancellation request. The lock still
     // protects the entire download and cache commit once acquired.
@@ -1353,7 +1361,14 @@ TerrainSourceDeletionResult CopernicusTerrainProvider::deleteSourceData(
             // fills the file. Held longer than a moment means a download is
             // running: that file is new data, keep it.
             QLockFile source_lock(path + QStringLiteral(".lock"));
-            source_lock.setStaleLockTime(ProviderSourceStaleLockMs);
+            // A valid slow transfer can outlast the former fixed ten-minute stale-lock
+    // threshold. Do not allow another process to consider its source lock stale
+    // before the configured download deadline plus cleanup grace.
+    const qint64 source_stale_lock_ms = std::max(
+        qint64(ProviderSourceMinimumStaleLockMs),
+        qint64(download_deadline_ms) + ProviderSourceLockGraceMs);
+    source_lock.setStaleLockTime(int(std::min(
+        source_stale_lock_ms, qint64(std::numeric_limits<int>::max()))));
             if (!source_lock.tryLock(1000))
                 continue;
 

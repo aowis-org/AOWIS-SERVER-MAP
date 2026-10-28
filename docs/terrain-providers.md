@@ -68,6 +68,9 @@ inactivity and absolute-duration limits in `[terrain]`: 30 seconds, 120 seconds
 and 1800 seconds respectively by default. Slow but progressing connections
 can continue within the total deadline. The source-file lock wait checks for
 cancellation so shutdown does not have to wait for the entire lock timeout.
+The cross-process source lock stale threshold is at least ten minutes and
+extends beyond the configured download deadline by one minute, preventing a
+legitimate slow download from being mistaken for an abandoned cache fill.
 
 Interrupted full downloads with a strong ETag and a known total size can retain
 verified partial data. On the next attempt, the downloader sends `Range` and
