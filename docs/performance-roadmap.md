@@ -182,3 +182,13 @@ requires a follow-up per-tile write/delete coordinator. Invalid deletion
 parameters are now rejected before mutating the cache generation, preserving
 unrelated pending reads. The existing cache-reuse regression exercises both
 pending-read invalidation and invalid deletion input.
+
+### Phase 03: narrow cache-write deletion barrier
+
+Cache deletion no longer waits for outstanding asynchronous cache writes
+when none of their canonical tile keys overlap the requested provider,
+zoom, and coordinate ranges. A matching write still triggers the existing
+write-pool drain before filesystem removal to prevent a deleted tile from
+reappearing. This is a limited optimization rather than fully asynchronous
+delete handling: overlapping deletion may still block while unrelated
+workers finish, and the filesystem traversal itself remains synchronous.
