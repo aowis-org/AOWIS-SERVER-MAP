@@ -298,10 +298,77 @@ bool verifyActiveCancellation(const QString &root)
     upstream.join();
     const QString source = QDir(directory).filePath(
         "copernicus/glo30/Copernicus_DSM_COG_10_N50_00_E008_00_DEM.tif");
-    return require(disconnected, "Active source cancellation did not close upstream connection") &&
-           require(!fetched && error.contains("cancel", Qt::CaseInsensitive),
-                   "Active source cancellation did not report cancellation") &&
-           require(!QFile::exists(source), "Canceled download published incomplete source");
+    if (!require(disconnected, "Active source cancellation did not close upstream connection") ||
+        !require(!fetched && error.contains("cancel", Qt::CaseInsensitive),
+                 "Active source cancellation did not report cancellation") ||
+        !require(!QFile::exists(source), "Canceled download published incomplete source"))
+        return false;
+
+    // A canceled transfer must not poison later acquisition. Respond with a
+    // complete replacement even if the next request includes Range/If-Range.
+    std::promise<quint16> recovery_ready;
+    std::promise<bool> recovery_completed;
+    std::future<quint16> recovery_port = recovery_ready.get_future();
+    std::future<bool> recovery_outcome = recovery_completed.get_future();
+    const QByteArray complete_payload(1000, 'R');
+    std::thread recovery([ready = std::move(recovery_ready),
+                          completed = std::move(recovery_completed),
+                          complete_payload]() mutable
+    {
+        QTcpServer server;
+        if (!server.listen(QHostAddress::LocalHost, 0))
+        {
+            ready.set_value(0);
+            completed.set_value(false);
+            return;
+        }
+        ready.set_value(server.serverPort());
+        if (!server.waitForNewConnection(5000))
+        {
+            completed.set_value(false);
+            return;
+        }
+        QTcpSocket *socket = server.nextPendingConnection();
+        QByteArray request;
+        while (!request.contains("\r\n\r\n") && request.size() < 16384)
+        {
+            if (!socket->waitForReadyRead(5000))
+                break;
+            request += socket->readAll();
+        }
+        const QByteArray response =
+            "HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n"
+            "ETag: \"recovered-v2\"\r\nConnection: close\r\n\r\n" + complete_payload;
+        const qint64 accepted = socket->write(response);
+        socket->flush();
+        while (socket->bytesToWrite() > 0 &&
+               socket->state() == QAbstractSocket::ConnectedState)
+            socket->waitForBytesWritten(5000);
+        const bool sent = accepted == response.size() && socket->bytesToWrite() == 0;
+        socket->disconnectFromHost();
+        if (socket->state() != QAbstractSocket::UnconnectedState)
+            socket->waitForDisconnected(2000);
+        completed.set_value(request.startsWith("GET ") && sent);
+    });
+    const quint16 second_port = recovery_port.get();
+    if (!require(second_port != 0, "Recovery mock could not bind"))
+    {
+        recovery.join();
+        return false;
+    }
+    error.clear();
+    const bool recovered = Aowis::Map::Internal::fetchCopernicusSourceForIntegrationTest(
+        directory, QUrl(QStringLiteral("http://127.0.0.1:%1/source.tif").arg(second_port)),
+        &error);
+    const bool recovery_sent = recovery_outcome.get();
+    recovery.join();
+    QFile published(source);
+    return require(recovery_sent && recovered,
+                   QStringLiteral("Download did not recover after cancellation: upstream_sent=%1, error=%2")
+                       .arg(recovery_sent).arg(error).toUtf8().constData()) &&
+           require(published.open(QIODevice::ReadOnly) &&
+                   published.readAll() == complete_payload,
+                   "Recovery did not atomically publish the complete replacement");
 }
 
 bool verifyRecoveryScenario(const QString &root, int scenario,
