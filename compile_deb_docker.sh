@@ -6,11 +6,15 @@ dist_directory="$project_root/dist"
 docker_image="aowis-server-map-debian-builder:trixie"
 revision="${DEB_REVISION:-1}"
 run_tests=false
+build_network="bridge"
+test_network="bridge"
 
 usage()
 {
     cat <<'HELP'
 Usage: ./compile_deb_docker.sh [--test] [--revision NUMBER]
+                               [--build-network bridge|host]
+                               [--test-network bridge|host]
 
 Build the AOWIS Server Map Debian package in a Debian 13 (trixie) Docker
 container without installing Debian build dependencies on the host.
@@ -19,6 +23,12 @@ container without installing Debian build dependencies on the host.
                       installation, upgrade, runtime HTTP, removal and purge in
                       a disposable, fresh Debian container.
   --revision NUMBER   Initial Debian revision (positive integer, default: 1).
+  --build-network MODE
+                      Docker network for installing build dependencies while
+                      building the toolchain image (bridge or host; default bridge).
+  --test-network MODE Docker network for package-installation qualification
+                      (bridge or host; default bridge). With host networking,
+                      the test HTTP listener uses the HOST loopback port 18122.
   -h, --help          Show help.
 
 Output: dist/aowis-server-map_<version>+deb<revision>_<architecture>.deb
@@ -37,6 +47,22 @@ while (( $# > 0 )); do
                 exit 2
             fi
             revision="$2"
+            shift 2
+            ;;
+        --build-network|--test-network)
+            if (( $# < 2 )); then
+                printf 'Error: %s requires bridge or host.\n' "$1" >&2
+                exit 2
+            fi
+            if [[ "$2" != "bridge" && "$2" != "host" ]]; then
+                printf 'Error: %s must be bridge or host, not %s.\n' "$1" "$2" >&2
+                exit 2
+            fi
+            if [[ "$1" == "--build-network" ]]; then
+                build_network="$2"
+            else
+                test_network="$2"
+            fi
             shift 2
             ;;
         -h|--help)
@@ -68,8 +94,12 @@ fi
 
 mkdir -p "$dist_directory"
 
-printf '%s\n' 'Building pinned Debian 13 package toolchain image...'
+printf 'Building Debian 13 package toolchain image (network: %s)...\n' "$build_network"
+if [[ "$build_network" == "host" ]]; then
+    printf '%s\n' 'Host networking is enabled only for the toolchain image build.'
+fi
 docker build \
+    --network "$build_network" \
     --file "$project_root/tools/debian/Dockerfile" \
     --tag "$docker_image" \
     "$project_root/tools/debian"
@@ -112,8 +142,13 @@ build_package "$revision"
 if [[ "$run_tests" == true ]]; then
     next_revision="$((revision + 1))"
     build_package "$next_revision"
-    printf '\nQualifying installed packages in a clean Debian 13 container...\n'
+    printf '\nQualifying installed packages in a clean Debian 13 container (network: %s)...\n' "$test_network"
+    if [[ "$test_network" == "host" ]]; then
+        printf '%s\n' 'WARNING: qualification binds 127.0.0.1:18122 in the host network namespace.'
+        printf '%s\n' 'Ensure that port 18122 is available on the host; host services are not modified.'
+    fi
     docker run --rm --init \
+        --network "$test_network" \
         --volume "$dist_directory:/packages:ro" \
         --volume "$project_root/tools/debian:/qualification:ro" \
         --env "BASE_REVISION=$revision" \

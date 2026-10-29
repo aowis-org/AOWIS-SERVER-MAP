@@ -11,7 +11,7 @@ export DEBIAN_FRONTEND=noninteractive
 printf '#!/bin/sh\nexit 101\n' > /usr/sbin/policy-rc.d
 chmod 0755 /usr/sbin/policy-rc.d
 
-apt-get update
+apt-get update -o APT::Update::Error-Mode=any
 apt-get install --yes --no-install-recommends curl python3 util-linux
 
 shopt -s nullglob

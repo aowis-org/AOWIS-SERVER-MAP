@@ -14,6 +14,41 @@ host if the current account already has permission to use the Docker daemon.
 Docker daemon access itself is highly privileged; use only a trusted Docker
 installation and trusted project sources.
 
+### Docker DNS troubleshooting
+
+If the Debian base image downloads successfully but `apt-get update` reports
+`Temporary failure resolving 'deb.debian.org'`, the failure is Docker's
+container DNS/network path, **not** a C++ build or missing Debian packages.
+On Linux, try the existing host networking stack for the *image build*:
+
+```bash
+./compile_deb_docker.sh --build-network host
+```
+
+The default remains Docker bridge networking. The `--build-network` option
+changes networking **only while installing the toolchain inside the Docker
+image**; it does not change the network of the installed service on your host.
+It relies on the host having working Debian repository DNS and HTTP access.
+
+For the optional installation qualification, the test container has its own
+network setting. If it also fails to resolve Debian package repositories:
+
+```bash
+./compile_deb_docker.sh --test --build-network host --test-network host
+```
+
+**Caution:** `--test-network host` shares the host's network namespace. The
+qualification server binds **127.0.0.1:18122 on the host** for the duration
+of the test. Use this only on a trusted Linux development machine with that
+port free; the default bridge network keeps it isolated. The test still uses
+its own disposable filesystem, users and processes and does not modify the
+host's map service on port 8122. Fixing Docker daemon DNS is preferable for
+repeatable isolated tests in CI. No `--network host` mode is silently enabled.
+
+A Docker warning about the deprecated legacy image builder is unrelated to
+Debian DNS resolution. Installing the Docker buildx plugin removes that
+warning but is not required to resolve this failure.
+
 ## Build a package
 
 From the project root:
@@ -21,6 +56,9 @@ From the project root:
 ```bash
 ./compile_deb_docker.sh
 ```
+
+For Linux hosts whose Docker bridge cannot resolve Debian repositories, use
+`--build-network host` as described above.
 
 To build a different Debian package revision:
 

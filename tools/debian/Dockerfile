@@ -4,7 +4,7 @@ FROM debian:trixie-slim
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-RUN apt-get update \
+RUN apt-get update -o APT::Update::Error-Mode=any \
  && apt-get install --yes --no-install-recommends \
       build-essential \
       ca-certificates \
