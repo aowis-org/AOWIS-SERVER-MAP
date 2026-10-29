@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+project_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+dist_directory="$project_root/dist"
+docker_image="aowis-server-map-debian-builder:trixie"
+revision="${DEB_REVISION:-1}"
+run_tests=false
+
+usage()
+{
+    cat <<'HELP'
+Usage: ./compile_deb_docker.sh [--test] [--revision NUMBER]
+
+Build the AOWIS Server Map Debian package in a Debian 13 (trixie) Docker
+container without installing Debian build dependencies on the host.
+
+  --test              Also build the next Debian revision and qualify package
+                      installation, upgrade, runtime HTTP, removal and purge in
+                      a disposable, fresh Debian container.
+  --revision NUMBER   Initial Debian revision (positive integer, default: 1).
+  -h, --help          Show help.
+
+Output: dist/aowis-server-map_<version>+deb<revision>_<architecture>.deb
+HELP
+}
+
+while (( $# > 0 )); do
+    case "$1" in
+        --test)
+            run_tests=true
+            shift
+            ;;
+        --revision)
+            if (( $# < 2 )); then
+                echo 'Error: --revision needs a number.' >&2
+                exit 2
+            fi
+            revision="$2"
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            printf 'Error: unknown option: %s\n' "$1" >&2
+            usage >&2
+            exit 2
+            ;;
+    esac
+done
+
+if [[ ! "$revision" =~ ^[1-9][0-9]*$ ]]; then
+    echo 'Error: --revision must be a positive integer.' >&2
+    exit 2
+fi
+
+if ! command -v docker >/dev/null 2>&1; then
+    echo 'Error: Docker is required. Install Docker and ensure the daemon is accessible.' >&2
+    exit 1
+fi
+
+if ! docker info >/dev/null 2>&1; then
+    echo 'Error: Cannot access the Docker daemon.' >&2
+    exit 1
+fi
+
+mkdir -p "$dist_directory"
+
+printf '%s\n' 'Building pinned Debian 13 package toolchain image...'
+docker build \
+    --file "$project_root/tools/debian/Dockerfile" \
+    --tag "$docker_image" \
+    "$project_root/tools/debian"
+
+build_package()
+{
+    local package_revision="$1"
+    local old_packages=()
+    local new_packages=()
+    shopt -s nullglob
+    old_packages=("$dist_directory"/aowis-server-map_*"+deb${package_revision}"_*.deb)
+    shopt -u nullglob
+    # Do not accept a stale package as the result of a failed or skipped build.
+    if (( ${#old_packages[@]} > 0 )); then
+        rm -f -- "${old_packages[@]}"
+    fi
+
+    printf '\nBuilding Debian package revision %s...\n' "$package_revision"
+    docker run --rm --init \
+        --user "$(id -u):$(id -g)" \
+        --volume "$project_root:/source:ro" \
+        --volume "$dist_directory:/packages" \
+        --env "DEB_REVISION=$package_revision" \
+        "$docker_image" \
+        bash /source/tools/debian/build_in_container.sh
+
+    shopt -s nullglob
+    new_packages=("$dist_directory"/aowis-server-map_*"+deb${package_revision}"_*.deb)
+    shopt -u nullglob
+    if (( ${#new_packages[@]} != 1 )); then
+        printf 'Error: Docker build produced %d packages for revision %s (expected 1).\n' \
+            "${#new_packages[@]}" "$package_revision" >&2
+        exit 1
+    fi
+    printf 'Package ready: %s\n' "${new_packages[0]}"
+}
+
+build_package "$revision"
+
+if [[ "$run_tests" == true ]]; then
+    next_revision="$((revision + 1))"
+    build_package "$next_revision"
+    printf '\nQualifying installed packages in a clean Debian 13 container...\n'
+    docker run --rm --init \
+        --volume "$dist_directory:/packages:ro" \
+        --volume "$project_root/tools/debian:/qualification:ro" \
+        --env "BASE_REVISION=$revision" \
+        --env "UPGRADE_REVISION=$next_revision" \
+        debian:trixie-slim \
+        bash /qualification/test_installed_package.sh
+fi
+
+printf '\nDebian package build%s passed. Packages: %s\n' \
+    "$(if [[ "$run_tests" == true ]]; then printf ' and installation qualification'; fi)" \
+    "$dist_directory"

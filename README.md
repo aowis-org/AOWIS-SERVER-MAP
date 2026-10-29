@@ -105,12 +105,14 @@ See [Architecture and resource limits](docs/architecture.md#verification-and-ben
 
 ## Deployment
 
-For a Debian package:
+For a Debian package, build with a disposable Debian 13 Docker toolchain and optionally qualify the installed package in a second clean container:
 
 ```bash
-./compile_deb.sh --install-dependencies
-sudo apt install ./dist/aowis-server-map_<version>_<architecture>.deb
+./compile_deb_docker.sh          # Build the .deb into dist/
+./compile_deb_docker.sh --test   # Also test install, HTTP, upgrade, removal and purge
 ```
+
+The native `./compile_deb.sh --install-dependencies` remains available on Debian without Docker. See [Debian package building and qualification](docs/debian-package-build.md) for test scope and installation details. Install the resulting artifact on the target system with `sudo apt install ./dist/<package-filename>.deb`.
 
 The package installs a dedicated `aowis-server-map` systemd service, preserves existing administrator settings and creates independent random API keys on initial configuration. The service uses an explicit `/etc/aowis-server-map/map-server.ini`, state under `/var/lib/aowis-server-map/` and disposable caches under `/var/cache/aowis-server-map/`.
 
@@ -123,6 +125,7 @@ The package installs a dedicated `aowis-server-map` systemd service, preserves e
 
 | Reference | Use it for |
 | --- | --- |
+| [Debian package build](docs/debian-package-build.md) | Docker builds, isolated installation and upgrade qualification |
 | [Configuration](docs/configuration.md) | INI, CLI, providers, region/zoom policies, state-file precedence |
 | [HTTP API](docs/http-api.md) | Requests, responses, authentication, cache and upstream operations |
 | [Architecture and resource limits](docs/architecture.md) | Execution model, concurrency, memory, cancellation, test and benchmark tools |

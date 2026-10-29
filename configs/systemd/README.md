@@ -35,12 +35,19 @@ Both read and delete API keys must be configured for the packaged service.
 
 ## Debian package installation
 
-From the project root:
+From the project root, build a Debian 13 package in Docker:
 
 ```bash
-./compile_deb.sh --install-dependencies
-sudo apt install ./dist/aowis-server-map_<version>_<architecture>.deb
+./compile_deb_docker.sh
 ```
+
+For package installation, upgrade and removal qualification in an isolated
+Debian environment, run `./compile_deb_docker.sh --test`. Native Debian builds
+remain supported with `./compile_deb.sh --install-dependencies`. See
+[Debian package build and qualification](../../docs/debian-package-build.md).
+
+Install the resulting `dist/*.deb` on your actual target system with
+`sudo apt install ./dist/<package-filename>.deb`.
 
 The package installs the vendor unit under `/usr/lib/systemd/system` and a
 sample INI under `/usr/share`. It creates an administrator configuration with
