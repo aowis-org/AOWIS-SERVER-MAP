@@ -55,3 +55,6 @@ compile_commands.json
 *creator.user*
 
 *_qmlcache.qrc
+
+# Debian binary packages and generated distribution files
+/dist/
