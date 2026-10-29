@@ -664,16 +664,28 @@ int main(int argc, char **argv)
         QTcpSocket *abandoned = repetition % 2 == 0 ? &first : &second;
         QTcpSocket *survivor = repetition % 2 == 0 ? &second : &first;
         abandoned->abort();
+        // The upstream TCP disconnect can be observed before the aborted
+        // acquisition worker has finished and returned its remote admission.
+        // Wait for the complete cancellation state, not just socket closure.
+        // An unexpected disconnect of the surviving source is still a failure.
         timer.restart();
-        while (upstream_disconnected.load() < 1 && timer.elapsed() < 4000)
+        while (timer.elapsed() < 5000 &&
+               (upstream_disconnected.load() != 1 ||
+                TerrainSingleFlightTestAccess::waiterCount(live_server) != 1 ||
+                TerrainSingleFlightTestAccess::uniqueJobCount(live_server) != 1 ||
+                TerrainSingleFlightTestAccess::remoteAdmittedJobs(live_server) != 1))
         {
             app.processEvents(QEventLoop::AllEvents, 20);
             QThread::msleep(1);
         }
-        const bool selective = upstream_disconnected.load() == 1 &&
-            TerrainSingleFlightTestAccess::waiterCount(live_server) == 1 &&
-            TerrainSingleFlightTestAccess::uniqueJobCount(live_server) == 1 &&
-            TerrainSingleFlightTestAccess::remoteAdmittedJobs(live_server) == 1;
+        const int selective_disconnected = upstream_disconnected.load();
+        const int selective_waiters = TerrainSingleFlightTestAccess::waiterCount(live_server);
+        const int selective_jobs = TerrainSingleFlightTestAccess::uniqueJobCount(live_server);
+        const int selective_remote_jobs =
+            TerrainSingleFlightTestAccess::remoteAdmittedJobs(live_server);
+        const bool selective = selective_disconnected == 1 &&
+            selective_waiters == 1 && selective_jobs == 1 &&
+            selective_remote_jobs == 1;
         survivor->abort();
         timer.restart();
         while ((upstream_disconnected.load() < 2 ||
@@ -699,6 +711,10 @@ int main(int argc, char **argv)
             std::cerr << "Selective upstream orphan cancellation regression failed: "
                       << "both_active=" << both_active
                       << " selective=" << selective
+                      << " selective_disconnected=" << selective_disconnected
+                      << " selective_waiters=" << selective_waiters
+                      << " selective_jobs=" << selective_jobs
+                      << " selective_remote_jobs=" << selective_remote_jobs
                       << " cleaned=" << cleaned
                       << " upstream=" << upstream_responded.load()
                       << " disconnected=" << upstream_disconnected.load()
