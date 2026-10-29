@@ -18,7 +18,9 @@ tar -C /source \
     -cf - . | tar -C "$scratch" -xf -
 
 cd "$scratch"
-./compile_deb.sh --clean --revision "$DEB_REVISION"
+# The source tree may originate from an archive without executable file modes.
+# Run the Bash entry point explicitly rather than relying on its mode bit.
+bash ./compile_deb.sh --clean --revision "$DEB_REVISION"
 
 shopt -s nullglob
 packages=("$scratch"/dist/aowis-server-map_*.deb)
