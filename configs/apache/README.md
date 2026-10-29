@@ -130,4 +130,4 @@ The reverse proxy passes `Authorization` and `X-API-Key` headers through to the
 backend. Read endpoints use `authentication/api_key`, while cache DELETE and
 upstream cancellation use `authentication/delete_api_key`. The provider-edit
 PUT endpoint is currently unauthenticated; network-level access restrictions
-remain essential. See [the API reference](../../README.md#http-api).
+remain essential. See [the API reference](../../docs/http-api.md).

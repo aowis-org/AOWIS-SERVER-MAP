@@ -1,217 +1,103 @@
-# Terrain providers
+# Terrain sources and caching
 
-`TerrainData` separates provider-native source data from the normalized AOWIS terrain store.
-Consumers never decode provider formats directly:
+`Aowis::Map::TerrainData` is the terrain/elevation subsystem. It separates provider-native raster files from AOWIS's validated normalized heightfields and exposes the same source/cache policy to renderer tiles, point sampling and analysis grids.
 
 ```text
-remote/local provider source
-        ↓
-terrain provider
-        ↓
-TerrainTile (65×65)
-        ↓
-.aowterrain normalized cache
-        ↓
-renderer / point sampling
+Copernicus source COG (native GeoTIFF)
+          |              |
+          |              +--> analysisGrid(): source-pixel float32 window
+          v
+  TerrainProvider normalization
+          v
+  TerrainTile (65 × 65, float metres)
+          v
+  .aowterrain v1 cache
+          |
+          +--> renderer terrain tiles / point elevation
 ```
 
-`TerrainProvider` is the provider boundary. A provider declares whether it supports a dataset and
-normalized XYZ address, fetches/opens its native source material, and returns a provider-neutral
-`TerrainTile`. `TerrainData` owns read-through cache policy and persists the encoded normalized tile.
+The `TerrainProvider` boundary reports supported datasets, acquires or opens native source files and produces provider-neutral `TerrainTile` objects. `TerrainData` controls read-through caching, integrity checks and persistence. Hydrology can consume `TerrainData::analysisGrid()` directly, avoiding separate provider caches or duplicate download implementations.
 
 ## Copernicus GLO-30
 
-The supported Internet-backed provider is `copernicus`, with dataset identifier:
-
-```text
-copernicus-glo30
-```
-
-It uses the public anonymous AWS Copernicus DEM GLO-30 Cloud Optimized GeoTIFF distribution:
+The supported Internet-backed terrain dataset is **`copernicus-glo30`**, served by the `copernicus` provider from the publicly accessible Cloud Optimized GeoTIFF (COG) distribution:
 
 ```text
 https://copernicus-dem-30m.s3.amazonaws.com
 ```
 
-No Copernicus account, AWS account or API token is required for this source. Provider-native files
-are cached under:
+The public source does not require an AWS account or API token. Dataset properties:
+
+| Property | Value |
+| --- | --- |
+| Dataset identifier | `copernicus-glo30` |
+| Nominal source resolution | 30 m |
+| Surface classification | **Digital surface model (DSM)** |
+| Vertical datum | EGM2008 (`EPSG:3855`) |
+| Provider-native geography | 1° × 1° source COGs |
+| Normalized XYZ generation | Zooms **8–14** |
+| Normalized grid | 65 × 65 Web-Mercator samples |
+
+A DSM may include building roofs and vegetation. It is **not** equivalent to a surveyed bare-earth digital terrain model or a hydraulic elevation reference. Public GLO-30 coverage is not universal; the server does not silently substitute GLO-90 and mislabel it as GLO-30. The authoritative dataset metadata is available from `GET /terrain/v1/datasets`.
+
+On-demand normalization stops at zoom 14 because higher zooms would mostly oversample the underlying source, and below zoom 8 a normalized tile can span too many native source cells. Existing valid normalized tiles outside this generation range can still be read.
+
+## Cache organization and read-through behavior
 
 ```text
-terrain/providers/copernicus/glo30/
+<terrain cache>/
+  providers/copernicus/glo30/         Native downloaded source COGs
+  normalized/v1/copernicus-glo30/    <z>/<x>/<y>.aowterrain
+  offline-packages/                  Reserved; no automatic mounting
 ```
 
-and normalized tiles continue to use the normal cache path:
+On a normalized tile request the server:
 
-```text
-terrain/normalized/v1/copernicus-glo30/<z>/<x>/<y>.aowterrain
+1. Validates the cache entry's format, embedded dataset/XYZ address and CRC; no invalid tile is delivered.
+2. For a miss or corrupt entry, obtains the normalized tile's cache-fill lock and rechecks it.
+3. Opens already cached native COGs covering the requested tile.
+4. If native data is missing and remote fetching is enabled/allowed, obtains a per-source interprocess lock and downloads the missing COG.
+5. Uses libtiff to decode only needed raster tiles or strips, bilinearly normalizes samples to the common 65 × 65 heightfield, and atomically writes the `.aowterrain` bytes.
+6. Returns the validated normalized bytes to the caller.
+
+Cross-process cache-file locks deduplicate source acquisition even when two server instances share a source cache. The server also single-flights identical in-process terrain HTTP requests. Different tiles and independent native source cells can proceed concurrently subject to admission and worker limits. A damaged normalized file can be repaired from locally available native sources or an allowed remote fetch; when repair is unavailable the integrity/read error is reported rather than serving corrupt data.
+
+Original native COG files also serve **analysis grids** directly: output grid samples are selected from the containing source pixels, not bilinearly resampled from `.aowterrain`. This distinction matters for Hydrology and other numerical consumers. See the [elevation/analysis contract](terrain-elevation-contract.md) and [tile format](terrain-tile-format.md).
+
+## Remote acquisition, slow networks and resumption
+
+Connection, inactivity and absolute download deadlines are separately configurable under `[terrain]`:
+
+```ini
+[terrain]
+connect_timeout_seconds=30
+inactivity_timeout_seconds=120
+download_deadline_seconds=1800
 ```
 
-The provider records:
+A slow but progressing response can continue within the absolute duration limit. The source download is bounded to **256 MiB**. Native source files are not published until the complete content has been validated and atomically committed. Interprocess source locks have a stale threshold beyond the configured download deadline to avoid stealing a slow but live acquisition. Lock waiting and active transfers check cancellation requests.
 
-- nominal source resolution: 30 m;
-- vertical datum: EGM2008 / EPSG:3855;
-- dataset: `copernicus-glo30`.
+A failed full response may retain a verified prefix in `.partial` and an atomic `.partial.meta` sidecar containing a **strong ETag**, declared entity length and saved byte count. On the next attempt, a `Range: bytes=<offset>-` with `If-Range: <ETag>` requests the remainder. A `206` is accepted only when its `Content-Range`, ETag and length match the saved entity. A full `200` response from a server ignoring Range is handled as a fresh full download. Inconsistent metadata causes safe rejection, not publication of a corrupt source. If the upstream supplies no suitable validator/length, partial data cannot be trusted for resumption and the next attempt starts at byte zero.
 
-Copernicus DEM is a **digital surface model (DSM)**. Heights may therefore represent vegetation,
-buildings and infrastructure as well as bare ground. AOWIS must not present these values as surveyed
-hydraulic elevations or a guaranteed bare-earth DTM.
+The server performs no background retry or bulk download scheduling. Source acquisition uses remote-capable workers, followed by a CPU-pool handoff for normalization, analysis-grid sampling and point-elevation processing. This prevents slow network waits from occupying cached-processing workers. See [Architecture and resource limits](architecture.md) for shared budgets and cancellation semantics.
 
-GLO-30 Public is not complete in a small number of areas/countries. The provider does not silently substitute GLO-90: retaining the
-`copernicus-glo30` dataset identifier would misrepresent the resolution and
-source metadata. GLO-90 is not a configured dataset in this implementation.
+## Offline and geographic download policies
 
-### Slow connections, cancellation and offline operation
+```ini
+[terrain]
+enabled=true
+remote_fetch_enabled=false
 
-Provider-native source files are published only after successful complete
-acquisition. Copernicus downloads use separately configurable connection,
-inactivity and absolute-duration limits in `[terrain]`: 30 seconds, 120 seconds
-and 1800 seconds respectively by default. Slow but progressing connections
-can continue within the total deadline. The source-file lock wait checks for
-cancellation so shutdown does not have to wait for the entire lock timeout.
-The cross-process source lock stale threshold is at least ten minutes and
-extends beyond the configured download deadline by one minute, preventing a
-legitimate slow download from being mistaken for an abandoned cache fill.
-
-Interrupted full downloads with a strong ETag and a known total size can retain
-verified partial data. On the next attempt, the downloader sends `Range` and
-`If-Range`. It accepts resumed bytes only when the returned `206 Content-Range`,
-strong ETag and exact byte counts match; otherwise the attempt fails safely.
-A server that ignores `Range` and responds with a complete `200 OK` is handled
-as a fresh full download. The completed file is published atomically; partial
-files are never used as terrain source cache entries. Transfers without a
-usable validator may still need to restart from byte zero.
-
-Native COGs already in cache, and normalized tiles already generated,
-remain usable when Internet access is unavailable or remote fetching is
-disabled. Normalized tiles and analysis grids now acquire missing native sources on the
-remote-capable pool and hand off to the CPU processing pool. Elevation requests
-still use remote-capable workers for both acquisition and sampling. For concurrency
-budgets and remaining limitations see
-[Performance, concurrency and operations](performance-roadmap.md).
-
-### Dataset catalog
-
-`CopernicusTerrainProvider::datasets()` describes the dataset for `GET /terrain/v1/datasets`:
-nominal resolution 30 m, vertical datum `egm2008`, surface model `dsm`, normalized zooms 8 through
-14. Every provider describes its datasets this way, so a renderer derives its maximum terrain zoom
-from the catalog and a provider with another resolution needs no renderer change.
-
-### Normalized zoom range
-
-Remote GLO-30 generation currently supports normalized XYZ zooms 8 through 14.
-
-- Zoom 14 gives a 65×65 normalized grid at approximately source-scale horizontal spacing.
-- Higher zooms would mostly oversample the same 30 m source data.
-- Zooms below 8 could make one normalized tile require an excessive number of 1° source COG files.
-
-Cached normalized tiles outside this range remain valid and usable; the restriction applies only to
-on-demand generation by this provider.
-
-### Read-through behavior
-
-Terrain uses a two-layer persistent read-through cache:
-
-```text
-normalized .aowterrain cache
-        ↓ miss/corrupt
-provider-native Copernicus COG cache
-        ↓ miss
-Internet source (only when remote fetching is enabled)
+[terrain_provider.copernicus]
+enabled=true
 ```
 
-A supported `copernicus-glo30` request does the following:
+`terrain/enabled=false` makes terrain requests unavailable (`503`); `terrain/remote_fetch_enabled=false` allows the routes and **local source/normalized caches**, but forbids missing Internet source downloads. This is separate from `downloads/remote_fetch_enabled`, which controls raster imagery. The Copernicus provider may also be disabled or assigned a named geographic coverage profile, but it cannot override the global switch.
 
-1. validates and reads the normalized `.aowterrain` tile when it is already cached;
-2. on a miss or corrupt normalized tile, acquires a lock for that exact dataset/XYZ tile and
-   rechecks the cache so concurrent duplicate requests collapse onto one fill;
-3. opens cached provider-native 1° COG files where available;
-4. if a required COG is missing and remote fetching is enabled, acquires a lock for that source COG,
-   rechecks the provider cache, then downloads it from the public AWS bucket;
-5. bilinearly resamples the source raster into the normalized 65×65 Web-Mercator grid;
-6. encodes and atomically writes the `.aowterrain` tile;
-7. returns the same encoded bytes to the caller.
+Coverage rules govern **requested XYZ tiles that may trigger new downloads**. A native 1° source file can extend beyond that request footprint; it is not clipped geographically. Already cached native files can still normalize tiles outside download coverage. Configuring a `permanent_data_directory` does not automatically mount arbitrary terrain packages or import GIS datasets. See [Configuration](configuration.md#geographic-download-coverage).
 
-Different normalized tiles can be generated concurrently. Different Copernicus source COGs can also
-download concurrently, while requests that need the same normalized tile or the same 1° COG are
-deduplicated by their cache-fill locks. Lock files also protect multiple map-server processes sharing
-one cache directory.
+## Vertical datums, provenance and attribution
 
-A corrupt normalized tile is never served. The read-through path attempts to regenerate it from the
-provider-native cache or remote provider; if repair is impossible, the original corruption remains a
-reported integrity error.
+Copernicus values are EGM2008-referenced. AOWIS records source datum metadata in normalized tiles and point-elevation responses and does **not** silently perform EGM2008 ↔ EGM96 ↔ WGS84-ellipsoid transformations. A datum requiring a real conversion is rejected. See [Terrain and elevation contract](terrain-elevation-contract.md).
 
-Subsequent renderer or point-elevation requests use the normalized cache and require no network.
-When `terrain/remote_fetch_enabled=false`, providers may still normalize data that already exists in
-their provider-native cache, but they must not perform any network request.
-
-Provider-native GeoTIFF decoding uses libtiff. The COG's DEFLATE compression, floating-point
-predictor and byte ordering are handled by libtiff; AOWIS reads only decoded raster blocks needed for
-the normalized tile after the source COG has been cached locally.
-
-The HTTP terrain route runs read-through generation on QtConcurrent rather than blocking the map
-server's main event loop. Cache-fill locking deduplicates matching requests without globally
-serializing unrelated terrain generation.
-
-### Interrupted download recovery
-
-A failed HTTP 200 transfer can retain its downloaded prefix in a separate
-`.partial` file, accompanied by atomic `.partial.meta` metadata containing the
-strong ETag, total size and exact saved byte count. A mismatched or corrupt
-metadata pair is discarded, and the source is downloaded from the beginning.
-
-A later request issues `Range: bytes=<offset>-` with `If-Range: <ETag>`.
-A valid `206 Partial Content` must begin at the requested offset, end at the
-recorded total length, and carry the same strong ETag. The validated prefix
-and suffix are assembled into the final `.tif` using atomic `QSaveFile`
-publication. A complete `200 OK` response is accepted as a new full entity
-when the provider ignores the range request.
-
-Resumption is best-effort. If the provider omits a strong ETag or total length,
-failed transfers are not retained. Range responses with inconsistent metadata
-are rejected rather than risk corrupting a terrain source. There is currently
-no independently scheduled upstream I/O pool or automatic background retry.
-
-## Licensing and attribution
-
-Copernicus GLO-30 Public is distributed for public use under the Copernicus DEM licence. Any externally assembled offline package must retain appropriate dataset
-provenance and attribution. The normalized
-binary tile itself intentionally does not embed licensing text; attribution belongs to package/server
-metadata, not each 8 KiB heightfield payload.
-
-### Administrative configuration and geographic download policies
-
-The server has separate `downloads/remote_fetch_enabled` (2D maps) and
-`terrain/remote_fetch_enabled` (terrain) switches. The Copernicus implementation
-is selected with `[terrain_provider.copernicus]` (`enabled=true/false`, optional
-`coverage=`). When the terrain subsystem's upstream switch is off, the provider
-cannot override it. When a normalized terrain tile is not in the cache, the
-terrain provider may still normalize existing locally cached native source data.
-Only acquisition of missing Internet source data is blocked. The server does
-not hide cached data based on the requested geographic region.
-
-Named regions and zoom-dependent profiles are documented in the root README.
-A profile's geographic tile intersection is evaluated before the provider is
-allowed to acquire missing source data. Note that one Copernicus COG covers a
-whole degree cell, which may extend beyond the smaller allowed XYZ tile footprint;
-the policy governs the requested normalized tile, not clipping of the upstream COG.
-
-Repeated interruptions during validated HTTP 206 resumes retain newly received bytes when the response range, strong ETag and declared length match the saved entity. Partial files remain unpublished until complete.
-
-### Local HTTP resume regression
-
-The `aowis-server-map-copernicus-resume-http` CTest case uses a loopback HTTP
-server to exercise the production source downloader without external internet.
-It interrupts a full response and a subsequent range response, verifies
-`Range`/`If-Range`, and checks that only the completed concatenated source is
-published. It also verifies full-response fallback when a server ignores Range,
-a changed upstream ETag, and rejection of a mismatched 206 response. The source
-URL override is an internal test seam; production Copernicus URLs remain fixed.
-
-The local Copernicus HTTP integration test also exercises slow-but-progressing transfers
-and a stalled peer with shortened test-only timeouts. Production timeout defaults
-and the upstream URL are unchanged.
-
-The local slow-network regression suite independently checks that ongoing progress avoids
-inactivity timeout, that stalled transfers terminate on inactivity, and that an
-absolute deadline still stops a continuously progressing but overlong transfer.
-These checks use short test-only limits and do not alter production defaults.
+Copernicus GLO-30 Public is distributed under the Copernicus DEM licence. Respect the provider's terms and preserve attribution/provenance for externally packaged datasets. The `.aowterrain` binary format intentionally excludes licensing text; attribution must be maintained by surrounding dataset, package or application metadata.

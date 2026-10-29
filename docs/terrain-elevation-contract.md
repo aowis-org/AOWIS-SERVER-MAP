@@ -1,92 +1,37 @@
-# Terrain and elevation contract
+# Terrain elevation and analysis-grid contract
 
-AOWIS Server Map provides one terrain/elevation subsystem for point sampling
-and normalized terrain heightfields. This document defines the existing HTTP
-and C++ sampling contract. Both uses share the same cache and source-dataset
-metadata; clients need not implement provider-specific elevation lookups.
+AOWIS Server Map exposes the same terrain dataset through three complementary interfaces:
 
-See [terrain providers](terrain-providers.md) for supported data sources and
-[the normalized format](terrain-tile-format.md) for `.aowterrain` encoding.
+- **Normalized tile delivery:** 65 × 65 Web-Mercator heightfields for rendering and point sampling.
+- **Point elevation:** one WGS84 coordinate, sampled through the normalized tile store with datum and provenance metadata.
+- **Analysis grid:** a rectangular float32 window sampled from the **native source GeoTIFF**, not from quantized renderer tiles.
 
-## Coordinate contract
+This document defines data meanings and stable identifiers for HTTP and `Aowis::Map::TerrainData` callers. For request URLs and HTTP status codes see the [API reference](http-api.md); for the source see [Copernicus terrain](terrain-providers.md).
 
-Point elevation requests use WGS84 geographic coordinates:
+## Coordinates and units
 
-- latitude: degrees, inclusive range `[-90, 90]`;
-- longitude: degrees, inclusive range `[-180, 180]`.
+Point queries use WGS84 geographic coordinates in decimal degrees: `latitude` in `[-90,90]`, `longitude` in `[-180,180]`. Invalid/non-finite values are rejected before provider access. Available normalized Web-Mercator tiles cover the usual ±85.05112878° latitude range, so a syntactically valid polar point can still lack terrain data.
 
-Invalid or non-finite coordinates must be rejected before provider/cache access.
+Elevations are **metres** in the dataset's stated vertical datum. Copernicus GLO-30 is a **digital surface model** (DSM) in EGM2008, so its elevations may include vegetation and structures; they are not necessarily bare-earth or surveyed hydraulic heights.
 
-## Elevation sample contract
+## Point sample representation
 
-`Aowis::Map::TerrainElevationSample` is the canonical in-process result type.
+`Aowis::Map::TerrainElevationSample` is the canonical C++ result; the point HTTP response carries the corresponding JSON fields:
 
-Every successful sample contains:
+| Field | Meaning |
+| --- | --- |
+| `status` | Lookup status, `ready` on success |
+| `elevation_m` | Finite elevation in metres |
+| `dataset` | Stable source dataset ID, e.g. `copernicus-glo30` |
+| `nominal_resolution_m` | Source's nominal horizontal resolution, `0` only if unknown |
+| `vertical_datum` | Datum of the returned numeric value |
+| `source_vertical_datum` | Native datum recorded in the normalized source tile |
+| `origin` | How this answer was obtained |
+| `tile` | Normalized XYZ tile sampled, with `zoom`, `x` and `y` |
 
-- `elevation_m`: terrain elevation in metres;
-- `dataset`: stable provider/dataset identifier, for example `copernicus-glo30`;
-- `nominal_resolution_m`: nominal source resolution in metres, or `0` only when genuinely unknown;
-- `vertical_datum`: datum of the returned numeric elevation;
-- `source_vertical_datum`: datum carried by the normalized source tile before any transformation;
-- `origin`: where this answer was obtained: cache, remote source, offline package or local dataset.
+A successful response also describes the vertical datum with fields such as `vertical_datum_name`, `vertical_datum_authority` and `vertical_reference`.
 
-The source datum and returned datum are intentionally separate fields. They are equal for native/identity sampling. A future geoid transformation may make them differ, but a known returned datum may never be claimed from an unknown source datum.
-
-A result is invalid when the elevation is not finite, the resolution is negative/non-finite, or the dataset identifier is empty.
-
-## Stable identifier values
-
-Vertical datum identifiers:
-
-- `unknown`
-- `wgs84-ellipsoid` — ellipsoidal height carried by WGS 84 3D (`EPSG:4979`);
-- `egm96` — orthometric/gravity-related EGM96 height (`EPSG:5773`);
-- `egm2008` — orthometric/gravity-related EGM2008 height (`EPSG:3855`);
-- `local` — an explicitly local/project vertical reference with no globally implied CRS.
-
-`local` deliberately does **not** mean that two different local datasets share the same datum. Format v1 carries only the `local` class, not a globally unique local-datum identifier, so local heights must not be converted or compared across datasets without separate project metadata.
-
-Data-origin identifiers:
-
-- `unknown`
-- `cache`
-- `remote`
-- `offline-package`
-- `local-dataset`
-
-These string identifiers are part of the HTTP contract and must remain stable. New values may be added later without changing existing meanings.
-
-## Cached point lookup statuses
-
-`TerrainData::sampleElevation()` returns a structured lookup result rather than a naked optional value. Stable status identifiers are:
-
-- `ready`
-- `disabled`
-- `not-initialized`
-- `invalid-coordinate`
-- `invalid-dataset`
-- `invalid-vertical-datum`
-- `vertical-datum-conversion-unavailable`
-- `outside-coverage`
-- `tile-unavailable`
-- `tile-read-error`
-- `corrupt-tile`
-- `no-data`
-
-This distinction lets the server report invalid requests, unavailable data,
-remote-fetch problems and cache-integrity failures separately.
-
-## Point-elevation HTTP representation
-
-The map server exposes the canonical point sampler as:
-
-```text
-GET /terrain/v1/elevation?latitude=<degrees>&longitude=<degrees>[&vertical_datum=<datum>]
-```
-
-`vertical_datum` is optional. Omitted, empty, or `native` returns the dataset's native datum. Explicit output requests currently accept `wgs84-ellipsoid`, `egm96`, or `egm2008`. `unknown` and `local` cannot be requested as output datums.
-
-The map server chooses the dataset from `terrain/default_dataset` (default `copernicus-glo30`), so GUI consumers do not hardcode a provider. The route uses the same read API-key authentication as raster and terrain-tile GET requests. Provider/cache work runs outside the main HTTP event loop. A successful response serializes the canonical result without provider-specific response shapes:
+Example **shape** (the elevation and address below are illustrative, not a guaranteed measurement):
 
 ```json
 {
@@ -100,68 +45,68 @@ The map server chooses the dataset from `terrain/default_dataset` (default `cope
   "vertical_reference": "orthometric",
   "source_vertical_datum": "egm2008",
   "origin": "cache",
-  "tile": {
-    "zoom": 14,
-    "x": 8586,
-    "y": 5573
-  }
+  "tile": { "zoom": 14, "x": 8586, "y": 5573 }
 }
 ```
 
-`tile` identifies the normalized heightfield actually sampled. Error responses use the stable terrain lookup status ID plus an `error` string. Datum errors additionally include `requested_vertical_datum` and, when source data were reached, `source_vertical_datum`. HTTP status mapping is intentionally conventional: malformed coordinates, invalid configured datasets, invalid datum requests and unavailable datum transformations use `400`; unavailable/out-of-coverage/no-data use `404`; disabled/uninitialized terrain uses `503`; upstream network failures use `502`; corrupt/provider/internal failures use `500`.
+Source and returned datums are separate fields so a caller cannot confuse a label with an actual vertical transformation. At present all successful conversions are identity conversions: the source and output datums match.
 
-## Offline/online rule
+### Stable identifiers
 
-The same normalized terrain store must serve both point sampling and 3D terrain tiles.
+| Vertical datum ID | Meaning |
+| --- | --- |
+| `unknown` | Datum cannot be established |
+| `wgs84-ellipsoid` | Ellipsoidal height under WGS 84 3D (`EPSG:4979`) |
+| `egm96` | Gravity-related/orthometric height (`EPSG:5773`) |
+| `egm2008` | Gravity-related/orthometric height (`EPSG:3855`) |
+| `local` | A project-specific datum with no globally implied reference |
 
-A point lookup must therefore follow the same availability rules as terrain rendering:
+`local` is a *class*, not an identifier proving that two local datasets share the same vertical reference. V1 `.aowterrain` does not contain a globally unique local-datum identity. Do not mix local elevations between projects without external reference metadata.
 
-1. use normalized local/cache/offline data when present;
-2. if data is absent and remote fetching is enabled, fetch and normalize provider data;
-3. if data is absent and remote fetching is disabled/unavailable, report terrain data as unavailable.
+Origin IDs: `unknown`, `cache`, `remote`, `offline-package`, `local-dataset`. These describe provenance, **not** different numeric datums. The origin enum includes offline-package/local-dataset values even though automatic offline-package mounting is not implemented.
 
-Clients using this API receive the server's configured elevation dataset and
-its download policy. A client that instead calls a third-party elevation API
-is not subject to this server's restrictions.
+Lookup status identifiers: `ready`, `disabled`, `not-initialized`, `invalid-coordinate`, `invalid-dataset`, `invalid-vertical-datum`, `vertical-datum-conversion-unavailable`, `outside-coverage`, `tile-unavailable`, `tile-read-error`, `corrupt-tile`, `no-data`. Clients should handle errors by `status`, not only by a human-readable `error` message.
 
-## Vertical datum rule
+## Sampling behavior and availability
 
-AOWIS must not silently treat terrain values from unknown/different vertical datums as interchangeable with hydraulic/project elevations. Providers must write their actual source datum into every normalized tile; if it is genuinely unknown, the value stays `unknown`.
+`TerrainData::sampleElevation()` resolves point queries through `TerrainData::terrainTile()`. It selects the finest available normalized tile containing the point, converts the coordinate into a position within the 65 × 65 grid, and **bilinearly interpolates**. If contributing samples are no-data, the sampler can try a coarser cached normalized tile. Corrupt or unreadable cache entries are reported, not silently treated as valid elevations.
 
-Point sampling may request an explicit output datum. At present AOWIS intentionally implements **identity handling only**: a request for the same globally defined datum succeeds, while a request that would require EGM96 ↔ EGM2008 ↔ WGS84 ellipsoid transformation returns `vertical-datum-conversion-unavailable`. AOWIS does not apply a guessed constant offset, and it does not pretend that a datum-name change is a coordinate transformation.
+When remote acquisition is allowed, the HTTP path acquires native sources needed for the finest supported tile on the remote-capable pool and then hands CPU-only sampling to the terrain processing pool. Remote admission is released at the handoff; global job admission lasts until the computation ends. Coarser cached tiles may be used for fallback without initiating extra remote downloads from the CPU workers. In offline mode, cached normalized or native source data is still usable, but missing Internet sources are not fetched.
 
-A real cross-datum conversion requires a geoid/vertical transformation model evaluated at the requested horizontal coordinate. That belongs behind the terrain subsystem as a later transformation provider. Until such a model is configured, callers must either consume the dataset's native datum or explicitly handle the mismatch.
+`GET /terrain/v1/elevation?latitude=50.1&longitude=8.1` uses `terrain/default_dataset` (default `copernicus-glo30`). A `vertical_datum` query value of omitted/empty/`native` returns native height. Explicit requests support `wgs84-ellipsoid`, `egm96` or `egm2008`; `local` and `unknown` are not requestable output datums.
 
-The `local` datum class is intentionally not requestable as an output datum because v1 does not carry a unique local vertical-reference identifier. A future local-DEM/project-datum extension must provide that identity before transformations involving local heights are permitted.
+**No cross-datum conversion model is installed.** An EGM2008 sample requested as WGS84 ellipsoid or EGM96 returns `vertical-datum-conversion-unavailable`, normally HTTP `400`, rather than an approximate constant offset or relabeling. Conversions require a spatially evaluated geoid/transformation model; callers must use compatible datums themselves until one is available.
 
-## Terrain subsystem boundary
+HTTP error mapping for point lookups: bad parameters, invalid datasets, invalid datum and unavailable conversions → `400`; outside coverage/unavailable/no-data → `404`; upstream acquisition failures → `502`; disabled/uninitialized terrain → `503`; corrupt/provider/internal errors → `500`. Datum errors include `requested_vertical_datum` and, where known, `source_vertical_datum`.
 
-`Aowis::Map::TerrainData` is the dedicated terrain/elevation subsystem owned by `AOWIS-SERVER-MAP`. It is a sibling of the raster `MapTiles` subsystem; terrain behavior must not be added to `MapTiles`.
+## Analysis-grade DEM windows
 
-The subsystem owns terrain lifecycle and storage policy:
+The analysis API is intended for numerical consumers such as Hydrology that need **original source elevations**, not the quantized normalized renderer format.
 
-- terrain can be enabled or disabled independently of raster map tiles;
-- remote fetching policy is recorded independently so an installation can operate in offline-only mode;
-- a dedicated terrain cache root is resolved either from `terrain/cache_directory` or `<downloads cache>/terrain`;
-- storage separates normalized AOWIS terrain, provider-native cached data and the offline-package directory.
+```text
+GET /terrain/v1/analysis/grid?dataset=copernicus-glo30&west=8.10&south=50.10&east=8.11&north=50.11&columns=512&rows=512
+```
 
-The normalized terrain binary format is defined separately in [`terrain-tile-format.md`](terrain-tile-format.md). `TerrainData::sampleElevation()` samples those normalized cached tiles directly. It selects the finest cached tile containing the requested WGS84 coordinate, maps the point into the 65×65 heightfield and performs bilinear interpolation. If a contributing heightfield sample is no-data, sampling falls back to a coarser cached tile when one is available. Corrupt or unreadable normalized tiles are reported explicitly rather than silently skipped.
+- Bounds are WGS84 longitude/latitude in `west,south,east,north` order with `west < east` and `south < north`. Longitude must be within `[-180,180]`, latitude within `[-85,85]`; antimeridian-crossing requests are not supported.
+- Each of `rows` and `columns` is in `1..512`. Subdivide larger analysis regions into adjacent windows with consistently aligned cell centers.
+- Each output cell center samples the **containing native Copernicus GeoTIFF pixel** (nearest source pixel). This is not bilinear interpolation or the normalized 65 × 65 heightfield.
+- Successful HTTP responses contain **little-endian IEEE-754 float32** samples, row-major from north to south, `rows × columns × 4` bytes, MIME `application/vnd.aowis.dem-f32le`.
+- Missing native source pixels are quiet NaNs in otherwise successful grids; completely unavailable windows return `404`.
+- Dataset datum is unchanged (EGM2008 for GLO-30); no vertical transformation is applied.
 
-The sampler accepts an explicit dataset identifier. A normalized cache hit reports `TerrainDataOrigin::Cache`; a tile generated by the remote provider during the current request reports `TerrainDataOrigin::Remote`. Provider-native formats remain hidden behind `TerrainProvider`. Offline-package mounting is not implemented in the current retrieval path. The HTTP point-elevation endpoint uses this sampler.
+The in-process equivalent uses the same provider implementation:
 
-## Shared tile retrieval path
+```cpp
+Aowis::Map::TerrainAnalysisGridRequest request;
+request.dataset = QStringLiteral("copernicus-glo30");
+request.bounds = {8.10, 50.10, 8.11, 50.11}; // west, south, east, north
+request.columns = 512;
+request.rows = 512;
+const Aowis::Map::TerrainAnalysisGridResult grid = map_terrain.analysisGrid(request);
+```
 
-Point sampling and renderer tile delivery use the same normalized terrain retrieval boundary. `TerrainData::sampleElevation()` resolves each candidate XYZ tile through `TerrainData::terrainTile()` before decoding/interpolating it.
+For an in-process AOWIS Standalone/Hydrology integration, share the existing `TerrainData` instance rather than creating a second Map service or Copernicus download store. The Map subsystem owns provider data and retrieval; Hydrology owns its analysis jobs and results.
 
-The shared path performs read-through retrieval and cache-integrity handling,
-so point elevation queries and 3D tile consumers share the same availability
-and source behavior. Offline-package mounting is not implemented here.
+## Binary terrain format
 
-
-## Supported remote dataset
-
-`copernicus-glo30` is the Internet-backed terrain dataset currently supported. It is normalized from the public Copernicus GLO-30 COG distribution, records EGM2008 as its vertical datum and 30 m as nominal source resolution, and is a DSM rather than a guaranteed bare-earth DTM. See [`terrain-providers.md`](terrain-providers.md).
-
-## Remote acquisition and CPU sampling
-
-When remote terrain fetching is enabled, the HTTP elevation path acquires native sources for the finest supported normalized tile on the remote-capable worker pool, then queues CPU-only normalized-tile sampling on the terrain processing pool. The remote admission reservation is released at this handoff; global admission is held until sampling completes. The sampling loop continues to search coarser normalized tiles for available elevation data without initiating downloads from CPU workers. Cached lower-zoom tiles remain eligible, but missing coarser source regions are not proactively acquired. In fully offline mode, point sampling uses the CPU pool directly.
+The renderer-oriented `.aowterrain` v1 format is documented separately in the [tile format specification](terrain-tile-format.md). It encodes a 65 × 65 heightfield with quantized uint16 samples, a no-data sentinel, projection and vertical-datum metadata, dataset/XYZ identity and payload CRC. A normalizer must record the **actual** source datum; unknown must remain unknown rather than inventing a conversion. Formats and datasets have independent version/identity semantics.

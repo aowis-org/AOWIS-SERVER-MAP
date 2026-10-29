@@ -140,7 +140,7 @@ For office projects in multiple places, the administrator can define several
 narrower `zoom_N` tiers, and separate `downloads/coverage` and
 `terrain/coverage` choices. **Disabling raster remote downloads never disables
 terrain remote downloads and vice versa**. Both remain able to serve their
-existing local data. See [root README](../../README.md#geographic-download-coverage)
+existing local data. See [configuration guide](../../docs/configuration.md#geographic-download-coverage)
 for a complete configuration example.
 
 ## Local and remote reverse proxies
@@ -162,3 +162,6 @@ clients. Neither a reverse proxy nor CORS response headers alone authorize
 this operation.
 
 See [Apache reverse proxy configurations](../apache/README.md) for templates.
+For complete settings and API access controls, consult the
+[configuration guide](../../docs/configuration.md) and
+[HTTP API reference](../../docs/http-api.md).

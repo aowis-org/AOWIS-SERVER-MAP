@@ -6,9 +6,9 @@ AOWIS terrain providers normalize their source data into one provider-neutral bi
 
 - point-elevation sampling for entity inspectors;
 - terrain geometry in AOWIS 3D map renderers;
-- offline terrain packages.
+- offline terrain packages assembled by external tooling (automatic mounting is not implemented).
 
-Provider-native formats such as HGT, GeoTIFF/COG or a future local DEM importer must not leak into these consumers.
+Provider-native formats such as GeoTIFF/COG must not leak into these consumers.
 
 Format version 1 uses the file extension `.aowterrain` and MIME type `application/vnd.aowis.terrain`.
 
@@ -20,7 +20,7 @@ Each terrain tile is addressed as standard Web-Mercator XYZ:
 z/x/y
 ```
 
-The projection is Web Mercator / EPSG:3857 with the usual slippy-map orientation. Consequently v1 covers the standard Web-Mercator latitude range of approximately `-85.05112878° ... +85.05112878°`; a future format/projection identifier can extend terrain storage beyond that range without changing v1 semantics.
+The projection is Web Mercator / EPSG:3857 with the usual slippy-map orientation. Consequently v1 covers the standard Web-Mercator latitude range of approximately `-85.05112878° ... +85.05112878°`; this range is part of the v1 projection contract.
 
 
 - X increases west-to-east;
@@ -61,7 +61,7 @@ y = tile_y + r / 64
 
 converted through inverse Web Mercator at zoom `z`.
 
-Consequently adjacent normalized tiles share their boundary coordinates exactly. Normalizers must sample a common boundary coordinate consistently so adjacent tiles receive matching edge elevations. The later renderer may still use skirts or another seam strategy while different LODs meet.
+Consequently adjacent normalized tiles share their boundary coordinates exactly. Normalizers must sample a common boundary coordinate consistently so adjacent tiles receive matching edge elevations. The later renderer may still use skirts or another seam strategy when different levels of detail meet.
 
 The 65×65 choice is intentional: the renderer can reuse one static 64×64-cell index buffer for every terrain tile, while only the height samples change.
 
@@ -160,9 +160,9 @@ A normalizer must record the actual datum of its source. It must not infer or in
 
 The payload carries a standard IEEE CRC32. This is intended to detect truncated or corrupted cached/offline tile data cheaply before decoding or GPU upload.
 
-The v1 file itself is intentionally not internally compressed. HTTP transport may use content encoding and offline packages may compress their members. Keeping the canonical cache tile uncompressed makes decoding, random access and future direct GPU-oriented staging simple. A typical v1 payload is only 8450 bytes before transport/package compression.
+The v1 file itself is intentionally not internally compressed. HTTP transport may use content encoding and offline packages may compress their members. Keeping the canonical cache tile uncompressed makes decoding, random access and direct GPU-oriented staging simple. A typical v1 payload is only 8450 bytes before transport/package compression.
 
-The format version is independent of provider/dataset versions. A new source revision of `copernicus-glo30`, for example, does not require an AOWIS format-version change if it still normalizes into the same v1 structure.
+The format version is independent of provider/dataset versions. A source-data revision does not require an AOWIS format-version change if it normalizes into the same v1 structure.
 
 An incompatible binary/layout change requires a new AOWIS terrain format version and a separate normalized cache namespace such as `normalized/v2/...`. Existing v1 meanings must not be changed in place.
 
