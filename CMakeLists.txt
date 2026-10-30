@@ -312,6 +312,7 @@ if(BUILD_TESTING)
         aowis-server-map-terrain-vertical-datum-test
         aowis-server-map-terrain-dataset-catalog-test
         aowis-server-map-terrain-cache-deletion-test
+        aowis-server-map-terrain-area-average-test
     )
     if(AOWIS_SERVER_MAP_BUILD_SERVER)
         # Compiling only the unit tests misses API errors in server.cpp.
@@ -331,6 +332,17 @@ if(BUILD_TESTING)
     add_test(NAME aowis-server-map-terrain-byte-admission
         COMMAND aowis-server-map-terrain-byte-admission-test)
     list(APPEND AOWIS_SERVER_MAP_TEST_TARGETS aowis-server-map-terrain-byte-admission-test)
+    # Every test executable must be built by aowis-server-map-tests, or
+    # compile_linux_tests.sh reports its test as "Not Run". Fail at configure
+    # time instead of when a new test is forgotten in the list above.
+    get_property(AOWIS_SERVER_MAP_DIRECTORY_TARGETS DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)
+    foreach(target_name IN LISTS AOWIS_SERVER_MAP_DIRECTORY_TARGETS)
+        if(target_name MATCHES "^aowis-server-map-.*-test$" AND
+           NOT target_name IN_LIST AOWIS_SERVER_MAP_TEST_TARGETS)
+            message(FATAL_ERROR
+                "Test executable ${target_name} is missing from AOWIS_SERVER_MAP_TEST_TARGETS")
+        endif()
+    endforeach()
     add_custom_target(aowis-server-map-tests
         DEPENDS ${AOWIS_SERVER_MAP_TEST_TARGETS})
     get_property(AOWIS_SERVER_MAP_REGISTERED_TESTS DIRECTORY PROPERTY TESTS)
