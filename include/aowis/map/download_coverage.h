@@ -37,6 +37,9 @@ public:
     bool hasRegion(const QString &name) const;
     bool hasProfile(const QString &name) const;
     bool permitsTile(const QString &profile, int zoom, int x, int y) const;
+    // The zoom tier's rule applied to an arbitrary WGS84 rectangle (west <= east):
+    // permitted when any part of it intersects an allowed region.
+    bool permitsArea(const QString &profile, int zoom, const Bounds &area) const;
     QStringList profileNames() const;
 
 private:

@@ -336,6 +336,73 @@ int main()
         return 1;
     grid_request.columns = 4;
 
+    // GLO-30 is RasterPixelIsPoint: an output cell centre selects the source
+    // pixel with the nearest centre. Centre at pixel coordinates (4.6, 7.6)
+    // must read pixel (5, 8), not the floor (4, 7).
+    {
+        TerrainAnalysisGridRequest nearest_request;
+        nearest_request.dataset = QStringLiteral("copernicus-glo30");
+        const double centre_longitude = 8.0 + 4.6 / 128.0;
+        const double centre_latitude = 51.0 - 7.6 / 128.0;
+        nearest_request.bounds = {centre_longitude - 0.0005, centre_latitude - 0.0005,
+                                  centre_longitude + 0.0005, centre_latitude + 0.0005};
+        nearest_request.columns = 1;
+        nearest_request.rows = 1;
+        const TerrainAnalysisGridResult nearest =
+            terrain_data.analysisGrid(nearest_request, false);
+        if (!require(nearest.status == TerrainProviderFetchStatus::Ready &&
+                     nearest.elevations_m.size() == 1 &&
+                     nearest.elevations_m.at(0) == 1000.0f + 8.0f * 2.0f + 5.0f * 0.5f,
+                     "Native DEM window did not select the nearest source pixel centre"))
+        {
+            std::cerr << nearest.error_message.toStdString() << '\n';
+            return 1;
+        }
+
+        // In the last half pixel of a cell the nearest centre is the first
+        // pixel of the east neighbour cell, which is not cached here.
+        nearest_request.bounds.west_deg = 8.0 + 127.7 / 128.0 - 0.0005;
+        nearest_request.bounds.east_deg = 8.0 + 127.7 / 128.0 + 0.0005;
+        if (!require(terrain_data.analysisGrid(nearest_request, false).status ==
+                         TerrainProviderFetchStatus::SourceUnavailable,
+                     "Native DEM window clamped instead of reading the east neighbour cell"))
+            return 1;
+    }
+
+    // One grid may read at most 16 one-degree source cells (5 x 4 here).
+    {
+        TerrainAnalysisGridRequest wide_request;
+        wide_request.dataset = QStringLiteral("copernicus-glo30");
+        wide_request.bounds = {8.0, 48.0, 13.0, 52.0};
+        wide_request.columns = 50;
+        wide_request.rows = 40;
+        if (!require(terrain_data.analysisGrid(wide_request, false).status ==
+                         TerrainProviderFetchStatus::UnsupportedAddress,
+                     "Analysis grid spanning too many source cells must be rejected"))
+            return 1;
+    }
+
+    // HTTP-thread classification: cached native sources need no remote stage.
+    {
+        TerrainAnalysisGridRequest cached_request;
+        cached_request.dataset = QStringLiteral("copernicus-glo30");
+        cached_request.bounds = {8.1, 50.1, 8.2, 50.2};
+        cached_request.columns = 4;
+        cached_request.rows = 4;
+        TerrainAnalysisGridRequest uncached_request = cached_request;
+        uncached_request.bounds = {20.1, 10.1, 20.2, 10.2};
+        if (!require(!terrain_data.gridNeedsRemoteAcquisition(cached_request) &&
+                     terrain_data.gridNeedsRemoteAcquisition(uncached_request) &&
+                     !terrain_data.tileNeedsRemoteAcquisition(
+                         QStringLiteral("copernicus-glo30"), addressForCoordinate(50.5, 8.5, 14)) &&
+                     terrain_data.tileNeedsRemoteAcquisition(
+                         QStringLiteral("copernicus-glo30"), addressForCoordinate(10.5, 20.5, 14)) &&
+                     !terrain_data.elevationNeedsRemoteAcquisition(
+                         QStringLiteral("copernicus-glo30"), 50.5, 8.5),
+                     "Remote-acquisition classification ignored cached native sources"))
+            return 1;
+    }
+
     const TerrainTileAddress address = addressForCoordinate(50.5, 8.5, 14);
     TerrainTileLookupResult result =
         terrain_data.terrainTile(QStringLiteral("copernicus-glo30"), address);

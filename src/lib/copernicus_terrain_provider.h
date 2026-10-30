@@ -44,15 +44,24 @@ public:
     TerrainSourceDeletionResult deleteSourceData(const QString &dataset,
                                                  const TerrainGeographicBox &box,
                                                  const QString &provider_cache_directory) override;
+    bool tileSourcesAvailableLocally(const QString &dataset,
+                                     const TerrainTileAddress &address,
+                                     const QString &provider_cache_directory) const override;
+    bool gridSourcesAvailableLocally(const TerrainAnalysisGridRequest &request,
+                                     const QString &provider_cache_directory) const override;
 
 private:
+    // Source cells answered with HTTP 404 are not requested again for an hour.
+    bool isSourceConfirmedUnavailable(const QString &source_key) const;
+    void markSourceConfirmedUnavailable(const QString &source_key);
+
     const int connect_timeout_ms;
     const int inactivity_timeout_ms;
     const int download_deadline_ms;
     // In-process integration test only; production leaves this empty.
     const QUrl integration_source_url;
     QHash<QString, QDateTime> unavailable_source_until;
-    QMutex unavailable_source_mutex;
+    mutable QMutex unavailable_source_mutex;
     mutable QMutex upstream_mutex;
     QSet<QNetworkReply *> upstream_active_replies;
     quint64 upstream_cancel_generation = 0;

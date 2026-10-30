@@ -584,13 +584,40 @@ TerrainAnalysisGridResult TerrainData::analysisGrid(
     return result;
 }
 
+bool TerrainData::permitsGridAcquisition(const TerrainAnalysisGridRequest &request) const
+{
+    if (this->config.coverage_profile.isEmpty())
+        return true;
+    int zoom = TerrainTileMaximumZoom;
+    for (const std::unique_ptr<TerrainProvider> &provider : this->providers)
+    {
+        if (!provider->supportsDataset(request.dataset))
+            continue;
+        const QVector<TerrainDatasetInfo> infos = provider->datasets();
+        for (const TerrainDatasetInfo &info : infos)
+        {
+            if (info.dataset == request.dataset)
+                zoom = info.maximum_zoom;
+        }
+        break;
+    }
+    DownloadCoverage::Bounds area;
+    area.west = request.bounds.west_deg;
+    area.south = request.bounds.south_deg;
+    area.east = request.bounds.east_deg;
+    area.north = request.bounds.north_deg;
+    return this->config.download_coverage.permitsArea(this->config.coverage_profile, zoom, area);
+}
+
 TerrainProviderFetchResult TerrainData::acquireGridSources(
     const TerrainAnalysisGridRequest &request,
     const std::shared_ptr<std::atomic_bool> &cancel_requested) const
 {
     TerrainProviderFetchResult result;
     result.status = TerrainProviderFetchStatus::Ready;
-    if (!this->initialized || !this->config.remote_fetch_enabled)
+    // Outside coverage, the CPU stage still serves already cached sources.
+    if (!this->initialized || !this->config.remote_fetch_enabled ||
+        !permitsGridAcquisition(request))
         return result;
     for (const std::unique_ptr<TerrainProvider> &provider : this->providers)
     {
@@ -621,6 +648,69 @@ TerrainProviderFetchResult TerrainData::acquireTileSources(
                                                 this->storage_paths.providers, true, cancel_requested);
     }
     return result;
+}
+
+bool TerrainData::tileNeedsRemoteAcquisition(const QString &dataset,
+                                             const TerrainTileAddress &address) const
+{
+    if (!isRemoteFetchEnabled())
+        return false;
+    if (isValidTerrainDatasetId(dataset) && isValidTerrainTileAddress(address))
+    {
+        if (!this->config.download_coverage.permitsTile(
+                this->config.coverage_profile, address.zoom, address.x, address.y))
+            return false;
+        if (QFileInfo::exists(normalizedTilePath(dataset, address)))
+            return false;
+    }
+    for (const std::unique_ptr<TerrainProvider> &provider : this->providers)
+    {
+        if (provider->supportsDataset(dataset) && provider->supportsAddress(dataset, address) &&
+            provider->tileSourcesAvailableLocally(dataset, address, this->storage_paths.providers))
+            return false;
+    }
+    return true;
+}
+
+bool TerrainData::elevationNeedsRemoteAcquisition(const QString &dataset,
+                                                  double latitude_deg,
+                                                  double longitude_deg) const
+{
+    if (!isRemoteFetchEnabled())
+        return false;
+    if (!isValidWgs84Coordinate(latitude_deg, longitude_deg))
+        return true;
+    // The first provider-backed address visited by sampleElevation(), exactly
+    // as acquireElevationSources() selects it.
+    for (int zoom = TerrainTileMaximumZoom; zoom >= 0; --zoom)
+    {
+        const std::optional<TerrainGridPosition> position =
+            terrainGridPosition(latitude_deg, longitude_deg, zoom);
+        if (!position.has_value())
+            continue;
+        for (const std::unique_ptr<TerrainProvider> &provider : this->providers)
+        {
+            if (provider->supportsDataset(dataset) &&
+                provider->supportsAddress(dataset, position->address))
+                return tileNeedsRemoteAcquisition(dataset, position->address);
+        }
+    }
+    return true;
+}
+
+bool TerrainData::gridNeedsRemoteAcquisition(const TerrainAnalysisGridRequest &request) const
+{
+    if (!isRemoteFetchEnabled())
+        return false;
+    if (isValidTerrainDatasetId(request.dataset) && !permitsGridAcquisition(request))
+        return false;
+    for (const std::unique_ptr<TerrainProvider> &provider : this->providers)
+    {
+        if (provider->supportsDataset(request.dataset) &&
+            provider->gridSourcesAvailableLocally(request, this->storage_paths.providers))
+            return false;
+    }
+    return true;
 }
 
 TerrainTileLookupResult TerrainData::terrainTile(const QString &dataset,

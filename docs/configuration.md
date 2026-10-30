@@ -101,6 +101,8 @@ remote_fetch_enabled=true
 coverage=
 ```
 
+String values containing a comma must be enclosed in double quotes (`name="Esri, Maxar"`); Qt's INI reader would otherwise split them into a list. The server rejects an unquoted comma in provider `name`, `url` and `coverage` and in `authentication/api_key`/`delete_api_key` instead of silently dropping the value. Inside quotes, write `\"` for a quote and `\\` for a backslash. The API-managed `providers.ini` is always written this way.
+
 `{z}`, `{x}` and `{y}` placeholders are required, in any order; `{s}` optionally selects subdomains `a`, `b`, `c`. An empty provider `coverage` inherits the raster default. A provider's `remote_fetch_enabled=true` cannot override `downloads/remote_fetch_enabled=false`.
 
 If **any** `[map_provider.*]` sections are present, they form the entire INI provider catalog; built-ins are not silently merged in. If no such sections exist, the built-in catalog applies. An API-saved empty provider list is also meaningful and remains empty.

@@ -97,6 +97,50 @@ QString joinedValue(const QVariant &value)
     return value.toStringList().join(QStringLiteral(","));
 }
 
+// QSettings splits an unquoted value at commas into a QStringList, whose
+// toString() is empty. For single-string keys that silently loses the value
+// (an API key would disable authentication), so reject it with a hint.
+bool readSingleString(QSettings *settings, const QString &key, const QString &fallback,
+                      QString *value, QString *error_message)
+{
+    const QVariant raw = settings->value(key, fallback);
+    if (raw.typeId() == QMetaType::QStringList)
+    {
+        const QString full_key = settings->group().isEmpty()
+            ? key : settings->group() + QLatin1Char('/') + key;
+        *error_message = QStringLiteral(
+            "Value of '%1' contains an unquoted comma; enclose the value in double quotes")
+                             .arg(full_key);
+        return false;
+    }
+    *value = raw.toString();
+    return true;
+}
+
+// A string value in the quoting QSettings itself writes for special
+// characters: commas, semicolons, '=' and leading/trailing blanks are literal
+// inside double quotes; backslash and quote are escaped; a leading '@' is
+// doubled so the reader does not parse it as an @Variant()/@ByteArray() value.
+QString iniQuotedValue(const QString &value)
+{
+    QString escaped;
+    escaped.reserve(value.size() + 3);
+    if (value.startsWith(QLatin1Char('@')))
+        escaped.append(QLatin1Char('@'));
+    for (const QChar character : value)
+    {
+        if (character == QLatin1Char('\\') || character == QLatin1Char('"'))
+            escaped.append(QLatin1Char('\\'));
+        if (character == QLatin1Char('\t'))
+        {
+            escaped.append(QStringLiteral("\\t"));
+            continue;
+        }
+        escaped.append(character);
+    }
+    return QStringLiteral("\"") + escaped + QStringLiteral("\"");
+}
+
 QString resolveDirectory(const QFileInfo &config_file, const QString &directory)
 {
     const QFileInfo info(directory);
@@ -181,9 +225,17 @@ bool readMapProviderCatalog(QSettings *settings, Server::Config *config,
                 if (known.id == id) provider = known;
             provider.id = id;
             settings->beginGroup(group);
-            provider.name = settings->value(QStringLiteral("name"), provider.name).toString();
-            provider.url_template = settings->value(QStringLiteral("url"), provider.url_template).toString();
-            provider.coverage = settings->value(QStringLiteral("coverage")).toString().trimmed();
+            if (!readSingleString(settings, QStringLiteral("name"), provider.name,
+                                  &provider.name, error_message) ||
+                !readSingleString(settings, QStringLiteral("url"), provider.url_template,
+                                  &provider.url_template, error_message) ||
+                !readSingleString(settings, QStringLiteral("coverage"), QString(),
+                                  &provider.coverage, error_message))
+            {
+                settings->endGroup();
+                return false;
+            }
+            provider.coverage = provider.coverage.trimmed();
             const QString min_text = settings->value(QStringLiteral("min_zoom"), provider.minimum_zoom).toString();
             const QString max_text = settings->value(QStringLiteral("max_zoom"), provider.maximum_zoom).toString();
             bool valid_min = false;
@@ -565,13 +617,21 @@ bool MapServerConfiguration::loadConfigFile(const QString &path, Server::Config 
     }
 
     if (settings.contains(QStringLiteral("authentication/api_key")))
-        config->api_key = settings.value(QStringLiteral("authentication/api_key")).toString().toUtf8();
+    {
+        QString api_key;
+        if (!readSingleString(&settings, QStringLiteral("authentication/api_key"), QString(),
+                              &api_key, error_message))
+            return false;
+        config->api_key = api_key.toUtf8();
+    }
 
     if (settings.contains(QStringLiteral("authentication/delete_api_key")))
     {
-        config->delete_api_key = settings.value(QStringLiteral("authentication/delete_api_key"))
-                                     .toString()
-                                     .toUtf8();
+        QString delete_api_key;
+        if (!readSingleString(&settings, QStringLiteral("authentication/delete_api_key"), QString(),
+                              &delete_api_key, error_message))
+            return false;
+        config->delete_api_key = delete_api_key.toUtf8();
     }
 
     if (settings.status() == QSettings::AccessError)
@@ -797,16 +857,26 @@ bool MapServerConfiguration::saveMapProvidersToState(const QString &path,
     text.append(QStringLiteral("; Map providers managed by the map server API.\n"));
     for (const Aowis::Map::MapProvider &provider : providers)
     {
-        text.append(QStringLiteral("[map_provider.%1]\n").arg(provider.id));
-        // INI values cannot contain newlines, as validated by the API.
-        text.append(QStringLiteral("name=%1\nurl=%2\nmin_zoom=%3\nmax_zoom=%4\n")
-            .arg(provider.name, provider.url_template)
-            .arg(provider.minimum_zoom).arg(provider.maximum_zoom));
-        text.append(QStringLiteral("enabled=%1\nremote_fetch_enabled=%2\n")
-            .arg(provider.enabled ? QStringLiteral("true") : QStringLiteral("false"),
-                 provider.remote_fetch_enabled ? QStringLiteral("true") : QStringLiteral("false")));
+        // INI values cannot contain newlines, as validated by the API. Quote
+        // strings so commas, semicolons, quotes and backslashes survive reload.
+        // Concatenate rather than chain QString::arg(): user text such as a
+        // percent-encoded URL ("%2C") must never be treated as a placeholder.
+        text.append(QStringLiteral("[map_provider.") + provider.id + QStringLiteral("]\n"));
+        text.append(QStringLiteral("name=") + iniQuotedValue(provider.name) + QLatin1Char('\n'));
+        text.append(QStringLiteral("url=") + iniQuotedValue(provider.url_template) + QLatin1Char('\n'));
+        text.append(QStringLiteral("min_zoom=") + QString::number(provider.minimum_zoom) +
+                    QLatin1Char('\n'));
+        text.append(QStringLiteral("max_zoom=") + QString::number(provider.maximum_zoom) +
+                    QLatin1Char('\n'));
+        text.append(QStringLiteral("enabled=") +
+                    (provider.enabled ? QStringLiteral("true") : QStringLiteral("false")) +
+                    QLatin1Char('\n'));
+        text.append(QStringLiteral("remote_fetch_enabled=") +
+                    (provider.remote_fetch_enabled ? QStringLiteral("true") : QStringLiteral("false")) +
+                    QLatin1Char('\n'));
         if (!provider.coverage.isEmpty())
-            text.append(QStringLiteral("coverage=%1\n").arg(provider.coverage));
+            text.append(QStringLiteral("coverage=") + iniQuotedValue(provider.coverage) +
+                        QLatin1Char('\n'));
         text.append(QLatin1Char('\n'));
     }
     // Even an empty catalog is authoritative; never restore built-ins.

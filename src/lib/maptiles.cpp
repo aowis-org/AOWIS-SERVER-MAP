@@ -569,21 +569,21 @@ MapTiles::UpstreamActivity MapTiles::upstreamActivity() const
 void MapTiles::cancelUpstreamDownloads()
 {
     QList<TileHttpClient *> active_clients;
-    QList<QueuedDownload> queued_downloads;
+    QStringList queued_response_keys;
     {
         QMutexLocker locker(&this->downloads_mutex);
         active_clients = this->downloads_active_clients.values();
         while (!this->downloads_queued.isEmpty())
         {
             const QueuedDownload download = this->downloads_queued.dequeue();
-            queued_downloads.append(download);
+            queued_response_keys.append(takeResponseKeysLocked(download));
             this->downloads_invalidated.remove(download.canonical_key);
         }
         this->downloads_queued_keys.clear();
     }
 
-    for (const QueuedDownload &download : queued_downloads)
-        emit tileFailed(download.response_key, TileFailureReason::Cancelled);
+    for (const QString &response_key : queued_response_keys)
+        emit tileFailed(response_key, TileFailureReason::Cancelled);
 
     for (TileHttpClient *client : active_clients)
     {
@@ -603,6 +603,14 @@ MapTiles::DownloadScheduleStatus MapTiles::scheduleMapTileDownload(const QueuedD
         if (this->downloads_active.contains(download.canonical_key) ||
             this->downloads_queued_keys.contains(download.canonical_key))
         {
+            // Join the running or queued download. Without this, a request
+            // with a different response key would never receive a result.
+            if (!download.response_key.isEmpty())
+            {
+                QStringList &joined = this->downloads_joined_response_keys[download.canonical_key];
+                if (!joined.contains(download.response_key))
+                    joined.append(download.response_key);
+            }
             return DownloadScheduleStatus::Scheduled;
         }
 
@@ -658,6 +666,20 @@ void MapTiles::markDownloadFinishedLocked(const QueuedDownload &download)
         this->downloads_active_per_origin.remove(origin);
 }
 
+QStringList MapTiles::takeResponseKeysLocked(const QueuedDownload &download)
+{
+    QStringList keys;
+    if (!download.response_key.isEmpty())
+        keys.append(download.response_key);
+    const QStringList joined = this->downloads_joined_response_keys.take(download.canonical_key);
+    for (const QString &key : joined)
+    {
+        if (!keys.contains(key))
+            keys.append(key);
+    }
+    return keys;
+}
+
 void MapTiles::startMapTileDownload(const QueuedDownload &download)
 {
     TileHttpClient *rest = new TileHttpClient(this->network_manager, download.url, this);
@@ -669,11 +691,13 @@ void MapTiles::startMapTileDownload(const QueuedDownload &download)
             [this, rest, download](const QByteArray &data, bool may_store)
     {
         bool invalidated = false;
+        QStringList response_keys;
         {
             QMutexLocker locker(&this->downloads_mutex);
             markDownloadFinishedLocked(download);
             this->downloads_active_clients.remove(download.canonical_key);
             invalidated = this->downloads_invalidated.remove(download.canonical_key);
+            response_keys = takeResponseKeysLocked(download);
         }
 
         rest->deleteLater();
@@ -686,7 +710,7 @@ void MapTiles::startMapTileDownload(const QueuedDownload &download)
         // the existing tileReady / on-disk cache contract.
         if (invalidated || !may_store)
         {
-            if (!download.response_key.isEmpty()) emit tileReady(download.response_key, data);
+            for (const QString &response_key : response_keys) emit tileReady(response_key, data);
             return;
         }
 
@@ -696,7 +720,7 @@ void MapTiles::startMapTileDownload(const QueuedDownload &download)
             // Bounded overload: return the tile rather than grow an unlimited
             // write backlog. The tile is returned without persistence when saturated.
             qWarning() << "Tile cache write capacity exhausted:" << download.tile_path;
-            if (!download.response_key.isEmpty()) emit tileReady(download.response_key, data);
+            for (const QString &response_key : response_keys) emit tileReady(response_key, data);
             return;
         }
 
@@ -713,7 +737,7 @@ void MapTiles::startMapTileDownload(const QueuedDownload &download)
         this->cache_write_states.insert(download.canonical_key, write_state);
         QFutureWatcher<bool> *watcher = new QFutureWatcher<bool>(this);
         connect(watcher, &QFutureWatcher<bool>::finished, this,
-                [this, watcher, download, data, write_state]()
+                [this, watcher, download, data, write_state, response_keys]()
         {
             --this->pending_cache_writes;
             this->pending_cache_write_bytes -= qint64(data.size());
@@ -727,7 +751,7 @@ void MapTiles::startMapTileDownload(const QueuedDownload &download)
             }
             if (!watcher->result())
                 qWarning() << "Tile cache persistence failed:" << download.tile_path;
-            if (!download.response_key.isEmpty()) emit tileReady(download.response_key, data);
+            for (const QString &response_key : response_keys) emit tileReady(response_key, data);
             watcher->deleteLater();
         });
         watcher->setFuture(QtConcurrent::run(&this->cache_write_pool,
@@ -747,11 +771,13 @@ void MapTiles::startMapTileDownload(const QueuedDownload &download)
         else if (reason != TileHttpClient::RequestFailureReason::Cancelled)
             qWarning() << "Tile request failed:" << download.response_key << error;
 
+        QStringList response_keys;
         {
             QMutexLocker locker(&this->downloads_mutex);
             markDownloadFinishedLocked(download);
             this->downloads_active_clients.remove(download.canonical_key);
             this->downloads_invalidated.remove(download.canonical_key);
+            response_keys = takeResponseKeysLocked(download);
         }
 
         TileFailureReason failure_reason = TileFailureReason::UpstreamError;
@@ -759,7 +785,7 @@ void MapTiles::startMapTileDownload(const QueuedDownload &download)
             failure_reason = TileFailureReason::Timeout;
         else if (reason == TileHttpClient::RequestFailureReason::Cancelled)
             failure_reason = TileFailureReason::Cancelled;
-        if (!download.response_key.isEmpty()) emit tileFailed(download.response_key, failure_reason);
+        for (const QString &response_key : response_keys) emit tileFailed(response_key, failure_reason);
         rest->deleteLater();
         startQueuedDownloads();
         const UpstreamActivity activity = upstreamActivity();

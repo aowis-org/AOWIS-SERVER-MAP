@@ -213,20 +213,26 @@ bool DownloadCoverage::permitsTile(const QString &profile, int zoom, int x, int 
     const int count = 1 << zoom;
     if (y < 0 || y >= count) return false;
     x = int((qint64(x) % count + count) % count);
-    const Bounds tile = xyzBounds(zoom, x, y);
+    return permitsArea(profile, zoom, xyzBounds(zoom, x, y));
+}
+
+bool DownloadCoverage::permitsArea(const QString &profile, int zoom, const Bounds &area) const
+{
+    if (profile.isEmpty()) return true;
+    if (zoom < 0 || zoom > 30 || !this->profiles.contains(profile)) return false;
     for (const Tier &tier : this->profiles.value(profile).tiers)
     {
         if (zoom < tier.minimum_zoom || zoom > tier.maximum_zoom) continue;
         for (const QString &name : tier.regions)
         {
             if (name == QStringLiteral("world")) return true;
-            const auto region_it = this->regions.constFind(name);
+            const QHash<QString, Region>::const_iterator region_it = this->regions.constFind(name);
             if (region_it == this->regions.cend()) continue;
             const Region &region = region_it.value();
             for (const Bounds &rectangle : region.rectangles)
-                if (intersects(rectangle, tile)) return true;
+                if (intersects(rectangle, area)) return true;
             for (const Polygon &polygon : region.polygons)
-                if (intersectsPolygon(polygon, tile)) return true;
+                if (intersectsPolygon(polygon, area)) return true;
         }
     }
     return false;

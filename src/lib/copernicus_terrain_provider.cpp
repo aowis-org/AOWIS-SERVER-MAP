@@ -46,6 +46,21 @@ constexpr int ProviderSourceMinimumStaleLockMs = 10 * 60 * 1000;
 constexpr int ProviderSourceLockGraceMs = 60 * 1000;
 constexpr qint64 MaximumSourceDownloadBytes = 256LL * 1024LL * 1024LL;
 constexpr qsizetype MaximumDecodedRasterBlockCacheBytes = 32LL * 1024LL * 1024LL;
+// An analysis grid may read at most this many 1 x 1 degree source cells. This
+// bounds the upstream volume and the simultaneously open GeoTIFFs per request.
+constexpr int MaximumAnalysisGridSourceCells = 16;
+// GLO-30 rows are always 1 arc second; columns widen to 10 arc seconds (360
+// per cell) near the poles. Interpolation and nearest-pixel rounding can read
+// the first column of the east neighbour or the first row of the south one.
+constexpr double SourceNeighbourLongitudeMarginDeg = 1.0 / 360.0;
+constexpr double SourceNeighbourLatitudeMarginDeg = 1.0 / 3600.0;
+// GeoTIFF tags and keys (OGC GeoTIFF 1.1), read without libgeotiff.
+constexpr uint32_t GeoTiffModelPixelScaleTag = 33550;
+constexpr uint32_t GeoTiffModelTiepointTag = 33922;
+constexpr uint32_t GeoTiffGeoKeyDirectoryTag = 34735;
+constexpr uint16_t GeoTiffRasterTypeGeoKey = 1025;
+constexpr uint16_t GeoTiffRasterPixelIsArea = 1;
+constexpr uint16_t GeoTiffRasterPixelIsPoint = 2;
 
 const QString CopernicusDataset = QStringLiteral("copernicus-glo30");
 const QString CopernicusBaseUrl = QStringLiteral("https://copernicus-dem-30m.s3.amazonaws.com");
@@ -143,6 +158,72 @@ CopernicusSourceAddress sourceAddressForCoordinate(double latitude_deg,
 QString sourceAddressKey(const CopernicusSourceAddress &address)
 {
     return QStringLiteral("%1:%2").arg(address.south_deg).arg(address.west_deg);
+}
+
+void insertSourceAddress(QHash<QString, CopernicusSourceAddress> *addresses,
+                         const CopernicusSourceAddress &address)
+{
+    addresses->insert(sourceAddressKey(address), address);
+}
+
+bool sourceCellAvailableLocally(const QString &provider_cache_directory,
+                                const CopernicusSourceAddress &address)
+{
+    const QFileInfo info(sourceTileCachePath(provider_cache_directory, address));
+    return info.exists() && info.isFile() && info.isReadable() && info.size() > 0;
+}
+
+bool validAnalysisGridRequest(const TerrainAnalysisGridRequest &request)
+{
+    const TerrainGeographicBox &box = request.bounds;
+    return request.columns >= 1 && request.columns <= 512 &&
+           request.rows >= 1 && request.rows <= 512 &&
+           std::isfinite(box.west_deg) && std::isfinite(box.east_deg) &&
+           std::isfinite(box.south_deg) && std::isfinite(box.north_deg) &&
+           box.west_deg >= -180.0 && box.east_deg <= 180.0 &&
+           box.south_deg >= -85.0 && box.north_deg <= 85.0 &&
+           box.west_deg < box.east_deg && box.south_deg < box.north_deg;
+}
+
+// The source cells read by fetchAnalysisGrid(): the cell of each output cell
+// centre plus the east/south neighbours its nearest pixel can round into.
+// Returns false as soon as more than MaximumAnalysisGridSourceCells are needed.
+bool analysisGridSourceAddresses(const TerrainAnalysisGridRequest &request,
+                                 QHash<QString, CopernicusSourceAddress> *addresses)
+{
+    const TerrainGeographicBox &box = request.bounds;
+    const double longitude_step = (box.east_deg - box.west_deg) / double(request.columns);
+    const double latitude_step = (box.north_deg - box.south_deg) / double(request.rows);
+    for (int row = 0; row < request.rows; ++row)
+    {
+        const double latitude = box.north_deg - (double(row) + 0.5) * latitude_step;
+        for (int column = 0; column < request.columns; ++column)
+        {
+            const double longitude = box.west_deg + (double(column) + 0.5) * longitude_step;
+            const CopernicusSourceAddress base = sourceAddressForCoordinate(latitude, longitude);
+            const bool east = base.west_deg < 179 &&
+                longitude - double(base.west_deg) >= 1.0 - SourceNeighbourLongitudeMarginDeg;
+            const bool south = base.south_deg > -90 &&
+                latitude - double(base.south_deg) <= SourceNeighbourLatitudeMarginDeg;
+            insertSourceAddress(addresses, base);
+            if (east)
+                insertSourceAddress(addresses, {base.south_deg, base.west_deg + 1});
+            if (south)
+                insertSourceAddress(addresses, {base.south_deg - 1, base.west_deg});
+            if (east && south)
+                insertSourceAddress(addresses, {base.south_deg - 1, base.west_deg + 1});
+            if (addresses->size() > MaximumAnalysisGridSourceCells)
+                return false;
+        }
+    }
+    return true;
+}
+
+QString analysisGridTooLargeMessage()
+{
+    return QStringLiteral(
+        "Analysis grid reads more than %1 Copernicus 1 x 1 degree source cells; "
+        "request smaller adjacent windows").arg(MaximumAnalysisGridSourceCells);
 }
 
 bool ensureParentDirectory(const QString &path, QString *error_message)
@@ -604,11 +685,42 @@ SourceLoadResult downloadSourceTile(const QString &provider_cache_directory,
     return result;
 }
 
+// libtiff exposes GeoTIFF tags (unknown to it without libgeotiff) as
+// anonymous fields. Their count argument is uint32 or uint16 depending on the
+// field definition, so ask libtiff instead of assuming either.
+template <typename Value>
+bool readTiffArrayTag(TIFF *tiff, uint32_t tag, TIFFDataType type,
+                      const Value **values, uint32_t *count)
+{
+    const TIFFField *field = TIFFFindField(tiff, tag, TIFF_ANY);
+    if (field == nullptr || TIFFFieldDataType(field) != type || TIFFFieldPassCount(field) == 0)
+        return false;
+
+    void *data = nullptr;
+    if (TIFFFieldReadCount(field) == TIFF_VARIABLE2)
+    {
+        uint32_t value_count = 0;
+        if (TIFFGetField(tiff, tag, &value_count, &data) != 1)
+            return false;
+        *count = value_count;
+    }
+    else
+    {
+        uint16_t value_count = 0;
+        if (TIFFGetField(tiff, tag, &value_count, &data) != 1)
+            return false;
+        *count = value_count;
+    }
+    *values = static_cast<const Value *>(data);
+    return data != nullptr;
+}
+
 class CopernicusRaster
 {
 public:
-    explicit CopernicusRaster(const QString &path)
-        : path(path)
+    CopernicusRaster(const QString &path, const CopernicusSourceAddress &address)
+        : path(path),
+          address(address)
     {
     }
 
@@ -691,7 +803,7 @@ public:
             }
         }
 
-        return true;
+        return validateGeoreferencing(error_message);
     }
 
     int pixelWidth() const
@@ -715,6 +827,88 @@ public:
     }
 
 private:
+    // The samplers assume the GLO-30 grid: RasterPixelIsPoint, the centre of
+    // pixel (0,0) on the cell's north-west corner, exactly width x height
+    // pixels per degree. Rasters carrying GeoTIFF georeferencing must agree,
+    // so a reprocessed upstream product fails loudly instead of shifting
+    // elevations. Rasters without any georeferencing tags are accepted.
+    bool validateGeoreferencing(QString *error_message) const
+    {
+        const double *scale = nullptr;
+        uint32_t scale_count = 0;
+        const double *tiepoint = nullptr;
+        uint32_t tiepoint_count = 0;
+        const bool has_scale = readTiffArrayTag(
+            this->tiff, GeoTiffModelPixelScaleTag, TIFF_DOUBLE, &scale, &scale_count);
+        const bool has_tiepoint = readTiffArrayTag(
+            this->tiff, GeoTiffModelTiepointTag, TIFF_DOUBLE, &tiepoint, &tiepoint_count);
+        if (!has_scale && !has_tiepoint)
+            return true;
+
+        if (!has_scale || !has_tiepoint || scale_count < 2 || tiepoint_count < 6)
+        {
+            if (error_message != nullptr)
+                *error_message = QStringLiteral(
+                    "Copernicus GeoTIFF has incomplete georeferencing tags: %1").arg(this->path);
+            return false;
+        }
+
+        // GeoTIFF defaults to PixelIsArea when the raster type key is absent.
+        uint16_t raster_type = GeoTiffRasterPixelIsArea;
+        const uint16_t *keys = nullptr;
+        uint32_t key_count = 0;
+        if (readTiffArrayTag(this->tiff, GeoTiffGeoKeyDirectoryTag, TIFF_SHORT, &keys, &key_count) &&
+            key_count >= 4)
+        {
+            const uint32_t entries = keys[3];
+            for (uint32_t entry = 0; entry < entries && 4 + entry * 4 + 3 < key_count; ++entry)
+            {
+                const uint32_t offset = 4 + entry * 4;
+                // Location 0: the value is stored inline in the directory.
+                if (keys[offset] == GeoTiffRasterTypeGeoKey && keys[offset + 1] == 0)
+                    raster_type = keys[offset + 3];
+            }
+        }
+
+        const double pixel_width_deg = scale[0];
+        const double pixel_height_deg = scale[1];
+        // Raster coordinate of pixel (0,0)'s centre: 0.5 for PixelIsArea, 0 for PixelIsPoint.
+        const double centre_offset = raster_type == GeoTiffRasterPixelIsArea ? 0.5 : 0.0;
+        const double first_centre_longitude =
+            tiepoint[3] + (centre_offset - tiepoint[0]) * pixel_width_deg;
+        const double first_centre_latitude =
+            tiepoint[4] - (centre_offset - tiepoint[1]) * pixel_height_deg;
+        const double expected_longitude = double(this->address.west_deg);
+        const double expected_latitude = double(this->address.south_deg + 1);
+        const bool consistent =
+            (raster_type == GeoTiffRasterPixelIsArea || raster_type == GeoTiffRasterPixelIsPoint) &&
+            std::isfinite(pixel_width_deg) && std::isfinite(pixel_height_deg) &&
+            pixel_width_deg > 0.0 && pixel_height_deg > 0.0 &&
+            std::isfinite(first_centre_longitude) && std::isfinite(first_centre_latitude) &&
+            std::abs(pixel_width_deg * double(this->width) - 1.0) <= 1e-6 &&
+            std::abs(pixel_height_deg * double(this->height) - 1.0) <= 1e-6 &&
+            std::abs(first_centre_longitude - expected_longitude) * double(this->width) <= 0.01 &&
+            std::abs(first_centre_latitude - expected_latitude) * double(this->height) <= 0.01;
+        if (consistent)
+            return true;
+
+        if (error_message != nullptr)
+        {
+            *error_message = QStringLiteral(
+                "Copernicus GeoTIFF georeferencing does not match the GLO-30 cell grid "
+                "(raster type %1, first pixel centre %2,%3, expected %4,%5, pixel size %6 x %7 deg): %8")
+                                 .arg(int(raster_type))
+                                 .arg(first_centre_longitude, 0, 'g', 12)
+                                 .arg(first_centre_latitude, 0, 'g', 12)
+                                 .arg(expected_longitude)
+                                 .arg(expected_latitude)
+                                 .arg(pixel_width_deg, 0, 'g', 12)
+                                 .arg(pixel_height_deg, 0, 'g', 12)
+                                 .arg(this->path);
+        }
+        return false;
+    }
+
     std::optional<float> tiledPixel(int column, int row, QString *error_message)
     {
         const uint32_t tile_x = uint32_t(column) / this->tile_width * this->tile_width;
@@ -841,6 +1035,7 @@ private:
     }
 
     QString path;
+    CopernicusSourceAddress address;
     TIFF *tiff = nullptr;
     uint32_t width = 0;
     uint32_t height = 0;
@@ -927,9 +1122,13 @@ public:
         return float(weighted_value);
     }
 
-    // Sample the original GeoTIFF pixel containing this coordinate without
-    // bilinear interpolation. Conditioning/storage analyses must not operate
-    // on elevations interpolated by the renderer's terrain normalization.
+    // Sample the original GeoTIFF pixel whose footprint contains this
+    // coordinate, without bilinear interpolation. Conditioning/storage
+    // analyses must not operate on elevations interpolated by the renderer's
+    // terrain normalization. GLO-30 is RasterPixelIsPoint: pixel centres lie
+    // on whole multiples of the spacing from the cell's north-west corner, so
+    // the containing pixel is the nearest centre. In the last half pixel of a
+    // cell that is the first pixel of the east or south neighbour cell.
     std::optional<float> sampleNative(double latitude_deg, double longitude_deg)
     {
         if (this->fatal_status.has_value())
@@ -939,22 +1138,12 @@ public:
         CopernicusRaster *source_raster = raster(address);
         if (source_raster == nullptr)
             return std::nullopt;
-        const int column = std::clamp(
-            int(std::floor((longitude_deg - double(address.west_deg)) *
-                           double(source_raster->pixelWidth()))), 0,
-            source_raster->pixelWidth() - 1);
-        const int row = std::clamp(
-            int(std::floor((double(address.south_deg + 1) - latitude_deg) *
-                           double(source_raster->pixelHeight()))), 0,
-            source_raster->pixelHeight() - 1);
-        QString pixel_error;
-        const std::optional<float> value = source_raster->pixel(column, row, &pixel_error);
-        if (!value.has_value() && !pixel_error.isEmpty())
-        {
-            this->fatal_status = TerrainProviderFetchStatus::SourceReadError;
-            this->fatal_error_message = pixel_error;
-        }
-        return value;
+        const int column = int(std::llround(
+            (longitude_deg - double(address.west_deg)) * double(source_raster->pixelWidth())));
+        const int row = int(std::llround(
+            (double(address.south_deg + 1) - latitude_deg) * double(source_raster->pixelHeight())));
+        return sourceGridValue(address, source_raster->pixelWidth(), source_raster->pixelHeight(),
+                               std::max(0, column), std::max(0, row));
     }
 
     std::optional<TerrainProviderFetchStatus> fatalStatus() const
@@ -1040,7 +1229,7 @@ private:
             this->downloaded_any_source = true;
 
         std::unique_ptr<CopernicusRaster> source_raster =
-            std::make_unique<CopernicusRaster>(source_result.path);
+            std::make_unique<CopernicusRaster>(source_result.path, address);
         QString open_error;
         if (!source_raster->open(&open_error))
         {
@@ -1121,6 +1310,34 @@ void coordinateForNormalizedGridSample(const TerrainTileAddress &address,
     *longitude_deg = tile_x / tile_count * 360.0 - 180.0;
     const double mercator_y = std::numbers::pi * (1.0 - 2.0 * tile_y / tile_count);
     *latitude_deg = std::atan(std::sinh(mercator_y)) * 180.0 / std::numbers::pi;
+}
+
+// The source cells read while normalizing a tile. The tile spans a monotonic
+// geographic rectangle; the margins include the neighbour cells that bilinear
+// interpolation reaches at the coarsest GLO-30 column spacing.
+void normalizedTileSourceAddresses(const TerrainTileAddress &address,
+                                   QHash<QString, CopernicusSourceAddress> *addresses)
+{
+    double north_deg = 0.0;
+    double west_deg = 0.0;
+    double south_deg = 0.0;
+    double east_deg = 0.0;
+    coordinateForNormalizedGridSample(address, 0, 0, &north_deg, &west_deg);
+    coordinateForNormalizedGridSample(address, TerrainTileCellCount,
+                                      TerrainTileCellCount, &south_deg, &east_deg);
+    const int south = sourceSouthForLatitude(
+        std::max(-90.0, south_deg - SourceNeighbourLatitudeMarginDeg));
+    const int north = sourceSouthForLatitude(
+        std::min(90.0, north_deg + SourceNeighbourLatitudeMarginDeg));
+    const int west = sourceWestForLongitude(
+        std::max(-180.0, west_deg - SourceNeighbourLongitudeMarginDeg));
+    const int east = sourceWestForLongitude(
+        std::min(180.0, east_deg + SourceNeighbourLongitudeMarginDeg));
+    for (int latitude = south; latitude <= north; ++latitude)
+    {
+        for (int longitude = west; longitude <= east; ++longitude)
+            insertSourceAddress(addresses, {latitude, longitude});
+    }
 }
 }
 
@@ -1235,40 +1452,21 @@ TerrainProviderFetchResult CopernicusTerrainProvider::acquireTileSources(
         QMutexLocker locker(&this->upstream_mutex);
         request_generation = this->upstream_cancel_generation;
     }
-    // The tile spans a monotonic geographic rectangle. A one-pixel margin
-    // conservatively includes neighbouring source cells for interpolation.
-    double north_deg = 0.0;
-    double west_deg = 0.0;
-    double south_deg = 0.0;
-    double east_deg = 0.0;
-    coordinateForNormalizedGridSample(address, 0, 0, &north_deg, &west_deg);
-    coordinateForNormalizedGridSample(address, TerrainTileCellCount,
-                                      TerrainTileCellCount, &south_deg, &east_deg);
-    constexpr double pixel_margin_deg = 1.0 / 3600.0;
     QHash<QString, CopernicusSourceAddress> source_addresses;
-    const int south = sourceSouthForLatitude(
-        std::max(-90.0, south_deg - pixel_margin_deg));
-    const int north = sourceSouthForLatitude(
-        std::min(90.0, north_deg + pixel_margin_deg));
-    const int west = sourceWestForLongitude(
-        std::max(-180.0, west_deg - pixel_margin_deg));
-    const int east = sourceWestForLongitude(
-        std::min(180.0, east_deg + pixel_margin_deg));
-    for (int latitude = south; latitude <= north; ++latitude)
+    normalizedTileSourceAddresses(address, &source_addresses);
+    for (QHash<QString, CopernicusSourceAddress>::const_iterator it = source_addresses.cbegin();
+         it != source_addresses.cend(); ++it)
     {
-        for (int longitude = west; longitude <= east; ++longitude)
-        {
-            const CopernicusSourceAddress source { latitude, longitude };
-            source_addresses.insert(sourceAddressKey(source), source);
-        }
-    }
-    for (const CopernicusSourceAddress &source : std::as_const(source_addresses))
-    {
+        if (isSourceConfirmedUnavailable(it.key()))
+            continue;
         const SourceLoadResult acquired = downloadSourceTile(
-            provider_cache_directory, source, true, &this->upstream_mutex,
+            provider_cache_directory, it.value(), true, &this->upstream_mutex,
             &this->upstream_active_replies, &this->upstream_cancel_generation,
             request_generation, this->connect_timeout_ms, this->inactivity_timeout_ms,
             this->download_deadline_ms, this->integration_source_url, cancel_requested);
+        if (acquired.status == SourceLoadStatus::Unavailable &&
+            acquired.source_confirmed_unavailable)
+            markSourceConfirmedUnavailable(it.key());
         if (acquired.status == SourceLoadStatus::Cancelled ||
             acquired.status == SourceLoadStatus::NetworkError ||
             acquired.status == SourceLoadStatus::ReadError)
@@ -1411,17 +1609,20 @@ TerrainProviderFetchResult CopernicusTerrainProvider::acquireGridSources(
         result.error_message = QStringLiteral("Unknown Copernicus terrain dataset");
         return result;
     }
-    const TerrainGeographicBox &box = request.bounds;
-    if (request.columns < 1 || request.columns > 512 ||
-        request.rows < 1 || request.rows > 512 ||
-        !std::isfinite(box.west_deg) || !std::isfinite(box.east_deg) ||
-        !std::isfinite(box.south_deg) || !std::isfinite(box.north_deg) ||
-        box.west_deg < -180.0 || box.east_deg > 180.0 ||
-        box.south_deg < -85.0 || box.north_deg > 85.0 ||
-        box.west_deg >= box.east_deg || box.south_deg >= box.north_deg)
+    if (!validAnalysisGridRequest(request))
     {
         result.status = TerrainProviderFetchStatus::UnsupportedAddress;
         result.error_message = QStringLiteral("Invalid source raster window (1..512 cells per axis)");
+        return result;
+    }
+    // Match fetchAnalysisGrid's native sample centres exactly. A grid may
+    // be sparse across a large box; downloading the entire box would consume
+    // vastly more bandwidth than the actual computation requires.
+    QHash<QString, CopernicusSourceAddress> source_addresses;
+    if (!analysisGridSourceAddresses(request, &source_addresses))
+    {
+        result.status = TerrainProviderFetchStatus::UnsupportedAddress;
+        result.error_message = analysisGridTooLargeMessage();
         return result;
     }
     quint64 request_generation = 0;
@@ -1429,29 +1630,19 @@ TerrainProviderFetchResult CopernicusTerrainProvider::acquireGridSources(
         QMutexLocker locker(&this->upstream_mutex);
         request_generation = this->upstream_cancel_generation;
     }
-    // Match fetchAnalysisGrid's native sample centres exactly. A grid may
-    // be sparse across a large box; downloading the entire box would consume
-    // vastly more bandwidth than the actual computation requires.
-    QHash<QString, CopernicusSourceAddress> source_addresses;
-    const double longitude_step = (box.east_deg - box.west_deg) / double(request.columns);
-    const double latitude_step = (box.north_deg - box.south_deg) / double(request.rows);
-    for (int row = 0; row < request.rows; ++row)
+    for (QHash<QString, CopernicusSourceAddress>::const_iterator it = source_addresses.cbegin();
+         it != source_addresses.cend(); ++it)
     {
-        const double latitude = box.north_deg - (double(row) + 0.5) * latitude_step;
-        for (int column = 0; column < request.columns; ++column)
-        {
-            const double longitude = box.west_deg + (double(column) + 0.5) * longitude_step;
-            const CopernicusSourceAddress source = sourceAddressForCoordinate(latitude, longitude);
-            source_addresses.insert(sourceAddressKey(source), source);
-        }
-    }
-    for (const CopernicusSourceAddress &source : std::as_const(source_addresses))
-    {
+        if (isSourceConfirmedUnavailable(it.key()))
+            continue;
         const SourceLoadResult acquired = downloadSourceTile(
-            provider_cache_directory, source, true, &this->upstream_mutex,
+            provider_cache_directory, it.value(), true, &this->upstream_mutex,
             &this->upstream_active_replies, &this->upstream_cancel_generation,
             request_generation, this->connect_timeout_ms, this->inactivity_timeout_ms,
-            this->download_deadline_ms, QUrl(), cancel_requested);
+            this->download_deadline_ms, this->integration_source_url, cancel_requested);
+        if (acquired.status == SourceLoadStatus::Unavailable &&
+            acquired.source_confirmed_unavailable)
+            markSourceConfirmedUnavailable(it.key());
         if (acquired.status == SourceLoadStatus::Cancelled ||
             acquired.status == SourceLoadStatus::NetworkError ||
             acquired.status == SourceLoadStatus::ReadError)
@@ -1481,16 +1672,19 @@ TerrainAnalysisGridResult CopernicusTerrainProvider::fetchAnalysisGrid(
         result.error_message = QStringLiteral("Unknown Copernicus terrain dataset");
         return result;
     }
-    if (request.columns < 1 || request.columns > 512 ||
-        request.rows < 1 || request.rows > 512 ||
-        !std::isfinite(box.west_deg) || !std::isfinite(box.east_deg) ||
-        !std::isfinite(box.south_deg) || !std::isfinite(box.north_deg) ||
-        box.west_deg < -180.0 || box.east_deg > 180.0 ||
-        box.south_deg < -85.0 || box.north_deg > 85.0 ||
-        box.west_deg >= box.east_deg || box.south_deg >= box.north_deg)
+    if (!validAnalysisGridRequest(request))
     {
         result.status = TerrainProviderFetchStatus::UnsupportedAddress;
         result.error_message = QStringLiteral("Invalid source raster window (1..512 cells per axis)");
+        return result;
+    }
+    // Every source cell stays open until the grid is complete; the cap also
+    // bounds file descriptors and decode buffers for in-process callers.
+    QHash<QString, CopernicusSourceAddress> source_addresses;
+    if (!analysisGridSourceAddresses(request, &source_addresses))
+    {
+        result.status = TerrainProviderFetchStatus::UnsupportedAddress;
+        result.error_message = analysisGridTooLargeMessage();
         return result;
     }
     quint64 request_generation = 0;
@@ -1543,6 +1737,59 @@ TerrainAnalysisGridResult CopernicusTerrainProvider::fetchAnalysisGrid(
     result.origin = rasters.downloadedAnySource()
         ? TerrainDataOrigin::Remote : TerrainDataOrigin::Cache;
     return result;
+}
+
+bool CopernicusTerrainProvider::tileSourcesAvailableLocally(
+    const QString &dataset, const TerrainTileAddress &address,
+    const QString &provider_cache_directory) const
+{
+    if (!supportsAddress(dataset, address))
+        return false;
+    QHash<QString, CopernicusSourceAddress> source_addresses;
+    normalizedTileSourceAddresses(address, &source_addresses);
+    for (QHash<QString, CopernicusSourceAddress>::const_iterator it = source_addresses.cbegin();
+         it != source_addresses.cend(); ++it)
+    {
+        if (!sourceCellAvailableLocally(provider_cache_directory, it.value()) &&
+            !isSourceConfirmedUnavailable(it.key()))
+            return false;
+    }
+    return true;
+}
+
+bool CopernicusTerrainProvider::gridSourcesAvailableLocally(
+    const TerrainAnalysisGridRequest &request, const QString &provider_cache_directory) const
+{
+    if (!supportsDataset(request.dataset) || !validAnalysisGridRequest(request))
+        return false;
+    QHash<QString, CopernicusSourceAddress> source_addresses;
+    // An oversized grid is rejected without any acquisition: no remote stage.
+    if (!analysisGridSourceAddresses(request, &source_addresses))
+        return true;
+    for (QHash<QString, CopernicusSourceAddress>::const_iterator it = source_addresses.cbegin();
+         it != source_addresses.cend(); ++it)
+    {
+        if (!sourceCellAvailableLocally(provider_cache_directory, it.value()) &&
+            !isSourceConfirmedUnavailable(it.key()))
+            return false;
+    }
+    return true;
+}
+
+bool CopernicusTerrainProvider::isSourceConfirmedUnavailable(const QString &source_key) const
+{
+    QMutexLocker locker(&this->unavailable_source_mutex);
+    const QHash<QString, QDateTime>::const_iterator it =
+        this->unavailable_source_until.constFind(source_key);
+    return it != this->unavailable_source_until.cend() &&
+           QDateTime::currentDateTimeUtc() < it.value();
+}
+
+void CopernicusTerrainProvider::markSourceConfirmedUnavailable(const QString &source_key)
+{
+    QMutexLocker locker(&this->unavailable_source_mutex);
+    this->unavailable_source_until.insert(source_key,
+                                          QDateTime::currentDateTimeUtc().addSecs(3600));
 }
 
 TerrainUpstreamActivity CopernicusTerrainProvider::upstreamActivity() const

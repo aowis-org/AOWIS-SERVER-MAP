@@ -70,6 +70,18 @@ QFuture<QHttpServerResponse> makeReadyResponse(QHttpServerResponse response)
     return future;
 }
 
+// Upstream raster providers deliver PNG, JPEG or WebP (e.g. ArcGIS imagery
+// is JPEG); TileHttpClient only accepts these three signatures.
+QByteArray mapTileMimeType(const QByteArray &data)
+{
+    if (data.size() >= 3 && uchar(data.at(0)) == 0xff && uchar(data.at(1)) == 0xd8 &&
+        uchar(data.at(2)) == 0xff)
+        return QByteArrayLiteral("image/jpeg");
+    if (data.size() >= 12 && data.startsWith("RIFF") && data.mid(8, 4) == "WEBP")
+        return QByteArrayLiteral("image/webp");
+    return QByteArrayLiteral("image/png");
+}
+
 QHttpServerResponse makeOptionsResponse()
 {
     return QHttpServerResponse(QHttpServerResponse::StatusCode::NoContent);
@@ -534,8 +546,9 @@ QFuture<QHttpServerResponse> Server::submitTerrainTile(
     address.zoom = zoom;
     address.x = quint32(tile_x);
     address.y = quint32(tile_y);
-    const bool remote_job = this->terrain_data->isRemoteFetchEnabled() &&
-        !QFileInfo::exists(this->terrain_data->normalizedTilePath(dataset, address));
+    // Only requests that may download take a remote slot; cached sources
+    // and normalized tiles go straight to the CPU pool.
+    const bool remote_job = this->terrain_data->tileNeedsRemoteAcquisition(dataset, address);
     const bool remote_admitted = existing || (!this->shutting_down &&
         this->pending_terrain_tile_count < this->config.maximum_pending_requests &&
         (!remote_job ||
@@ -574,13 +587,15 @@ QFuture<QHttpServerResponse> Server::submitTerrainTile(
 
     // Split missing-source acquisition from CPU normalization. The remote
     // worker *enqueues* CPU processing and returns; it never waits on it.
-    const std::function<void()> process_tile = [this, key, dataset, address, remote_job, cancellation]()
+    // The CPU stage never downloads: remote jobs acquired their sources
+    // already, and local jobs must not occupy a CPU worker with a transfer.
+    const std::function<void()> process_tile = [this, key, dataset, address, cancellation]()
     {
         Aowis::Map::TerrainTileLookupResult result;
         try
         {
             if (!cancellation->load(std::memory_order_acquire))
-                result = this->terrain_data->terrainTile(dataset, address, !remote_job);
+                result = this->terrain_data->terrainTile(dataset, address, false);
         }
         catch (...)
         {
@@ -672,7 +687,8 @@ QFuture<QHttpServerResponse> Server::submitTerrainElevation(
             ? Aowis::Map::terrainVerticalDatumId(*requested_vertical_datum)
             : QStringLiteral("native"));
     const bool existing = this->pending_terrain_elevations.contains(key);
-    const bool remote_job = this->terrain_data->isRemoteFetchEnabled();
+    const bool remote_job = this->terrain_data->elevationNeedsRemoteAcquisition(
+        dataset, latitude_deg, longitude_deg);
     const bool remote_admitted = existing || (!this->shutting_down &&
         this->pending_terrain_tile_count < this->config.maximum_pending_requests &&
         (!remote_job || this->terrain_remote_admission.tryAcquire()));
@@ -709,14 +725,14 @@ QFuture<QHttpServerResponse> Server::submitTerrainElevation(
     this->elevation_cancellations.insert(key, cancellation);
 
     const std::function<void()> process_elevation =
-        [this, key, dataset, latitude_deg, longitude_deg, requested_vertical_datum, remote_job, cancellation]()
+        [this, key, dataset, latitude_deg, longitude_deg, requested_vertical_datum, cancellation]()
     {
         Aowis::Map::TerrainElevationLookupResult result;
         try
         {
             if (!cancellation->load(std::memory_order_acquire))
                 result = this->terrain_data->sampleElevation(
-                    dataset, latitude_deg, longitude_deg, requested_vertical_datum, !remote_job);
+                    dataset, latitude_deg, longitude_deg, requested_vertical_datum, false);
         }
         catch (...)
         {
@@ -814,7 +830,7 @@ QFuture<QHttpServerResponse> Server::submitTerrainGrid(
     const std::uint64_t estimated_bytes =
         std::uint64_t(request.columns) * std::uint64_t(request.rows) *
         (sizeof(float) + sizeof(float));
-    const bool remote_job = this->terrain_data->isRemoteFetchEnabled();
+    const bool remote_job = this->terrain_data->gridNeedsRemoteAcquisition(request);
     bool admitted = existing;
     if (!existing && !this->shutting_down &&
         this->pending_terrain_tile_count < this->config.maximum_pending_requests &&
@@ -858,13 +874,13 @@ QFuture<QHttpServerResponse> Server::submitTerrainGrid(
     const TerrainCancellation cancellation = std::make_shared<std::atomic_bool>(false);
     this->grid_cancellations.insert(key, cancellation);
 
-    const std::function<void()> process_grid = [this, key, request, estimated_bytes, remote_job, cancellation]()
+    const std::function<void()> process_grid = [this, key, request, estimated_bytes, cancellation]()
     {
         Aowis::Map::TerrainAnalysisGridResult result;
         try
         {
             if (!cancellation->load(std::memory_order_acquire))
-                result = this->terrain_data->analysisGrid(request, !remote_job);
+                result = this->terrain_data->analysisGrid(request, false);
         }
         catch (...)
         {
@@ -1530,7 +1546,8 @@ void Server::setupRoutes()
         const MapTiles::TileRequestResult tile_result = this->maptiles->getTileForHttp(provider, z, x, y, key);
 
         if (tile_result.status == MapTiles::TileRequestStatus::Ready)
-            return makeReadyResponse(QHttpServerResponse("image/png", tile_result.data));
+            return makeReadyResponse(QHttpServerResponse(mapTileMimeType(tile_result.data),
+                                                         tile_result.data));
 
         if (tile_result.status == MapTiles::TileRequestStatus::InvalidRequest)
         {
@@ -1632,7 +1649,7 @@ void Server::onTileReady(QString key, QByteArray data)
     PendingPromises promises = takePendingPromises(key);
     for (const PendingPromise &promise : promises)
     {
-        promise->addResult(QHttpServerResponse("image/png", data));
+        promise->addResult(QHttpServerResponse(mapTileMimeType(data), data));
         promise->finish();
     }
 }

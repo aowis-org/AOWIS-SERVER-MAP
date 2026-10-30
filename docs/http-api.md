@@ -112,14 +112,16 @@ Only **identity** vertical-datum requests are supported. A requested datum requi
 
 ## Float32 analysis grids
 
-The grid route returns the **native GeoTIFF source pixel containing each output cell center**. It does not resample the quantized 65 × 65 normalized renderer tiles.
+The grid route returns the **native GeoTIFF source pixel containing each output cell center**. It does not resample the quantized 65 × 65 normalized renderer tiles. Copernicus GLO-30 is *RasterPixelIsPoint*: pixel centres lie on whole multiples of the pixel spacing from each 1° cell's north-west corner, so the containing pixel is the one with the nearest centre (in the last half pixel of a cell, the first pixel of the east or south neighbour cell).
 
 ```bash
 curl -f -o dem.f32le \
   'http://127.0.0.1:8122/terrain/v1/analysis/grid?dataset=copernicus-glo30&west=8.10&south=50.10&east=8.11&north=50.11&columns=512&rows=512'
 ```
 
-Request bounds are WGS84 degrees in `west,south,east,north` order: `-180 ≤ west < east ≤ 180` and `-85 ≤ south < north ≤ 85`. The request must not cross the antimeridian. `columns` and `rows` must each be in `1..512`. The `dataset` argument is optional and defaults to `terrain/default_dataset`.
+Request bounds are WGS84 degrees in `west,south,east,north` order: `-180 ≤ west < east ≤ 180` and `-85 ≤ south < north ≤ 85`. The request must not cross the antimeridian. `columns` and `rows` must each be in `1..512`. The output cell centres may read at most **16 Copernicus 1° × 1° source cells** (including a neighbour cell reached in the last half pixel of a cell); larger windows return `400`. The `dataset` argument is optional and defaults to `terrain/default_dataset`.
+
+Missing source cells are downloaded only when terrain remote fetching is enabled and the terrain coverage profile permits the grid's box at the dataset's maximum normalized zoom (14 for GLO-30) — the tier that governs native-resolution data. Outside coverage, already cached source cells are still served.
 
 Successful response: **`application/vnd.aowis.dem-f32le`**, unframed little-endian IEEE-754 float32 samples in row-major **north-to-south** order, exactly `columns × rows × 4` bytes (512 × 512 = 1,048,576 bytes). Missing/NoData source cells become quiet NaNs within an otherwise valid window. A wholly unavailable window returns HTTP `404`.
 

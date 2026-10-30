@@ -115,6 +115,59 @@ int main(int argc, char **argv)
                 QStringLiteral("State failed to override only the provider catalog")))
         return 1;
 
+    // Provider strings with INI metacharacters and percent-encoding must
+    // survive a save and restart unchanged.
+    QVector<Aowis::Map::MapProvider> tricky = modified;
+    tricky[0].name = QStringLiteral("Esri, Maxar; \"quoted\" \\ = #1 %1 %3");
+    tricky[0].url_template =
+        QStringLiteral("https://example.org/{z}/{x}/{y}.png?layers=a,b;c=d%2C%3&x=\\");
+    if (!expect(MapServerConfiguration::saveMapProvidersToState(state_path, tricky, &error), error))
+        return 1;
+    Server::Config tricky_restarted;
+    if (!expect(MapServerConfiguration::loadConfigFile(admin_path, &tricky_restarted, &error), error) ||
+        !expect(MapServerConfiguration::loadProviderStateFile(state_path, &tricky_restarted, &error),
+                error) ||
+        !expect(tricky_restarted.map_providers.size() == 1 &&
+                tricky_restarted.map_providers.first().name == tricky[0].name &&
+                tricky_restarted.map_providers.first().url_template == tricky[0].url_template &&
+                tricky_restarted.map_providers.first().coverage == tricky[0].coverage,
+                QStringLiteral("Provider strings with INI metacharacters did not round-trip")))
+        return 1;
+    tricky[0].name = QStringLiteral("@Variant(not a variant)");
+    if (!expect(MapServerConfiguration::saveMapProvidersToState(state_path, tricky, &error), error))
+        return 1;
+    Server::Config at_restarted;
+    if (!expect(MapServerConfiguration::loadConfigFile(admin_path, &at_restarted, &error), error) ||
+        !expect(MapServerConfiguration::loadProviderStateFile(state_path, &at_restarted, &error),
+                error) ||
+        !expect(at_restarted.map_providers.size() == 1 &&
+                at_restarted.map_providers.first().name == tricky[0].name,
+                QStringLiteral("Provider name with a leading '@' did not round-trip")))
+        return 1;
+    if (!expect(MapServerConfiguration::saveMapProvidersToState(state_path, modified, &error), error))
+        return 1;
+
+    // An unquoted comma turns a single-string INI value into a list. That
+    // must be rejected instead of silently emptying an API key.
+    const QString comma_key_path = QDir(temporary.path()).filePath(QStringLiteral("comma-key.ini"));
+    if (!expect(writeFile(comma_key_path, QByteArrayLiteral("[authentication]\napi_key=abc,def\n")),
+                QStringLiteral("Could not write comma API-key INI")))
+        return 1;
+    Server::Config comma_key;
+    QString comma_error;
+    if (!expect(!MapServerConfiguration::loadConfigFile(comma_key_path, &comma_key, &comma_error),
+                QStringLiteral("Unquoted comma in api_key was silently accepted")))
+        return 1;
+    if (!expect(writeFile(comma_key_path,
+                          QByteArrayLiteral("[authentication]\napi_key=\"abc,def\"\n")),
+                QStringLiteral("Could not write quoted API-key INI")))
+        return 1;
+    Server::Config quoted_key;
+    if (!expect(MapServerConfiguration::loadConfigFile(comma_key_path, &quoted_key, &error), error) ||
+        !expect(quoted_key.api_key == QByteArrayLiteral("abc,def"),
+                QStringLiteral("Quoted api_key with a comma was not read verbatim")))
+        return 1;
+
     // Older versions emitted '#' instead of ';' in provider state too.
     const QByteArray old_state = QByteArrayLiteral("# Old provider state comment.\n") +
                                  readFile(state_path);

@@ -109,6 +109,9 @@ private:
     bool canStartDownloadLocked(const QueuedDownload &download) const;
     void markDownloadStartedLocked(const QueuedDownload &download);
     void markDownloadFinishedLocked(const QueuedDownload &download);
+    // The download's own response key plus those of later requests for the
+    // same canonical tile that joined it (e.g. x and x + 2^z).
+    QStringList takeResponseKeysLocked(const QueuedDownload &download);
     static bool saveMapTile(const QByteArray &data, const QString &tile_path);
 
     QString domainRandomizer(const QString &url) const;
@@ -144,6 +147,7 @@ private:
     QSet<QString> permanent_cached_keys;
     QQueue<QueuedDownload> downloads_queued;
     QSet<QString> downloads_queued_keys;
+    QHash<QString, QStringList> downloads_joined_response_keys;
 
 signals:
     void tileReady(QString key, QByteArray data);

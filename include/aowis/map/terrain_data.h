@@ -160,6 +160,17 @@ public:
         const QString &dataset, double latitude_deg, double longitude_deg,
         const std::shared_ptr<std::atomic_bool> &cancel_requested = {}) const;
 
+    // HTTP-thread classification of requests (file metadata only): true when
+    // serving the request may first need a provider-native download, so it
+    // belongs on the remote-acquisition stage. False when remote fetching is
+    // off, coverage forbids downloading, the normalized tile is cached, or a
+    // provider confirms that all sources it reads are already available.
+    bool tileNeedsRemoteAcquisition(const QString &dataset,
+                                    const TerrainTileAddress &address) const;
+    bool elevationNeedsRemoteAcquisition(const QString &dataset,
+                                         double latitude_deg, double longitude_deg) const;
+    bool gridNeedsRemoteAcquisition(const TerrainAnalysisGridRequest &request) const;
+
     TerrainElevationLookupResult sampleElevation(
         const QString &dataset,
         double latitude_deg,
@@ -200,6 +211,9 @@ private:
     std::optional<TerrainCacheDeletionResult> rejectCacheDeletion(
         const QString &dataset, int zoom, int tile_x_min, int tile_x_max,
         int tile_y_min, int tile_y_max) const;
+    // Coverage for analysis-grid acquisition, evaluated at the dataset's
+    // maximum normalized zoom (the tier governing native-resolution data).
+    bool permitsGridAcquisition(const TerrainAnalysisGridRequest &request) const;
     static QString resolveCacheDirectory(const Config &config);
     bool ensureStorageDirectory(const QString &path, const QString &description,
                                 QString *error_message) const;

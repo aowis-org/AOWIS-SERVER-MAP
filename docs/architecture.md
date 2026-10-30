@@ -52,7 +52,7 @@ The server owns two independent Qt thread pools:
 - **Cached/CPU processing pool** (default 4 threads): normalized cache hits, normalization and CPU sampling after acquisition, and terrain maintenance.
 - **Remote-capable acquisition pool** (default 2 threads): source discovery, interprocess source locks, HTTP downloads of missing Copernicus COGs and any acquisition-stage waiting.
 
-Terrain tile, point-elevation and grid work can **hand off** from the remote-capable pool to CPU processing after sources are ready. Acquiring sources does not occupy a CPU processing worker; the remote worker is released at handoff. In offline-only mode, cached work can execute in the CPU pool. Elevation fallback to coarser cached tiles is CPU-only; missing coarser native source regions are not proactively downloaded from CPU workers.
+Terrain tile, point-elevation and grid work can **hand off** from the remote-capable pool to CPU processing after sources are ready. Acquiring sources does not occupy a CPU processing worker; the remote worker is released at handoff. A request enters the remote-capable stage only when it may download: remote fetching is enabled, coverage permits the download, the normalized tile (for tiles and point elevations) is not cached, and the provider cannot confirm that every native source cell it reads is already on disk or was answered with `404` within the last hour. Everything else, including all work in offline-only mode, executes directly in the CPU pool. The CPU stage never downloads; a damaged normalized tile is repaired only from cached native sources. Elevation fallback to coarser cached tiles is CPU-only; missing coarser native source regions are not proactively downloaded from CPU workers.
 
 Admission limits are not the same as thread counts:
 
@@ -65,6 +65,7 @@ Admission limits are not the same as thread counts:
 | Pending HTTP requests | 2048 | Configurable server response/waiter budget |
 | Distinct grid result + serialization reservations | 64 MiB | 8 bytes/sample estimated for float32 vector and float32 HTTP bytes |
 | Analysis grid dimensions | 512 × 512 | Maximum rows and columns of one request |
+| Analysis grid source cells | 16 | Distinct 1° × 1° Copernicus cells one grid may read (bounds downloads and open GeoTIFFs) |
 
 An identical in-flight terrain request reuses its existing computation and does not consume another terrain job or grid-byte reservation; it **does** have its own HTTP waiter. Requests exceeding admission return `503 Service Unavailable` (terrain admission can supply `Retry-After: 1`). The two worker pools and remote admission protect cached processing from being monopolized by slow upstream acquisitions.
 

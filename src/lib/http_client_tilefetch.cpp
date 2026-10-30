@@ -30,6 +30,22 @@ bool hasSupportedImageSignature(const QByteArray &data)
     return is_png || is_jpeg || is_webp;
 }
 
+// Abort while streaming once a tile exceeds the size limit, instead of
+// buffering an arbitrarily large upstream body before checking it.
+void limitTileReplySize(QNetworkReply *reply)
+{
+    QObject::connect(reply, &QNetworkReply::downloadProgress, reply,
+                     [reply](qint64 bytes_received, qint64 bytes_total)
+    {
+        if ((bytes_received > maximum_tile_size || bytes_total > maximum_tile_size) &&
+            !reply->property("aowis_too_large").toBool())
+        {
+            reply->setProperty("aowis_too_large", true);
+            reply->abort();
+        }
+    });
+}
+
 QString normalizedContentType(QNetworkReply *reply)
 {
     return reply->header(QNetworkRequest::ContentTypeHeader).toString()
@@ -59,6 +75,7 @@ void TileHttpClient::get(const QString &endpoint)
 
     QNetworkReply *reply = this->network_manager->get(request);
     this->active_reply = reply;
+    limitTileReplySize(reply);
     QTimer::singleShot(overall_timeout_ms, reply, [reply]()
     {
         if (reply->isFinished())
@@ -93,6 +110,7 @@ void TileHttpClient::getAttempt(const QString &endpoint, int attempt)
 
     QNetworkReply *reply = this->network_manager->get(request);
     this->active_reply = reply;
+    limitTileReplySize(reply);
     QTimer::singleShot(overall_timeout_ms, reply, [reply]()
     {
         if (reply->isFinished())
@@ -158,6 +176,15 @@ void TileHttpClient::handleReply(QNetworkReply *reply, bool validate_tile_respon
         return;
     }
 
+    if (reply->property("aowis_too_large").toBool())
+    {
+        emit requestError(RequestFailureReason::InvalidResponse,
+                          QStringLiteral("Tile response exceeds the maximum size of %1 bytes")
+                              .arg(qlonglong(maximum_tile_size)));
+        reply->deleteLater();
+        return;
+    }
+
     const bool overall_timeout = reply->property("aowis_overall_timeout").toBool();
     const QNetworkReply::NetworkError network_error = reply->error();
 
@@ -208,6 +235,15 @@ void TileHttpClient::handleReply(QNetworkReply *reply, bool validate_tile_respon
     if (this->cancel_requested)
     {
         emit requestError(RequestFailureReason::Cancelled, QStringLiteral("Tile download canceled"));
+        reply->deleteLater();
+        return;
+    }
+
+    if (reply->property("aowis_too_large").toBool())
+    {
+        emit requestError(RequestFailureReason::InvalidResponse,
+                          QStringLiteral("Tile response exceeds the maximum size of %1 bytes")
+                              .arg(qlonglong(maximum_tile_size)));
         reply->deleteLater();
         return;
     }

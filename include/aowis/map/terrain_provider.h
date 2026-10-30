@@ -131,6 +131,26 @@ public:
     virtual TerrainAnalysisGridResult fetchAnalysisGrid(
         const TerrainAnalysisGridRequest &request,
         const QString &provider_cache_directory, bool allow_remote_fetch) = 0;
+    // HTTP-thread classification: true only when every provider-native source
+    // the request reads is already on disk or confirmed absent upstream, so no
+    // acquisition stage is needed. Must be cheap (file metadata only). The
+    // conservative default sends every uncached request to the remote stage.
+    virtual bool tileSourcesAvailableLocally(const QString &dataset,
+                                             const TerrainTileAddress &address,
+                                             const QString &provider_cache_directory) const
+    {
+        Q_UNUSED(dataset);
+        Q_UNUSED(address);
+        Q_UNUSED(provider_cache_directory);
+        return false;
+    }
+    virtual bool gridSourcesAvailableLocally(const TerrainAnalysisGridRequest &request,
+                                             const QString &provider_cache_directory) const
+    {
+        Q_UNUSED(request);
+        Q_UNUSED(provider_cache_directory);
+        return false;
+    }
     virtual TerrainUpstreamActivity upstreamActivity() const = 0;
     virtual void cancelUpstreamDownloads() = 0;
     // Deletes the provider-native source files of `dataset` (downloaded
