@@ -54,6 +54,11 @@ constexpr int MaximumAnalysisGridSourceCells = 16;
 // the first column of the east neighbour or the first row of the south one.
 constexpr double SourceNeighbourLongitudeMarginDeg = 1.0 / 360.0;
 constexpr double SourceNeighbourLatitudeMarginDeg = 1.0 / 3600.0;
+// Upper bounds of half a GLO-30 pixel: columns are at most 6" wide (above
+// 85 deg), rows are always 1". A cell's pixel footprints reach this far
+// beyond its west and north edges (RasterPixelIsPoint).
+constexpr double MaximumSourceHalfPixelLongitudeDeg = 0.5 * 6.0 / 3600.0;
+constexpr double MaximumSourceHalfPixelLatitudeDeg = 0.5 / 3600.0;
 // GeoTIFF tags and keys (OGC GeoTIFF 1.1), read without libgeotiff.
 constexpr uint32_t GeoTiffModelPixelScaleTag = 33550;
 constexpr uint32_t GeoTiffModelTiepointTag = 33922;
@@ -153,6 +158,13 @@ CopernicusSourceAddress sourceAddressForCoordinate(double latitude_deg,
     address.south_deg = sourceSouthForLatitude(latitude_deg);
     address.west_deg = sourceWestForLongitude(longitude_deg);
     return address;
+}
+
+// The source cell west of an unwrapped integer longitude (..., -181, 180, ...).
+// Sample boxes of tiles on the antimeridian extend past +-180 deg.
+int wrappedSourceWest(int unwrapped_west_deg)
+{
+    return ((unwrapped_west_deg + 180) % 360 + 360) % 360 - 180;
 }
 
 QString sourceAddressKey(const CopernicusSourceAddress &address)
@@ -826,6 +838,69 @@ public:
         return strippedPixel(column, row, error_message);
     }
 
+    // Visits the window [column_first, column_last] x [row_first, row_last]
+    // (inclusive, inside the raster) as contiguous runs of one row, block by
+    // block, so each compressed block is decoded once no matter how many
+    // output samples read it. Values the point samplers reject as no-data are
+    // NaN in a run. Returns false (with a message) on a decode failure.
+    using RowRunVisitor = std::function<void(int row, int column, const float *values, int count)>;
+    bool visitWindow(int column_first, int column_last, int row_first, int row_last,
+                     const RowRunVisitor &visitor, QString *error_message)
+    {
+        if (column_first < 0 || row_first < 0 || column_last >= int(this->width) ||
+            row_last >= int(this->height) || column_first > column_last || row_first > row_last)
+            return true;
+        std::vector<float> run;
+        if (this->tiled)
+        {
+            const int tile_width = int(this->tile_width);
+            const int tile_height = int(this->tile_height);
+            for (int tile_y = row_first / tile_height * tile_height; tile_y <= row_last;
+                 tile_y += tile_height)
+            {
+                for (int tile_x = column_first / tile_width * tile_width; tile_x <= column_last;
+                     tile_x += tile_width)
+                {
+                    const ttile_t tile_index =
+                        TIFFComputeTile(this->tiff, uint32_t(tile_x), uint32_t(tile_y), 0, 0);
+                    QByteArray uncached_block;
+                    const QByteArray *block = tileBlock(tile_index, &uncached_block, error_message);
+                    if (block == nullptr)
+                        return false;
+                    const int first_column = std::max(column_first, tile_x);
+                    const int last_column = std::min(column_last, tile_x + tile_width - 1);
+                    const int last_row = std::min(row_last, tile_y + tile_height - 1);
+                    for (int row = std::max(row_first, tile_y); row <= last_row; ++row)
+                    {
+                        const qsizetype byte_offset =
+                            (qsizetype(row - tile_y) * qsizetype(tile_width) +
+                             qsizetype(first_column - tile_x)) * qsizetype(sizeof(float));
+                        if (!copyRun(*block, byte_offset, last_column - first_column + 1,
+                                     &run, error_message))
+                            return false;
+                        visitor(row, first_column, run.data(), int(run.size()));
+                    }
+                }
+            }
+            return true;
+        }
+        for (int row = row_first; row <= row_last; ++row)
+        {
+            const tstrip_t strip_index = TIFFComputeStrip(this->tiff, uint32_t(row), 0);
+            QByteArray uncached_block;
+            const QByteArray *block = stripBlock(strip_index, &uncached_block, error_message);
+            if (block == nullptr)
+                return false;
+            const qsizetype byte_offset =
+                (qsizetype(row % int(this->rows_per_strip)) * qsizetype(this->width) +
+                 qsizetype(column_first)) * qsizetype(sizeof(float));
+            if (!copyRun(*block, byte_offset, column_last - column_first + 1, &run, error_message))
+                return false;
+            visitor(row, column_first, run.data(), int(run.size()));
+        }
+        return true;
+    }
+
 private:
     // The samplers assume the GLO-30 grid: RasterPixelIsPoint, the centre of
     // pixel (0,0) on the cell's north-west corner, exactly width x height
@@ -909,52 +984,99 @@ private:
         return false;
     }
 
+    // Decoded block from the per-raster cache, decoding it on a miss. When the
+    // cache refuses the block (budget), it is returned in *uncached_block.
+    const QByteArray *tileBlock(ttile_t tile_index, QByteArray *uncached_block,
+                                QString *error_message)
+    {
+        const quint32 cache_key = quint32(tile_index);
+        const QByteArray *block = this->decoded_blocks.find(cache_key);
+        if (block != nullptr)
+            return block;
+
+        const tmsize_t tile_bytes = TIFFTileSize(this->tiff);
+        if (tile_bytes <= 0 || tile_bytes > MaximumDecodedRasterBlockCacheBytes)
+        {
+            if (error_message != nullptr)
+                *error_message = QStringLiteral("Copernicus GeoTIFF tile buffer size is invalid: %1")
+                                     .arg(this->path);
+            return nullptr;
+        }
+
+        Internal::CopernicusTemporaryDecodeReservation decode_reservation(
+            Internal::sharedCopernicusTemporaryDecodeBudget(), qsizetype(tile_bytes));
+        if (!decode_reservation.acquired())
+        {
+            if (error_message != nullptr)
+                *error_message = QStringLiteral(
+                    "Copernicus temporary TIFF decode memory budget exhausted: %1")
+                                     .arg(this->path);
+            return nullptr;
+        }
+        QByteArray decoded(int(tile_bytes), '\0');
+        if (TIFFReadEncodedTile(this->tiff, tile_index, decoded.data(), tile_bytes) < 0)
+        {
+            if (error_message != nullptr)
+                *error_message = QStringLiteral("Failed to decode Copernicus GeoTIFF tile block: %1")
+                                     .arg(this->path);
+            return nullptr;
+        }
+        if (this->decoded_blocks.insert(cache_key, decoded))
+            return this->decoded_blocks.find(cache_key);
+        *uncached_block = std::move(decoded);
+        return uncached_block;
+    }
+
+    const QByteArray *stripBlock(tstrip_t strip_index, QByteArray *uncached_block,
+                                 QString *error_message)
+    {
+        const quint32 cache_key = quint32(strip_index);
+        const QByteArray *block = this->decoded_blocks.find(cache_key);
+        if (block != nullptr)
+            return block;
+
+        const tmsize_t strip_bytes = TIFFStripSize(this->tiff);
+        if (strip_bytes <= 0 || strip_bytes > MaximumDecodedRasterBlockCacheBytes)
+        {
+            if (error_message != nullptr)
+                *error_message = QStringLiteral("Copernicus GeoTIFF strip buffer size is invalid: %1")
+                                     .arg(this->path);
+            return nullptr;
+        }
+
+        Internal::CopernicusTemporaryDecodeReservation decode_reservation(
+            Internal::sharedCopernicusTemporaryDecodeBudget(), qsizetype(strip_bytes));
+        if (!decode_reservation.acquired())
+        {
+            if (error_message != nullptr)
+                *error_message = QStringLiteral(
+                    "Copernicus temporary TIFF decode memory budget exhausted: %1")
+                                     .arg(this->path);
+            return nullptr;
+        }
+        QByteArray decoded(int(strip_bytes), '\0');
+        if (TIFFReadEncodedStrip(this->tiff, strip_index, decoded.data(), strip_bytes) < 0)
+        {
+            if (error_message != nullptr)
+                *error_message = QStringLiteral("Failed to decode Copernicus GeoTIFF strip: %1")
+                                     .arg(this->path);
+            return nullptr;
+        }
+        if (this->decoded_blocks.insert(cache_key, decoded))
+            return this->decoded_blocks.find(cache_key);
+        *uncached_block = std::move(decoded);
+        return uncached_block;
+    }
+
     std::optional<float> tiledPixel(int column, int row, QString *error_message)
     {
         const uint32_t tile_x = uint32_t(column) / this->tile_width * this->tile_width;
         const uint32_t tile_y = uint32_t(row) / this->tile_height * this->tile_height;
         const ttile_t tile_index = TIFFComputeTile(this->tiff, tile_x, tile_y, 0, 0);
-        const quint32 cache_key = quint32(tile_index);
-
         QByteArray uncached_block;
-        const QByteArray *block = this->decoded_blocks.find(cache_key);
+        const QByteArray *block = tileBlock(tile_index, &uncached_block, error_message);
         if (block == nullptr)
-        {
-            const tmsize_t tile_bytes = TIFFTileSize(this->tiff);
-            if (tile_bytes <= 0 || tile_bytes > MaximumDecodedRasterBlockCacheBytes)
-            {
-                if (error_message != nullptr)
-                    *error_message = QStringLiteral("Copernicus GeoTIFF tile buffer size is invalid: %1")
-                                         .arg(this->path);
-                return std::nullopt;
-            }
-
-            Internal::CopernicusTemporaryDecodeReservation decode_reservation(
-                Internal::sharedCopernicusTemporaryDecodeBudget(), qsizetype(tile_bytes));
-            if (!decode_reservation.acquired())
-            {
-                if (error_message != nullptr)
-                    *error_message = QStringLiteral(
-                        "Copernicus temporary TIFF decode memory budget exhausted: %1")
-                                         .arg(this->path);
-                return std::nullopt;
-            }
-            QByteArray decoded(int(tile_bytes), '\0');
-            if (TIFFReadEncodedTile(this->tiff, tile_index, decoded.data(), tile_bytes) < 0)
-            {
-                if (error_message != nullptr)
-                    *error_message = QStringLiteral("Failed to decode Copernicus GeoTIFF tile block: %1")
-                                         .arg(this->path);
-                return std::nullopt;
-            }
-            if (this->decoded_blocks.insert(cache_key, decoded))
-                block = this->decoded_blocks.find(cache_key);
-            else
-            {
-                uncached_block = std::move(decoded);
-                block = &uncached_block;
-            }
-        }
+            return std::nullopt;
 
         const int local_column = column - int(tile_x);
         const int local_row = row - int(tile_y);
@@ -967,53 +1089,57 @@ private:
     std::optional<float> strippedPixel(int column, int row, QString *error_message)
     {
         const tstrip_t strip_index = TIFFComputeStrip(this->tiff, uint32_t(row), 0);
-        const quint32 cache_key = quint32(strip_index);
-
         QByteArray uncached_block;
-        const QByteArray *block = this->decoded_blocks.find(cache_key);
+        const QByteArray *block = stripBlock(strip_index, &uncached_block, error_message);
         if (block == nullptr)
-        {
-            const tmsize_t strip_bytes = TIFFStripSize(this->tiff);
-            if (strip_bytes <= 0 || strip_bytes > MaximumDecodedRasterBlockCacheBytes)
-            {
-                if (error_message != nullptr)
-                    *error_message = QStringLiteral("Copernicus GeoTIFF strip buffer size is invalid: %1")
-                                         .arg(this->path);
-                return std::nullopt;
-            }
-
-            Internal::CopernicusTemporaryDecodeReservation decode_reservation(
-                Internal::sharedCopernicusTemporaryDecodeBudget(), qsizetype(strip_bytes));
-            if (!decode_reservation.acquired())
-            {
-                if (error_message != nullptr)
-                    *error_message = QStringLiteral(
-                        "Copernicus temporary TIFF decode memory budget exhausted: %1")
-                                         .arg(this->path);
-                return std::nullopt;
-            }
-            QByteArray decoded(int(strip_bytes), '\0');
-            if (TIFFReadEncodedStrip(this->tiff, strip_index, decoded.data(), strip_bytes) < 0)
-            {
-                if (error_message != nullptr)
-                    *error_message = QStringLiteral("Failed to decode Copernicus GeoTIFF strip: %1")
-                                         .arg(this->path);
-                return std::nullopt;
-            }
-            if (this->decoded_blocks.insert(cache_key, decoded))
-                block = this->decoded_blocks.find(cache_key);
-            else
-            {
-                uncached_block = std::move(decoded);
-                block = &uncached_block;
-            }
-        }
+            return std::nullopt;
 
         const int local_row = row % int(this->rows_per_strip);
         const qsizetype byte_offset =
             (qsizetype(local_row) * qsizetype(this->width) + qsizetype(column)) *
             qsizetype(sizeof(float));
         return floatAt(*block, byte_offset, error_message);
+    }
+
+    // The same no-data rule as floatAt(), applied to a contiguous run.
+    static bool validElevation(float value)
+    {
+        return std::isfinite(value) && value > -10000.0f && value < 100000.0f;
+    }
+
+    bool copyRun(const QByteArray &decoded, qsizetype byte_offset, int count,
+                 std::vector<float> *run, QString *error_message) const
+    {
+        const qsizetype bytes = qsizetype(count) * qsizetype(sizeof(float));
+        if (count <= 0 || byte_offset < 0 || byte_offset + bytes > decoded.size())
+        {
+            if (error_message != nullptr)
+                *error_message = QStringLiteral("Copernicus GeoTIFF decoded block is shorter than expected: %1")
+                                     .arg(this->path);
+            return false;
+        }
+        run->resize(std::size_t(count));
+        // memcpy: QByteArray storage carries no float alignment guarantee.
+        // GCC's -Wstringop-overread (Release, after inlining into fetchTile())
+        // considers `decoded` being the shared empty QByteArray, whose
+        // constData() is the 1-byte QByteArray::_empty. That path cannot
+        // reach this line: the bounds check above rejects any read past
+        // decoded.size(), which is 0 for an empty array. Known false positive
+        // with QByteArray::constData(); suppressed for this call only.
+#if defined(__GNUC__) && !defined(__clang__) && __GNUC__ >= 11
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wstringop-overread"
+#endif
+        std::memcpy(run->data(), decoded.constData() + byte_offset, std::size_t(bytes));
+#if defined(__GNUC__) && !defined(__clang__) && __GNUC__ >= 11
+#pragma GCC diagnostic pop
+#endif
+        for (float &value : *run)
+        {
+            if (!validElevation(value))
+                value = std::numeric_limits<float>::quiet_NaN();
+        }
+        return true;
     }
 
     std::optional<float> floatAt(const QByteArray &decoded, qsizetype byte_offset,
@@ -1029,7 +1155,7 @@ private:
 
         float value = 0.0f;
         std::memcpy(&value, decoded.constData() + byte_offset, sizeof(float));
-        if (!std::isfinite(value) || value <= -10000.0f || value >= 100000.0f)
+        if (!validElevation(value))
             return std::nullopt;
         return value;
     }
@@ -1144,6 +1270,195 @@ public:
             (double(address.south_deg + 1) - latitude_deg) * double(source_raster->pixelHeight())));
         return sourceGridValue(address, source_raster->pixelWidth(), source_raster->pixelHeight(),
                                std::max(0, column), std::max(0, row));
+    }
+
+    // Source pixel size (degrees) of the cell containing the coordinate;
+    // false when that cell has no source.
+    bool pixelSizeAt(double latitude_deg, double longitude_deg,
+                     double *pixel_width_deg, double *pixel_height_deg)
+    {
+        if (this->fatal_status.has_value())
+            return false;
+        CopernicusRaster *source_raster =
+            raster(sourceAddressForCoordinate(latitude_deg, longitude_deg));
+        if (source_raster == nullptr)
+            return false;
+        *pixel_width_deg = 1.0 / double(source_raster->pixelWidth());
+        *pixel_height_deg = 1.0 / double(source_raster->pixelHeight());
+        return true;
+    }
+
+    // Area-weighted accumulation of every source pixel over a grid of sample
+    // boxes. Box (row i, column j) spans longitudes [longitude_edges[j],
+    // longitude_edges[j + 1]] and latitudes [latitude_edges[i + 1],
+    // latitude_edges[i]]; longitude edges ascend and may pass +-180 deg (the
+    // antimeridian is wrapped), latitude edges descend. A pixel's footprint is
+    // its RasterPixelIsPoint centre +- half a pixel; its weight in a box is
+    // the overlap area in square degrees. sums/weights are row-major
+    // (rows x columns) and receive weight * elevation and weight; no-data
+    // pixels and missing source cells contribute nothing. Every source pixel
+    // is read once, block by block. False only on a fatal source failure.
+    bool accumulateAreaAverages(const std::vector<double> &longitude_edges,
+                                const std::vector<double> &latitude_edges,
+                                std::vector<double> *sums, std::vector<double> *weights)
+    {
+        const int columns = int(longitude_edges.size()) - 1;
+        const int rows = int(latitude_edges.size()) - 1;
+        sums->assign(std::size_t(rows) * std::size_t(columns), 0.0);
+        weights->assign(std::size_t(rows) * std::size_t(columns), 0.0);
+        const double west = longitude_edges.front();
+        const double east = longitude_edges.back();
+        const double north = latitude_edges.front();
+        const double south = latitude_edges.back();
+
+        // Candidate cells: a cell (south s, west w) has pixel footprints in
+        // longitude [w - half, w + 1 - half) and latitude (s + half, s + 1 +
+        // half]. The bounds are conservative; empty pixel ranges are skipped.
+        // normalizedTileSourceAddresses() lists a superset of these cells.
+        const int first_south = std::max(-90, int(std::floor(south - MaximumSourceHalfPixelLatitudeDeg)));
+        const int last_south = std::min(89, int(std::ceil(north - MaximumSourceHalfPixelLatitudeDeg)) - 1);
+        const int first_west = int(std::floor(west));
+        const int last_west = int(std::floor(east + MaximumSourceHalfPixelLongitudeDeg));
+
+        // Per pixel column / row: the boxes it overlaps and by how much.
+        struct Overlap
+        {
+            int sample = 0;
+            double weight = 0.0;
+        };
+        std::vector<int> column_begin;
+        std::vector<Overlap> column_overlaps;
+        std::vector<int> row_begin;
+        std::vector<Overlap> row_overlaps;
+        std::vector<double> row_sums(std::size_t(columns), 0.0);
+        std::vector<double> row_weights(std::size_t(columns), 0.0);
+
+        for (int cell_south = first_south; cell_south <= last_south; ++cell_south)
+        {
+            for (int unwrapped_west = first_west; unwrapped_west <= last_west; ++unwrapped_west)
+            {
+                CopernicusSourceAddress address;
+                address.south_deg = cell_south;
+                address.west_deg = wrappedSourceWest(unwrapped_west);
+                CopernicusRaster *source_raster = raster(address);
+                if (this->fatal_status.has_value())
+                    return false;
+                if (source_raster == nullptr)
+                    continue;
+                const int pixel_columns = source_raster->pixelWidth();
+                const int pixel_rows = source_raster->pixelHeight();
+                const double cell_west = double(unwrapped_west);
+                const double cell_north = double(cell_south + 1);
+
+                // Pixels whose footprint overlaps the window with positive area.
+                const int column_first = std::max(
+                    0, int(std::floor((west - cell_west) * pixel_columns - 0.5)) + 1);
+                const int column_last = std::min(
+                    pixel_columns - 1, int(std::ceil((east - cell_west) * pixel_columns + 0.5)) - 1);
+                const int row_first = std::max(
+                    0, int(std::floor((cell_north - north) * pixel_rows - 0.5)) + 1);
+                const int row_last = std::min(
+                    pixel_rows - 1, int(std::ceil((cell_north - south) * pixel_rows + 0.5)) - 1);
+                if (column_first > column_last || row_first > row_last)
+                    continue;
+
+                column_begin.assign(std::size_t(column_last - column_first + 2), 0);
+                column_overlaps.clear();
+                for (int column = column_first; column <= column_last; ++column)
+                {
+                    column_begin[std::size_t(column - column_first)] = int(column_overlaps.size());
+                    const double low = cell_west + (double(column) - 0.5) / pixel_columns;
+                    const double high = cell_west + (double(column) + 0.5) / pixel_columns;
+                    int sample = int(std::upper_bound(longitude_edges.begin(), longitude_edges.end(), low) -
+                                     longitude_edges.begin()) - 1;
+                    for (sample = std::max(sample, 0);
+                         sample < columns && longitude_edges[std::size_t(sample)] < high; ++sample)
+                    {
+                        const double overlap =
+                            std::min(high, longitude_edges[std::size_t(sample) + 1]) -
+                            std::max(low, longitude_edges[std::size_t(sample)]);
+                        if (overlap > 0.0)
+                            column_overlaps.push_back({sample, overlap});
+                    }
+                }
+                column_begin.back() = int(column_overlaps.size());
+
+                row_begin.assign(std::size_t(row_last - row_first + 2), 0);
+                row_overlaps.clear();
+                for (int row = row_first; row <= row_last; ++row)
+                {
+                    row_begin[std::size_t(row - row_first)] = int(row_overlaps.size());
+                    const double high = cell_north - (double(row) - 0.5) / pixel_rows;
+                    const double low = cell_north - (double(row) + 0.5) / pixel_rows;
+                    // Latitude edges descend: the first box whose south edge
+                    // lies below this pixel's north edge.
+                    int sample = 0;
+                    while (sample < rows && latitude_edges[std::size_t(sample) + 1] >= high)
+                        ++sample;
+                    for (; sample < rows && latitude_edges[std::size_t(sample)] > low; ++sample)
+                    {
+                        const double overlap =
+                            std::min(high, latitude_edges[std::size_t(sample)]) -
+                            std::max(low, latitude_edges[std::size_t(sample) + 1]);
+                        if (overlap > 0.0)
+                            row_overlaps.push_back({sample, overlap});
+                    }
+                }
+                row_begin.back() = int(row_overlaps.size());
+
+                // Separable accumulation: a row run is first summed per box
+                // column, then distributed to the box rows the pixel row
+                // overlaps.
+                const CopernicusRaster::RowRunVisitor visitor =
+                    [&](int row, int column, const float *values, int count)
+                {
+                    int touched_first = columns;
+                    int touched_last = -1;
+                    for (int index = 0; index < count; ++index)
+                    {
+                        const float value = values[index];
+                        if (std::isnan(value))
+                            continue;
+                        const std::size_t local = std::size_t(column + index - column_first);
+                        for (int entry = column_begin[local]; entry < column_begin[local + 1]; ++entry)
+                        {
+                            const Overlap &overlap = column_overlaps[std::size_t(entry)];
+                            row_sums[std::size_t(overlap.sample)] += overlap.weight * double(value);
+                            row_weights[std::size_t(overlap.sample)] += overlap.weight;
+                            touched_first = std::min(touched_first, overlap.sample);
+                            touched_last = std::max(touched_last, overlap.sample);
+                        }
+                    }
+                    if (touched_last < touched_first)
+                        return;
+                    const std::size_t local_row = std::size_t(row - row_first);
+                    for (int entry = row_begin[local_row]; entry < row_begin[local_row + 1]; ++entry)
+                    {
+                        const Overlap &overlap = row_overlaps[std::size_t(entry)];
+                        const std::size_t base = std::size_t(overlap.sample) * std::size_t(columns);
+                        for (int sample = touched_first; sample <= touched_last; ++sample)
+                        {
+                            (*sums)[base + std::size_t(sample)] +=
+                                overlap.weight * row_sums[std::size_t(sample)];
+                            (*weights)[base + std::size_t(sample)] +=
+                                overlap.weight * row_weights[std::size_t(sample)];
+                        }
+                    }
+                    std::fill(row_sums.begin() + touched_first, row_sums.begin() + touched_last + 1, 0.0);
+                    std::fill(row_weights.begin() + touched_first,
+                              row_weights.begin() + touched_last + 1, 0.0);
+                };
+                QString read_error;
+                if (!source_raster->visitWindow(column_first, column_last, row_first, row_last,
+                                                visitor, &read_error))
+                {
+                    this->fatal_status = TerrainProviderFetchStatus::SourceReadError;
+                    this->fatal_error_message = read_error;
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     std::optional<TerrainProviderFetchStatus> fatalStatus() const
@@ -1312,9 +1627,42 @@ void coordinateForNormalizedGridSample(const TerrainTileAddress &address,
     *latitude_deg = std::atan(std::sinh(mercator_y)) * 180.0 / std::numbers::pi;
 }
 
-// The source cells read while normalizing a tile. The tile spans a monotonic
-// geographic rectangle; the margins include the neighbour cells that bilinear
-// interpolation reaches at the coarsest GLO-30 column spacing.
+// Below the provider's native zoom a normalized sample is the area average
+// of the source over its sample box (see fetchTile()). At the native zoom the
+// sample spacing matches the source spacing and samples stay bilinear.
+bool normalizedTileUsesAreaAverage(const TerrainTileAddress &address)
+{
+    return address.zoom < CopernicusMaximumNormalizedZoom;
+}
+
+// Sample box edges of a normalized tile: box (row r, column c) is centred on
+// grid sample (r, c) and spans half a sample spacing to each side in XYZ
+// space, so the boxes of a zoom level tile the plane and adjacent tiles
+// compute identical boxes, hence identical values, for their shared edge
+// samples. Longitudes ascend (unwrapped past +-180), latitudes descend.
+void normalizedTileSampleEdges(const TerrainTileAddress &address,
+                               std::vector<double> *longitude_edges,
+                               std::vector<double> *latitude_edges)
+{
+    const double tile_count = std::ldexp(1.0, address.zoom);
+    longitude_edges->resize(std::size_t(TerrainTileGridSize) + 1);
+    latitude_edges->resize(std::size_t(TerrainTileGridSize) + 1);
+    for (int edge = 0; edge <= TerrainTileGridSize; ++edge)
+    {
+        const double offset = (double(edge) - 0.5) / double(TerrainTileCellCount);
+        (*longitude_edges)[std::size_t(edge)] =
+            (double(address.x) + offset) / tile_count * 360.0 - 180.0;
+        const double mercator_y =
+            std::numbers::pi * (1.0 - 2.0 * (double(address.y) + offset) / tile_count);
+        (*latitude_edges)[std::size_t(edge)] =
+            std::atan(std::sinh(mercator_y)) * 180.0 / std::numbers::pi;
+    }
+}
+
+// The source cells read while normalizing a tile: the tile (or, when area
+// averaged, its sample boxes, which reach half a spacing beyond it) plus the
+// neighbour cells that bilinear interpolation and pixel footprints reach at
+// the coarsest GLO-30 column spacing. Longitudes past +-180 deg wrap.
 void normalizedTileSourceAddresses(const TerrainTileAddress &address,
                                    QHash<QString, CopernicusSourceAddress> *addresses)
 {
@@ -1325,18 +1673,26 @@ void normalizedTileSourceAddresses(const TerrainTileAddress &address,
     coordinateForNormalizedGridSample(address, 0, 0, &north_deg, &west_deg);
     coordinateForNormalizedGridSample(address, TerrainTileCellCount,
                                       TerrainTileCellCount, &south_deg, &east_deg);
+    if (normalizedTileUsesAreaAverage(address))
+    {
+        std::vector<double> longitude_edges;
+        std::vector<double> latitude_edges;
+        normalizedTileSampleEdges(address, &longitude_edges, &latitude_edges);
+        west_deg = std::min(west_deg, longitude_edges.front());
+        east_deg = std::max(east_deg, longitude_edges.back());
+        north_deg = std::max(north_deg, latitude_edges.front());
+        south_deg = std::min(south_deg, latitude_edges.back());
+    }
     const int south = sourceSouthForLatitude(
         std::max(-90.0, south_deg - SourceNeighbourLatitudeMarginDeg));
     const int north = sourceSouthForLatitude(
         std::min(90.0, north_deg + SourceNeighbourLatitudeMarginDeg));
-    const int west = sourceWestForLongitude(
-        std::max(-180.0, west_deg - SourceNeighbourLongitudeMarginDeg));
-    const int east = sourceWestForLongitude(
-        std::min(180.0, east_deg + SourceNeighbourLongitudeMarginDeg));
+    const int west = int(std::floor(west_deg - SourceNeighbourLongitudeMarginDeg));
+    const int east = int(std::floor(east_deg + SourceNeighbourLongitudeMarginDeg));
     for (int latitude = south; latitude <= north; ++latitude)
     {
         for (int longitude = west; longitude <= east; ++longitude)
-            insertSourceAddress(addresses, {latitude, longitude});
+            insertSourceAddress(addresses, {latitude, wrappedSourceWest(longitude)});
     }
 }
 }
@@ -1529,6 +1885,32 @@ TerrainProviderFetchResult CopernicusTerrainProvider::fetchTile(
     tile.vertical_datum = TerrainVerticalDatum::Egm2008;
     tile.elevations_m.resize(TerrainTileSampleCount);
 
+    // Below the native zoom a sample stands for its whole sample box (up to
+    // ~2.4 km at zoom 8 versus 30 m source pixels). Point samples there alias:
+    // ridges, peaks and valleys between samples are lost or land at random.
+    // The box's area average is what the renderer, and every coarser DEM
+    // level it chooses, should see. A box smaller than one source pixel
+    // (high latitudes, zoom 13) keeps the bilinear point sample, which is the
+    // better estimate there; the choice depends only on the sample itself, so
+    // tiles sharing an edge sample still agree.
+    const bool area_average = normalizedTileUsesAreaAverage(address);
+    std::vector<double> longitude_edges;
+    std::vector<double> latitude_edges;
+    std::vector<double> box_sums;
+    std::vector<double> box_weights;
+    if (area_average)
+    {
+        normalizedTileSampleEdges(address, &longitude_edges, &latitude_edges);
+        if (!raster_set.accumulateAreaAverages(longitude_edges, latitude_edges,
+                                               &box_sums, &box_weights))
+        {
+            result.status = raster_set.fatalStatus().value_or(
+                TerrainProviderFetchStatus::SourceReadError);
+            result.error_message = raster_set.fatalErrorMessage();
+            return result;
+        }
+    }
+
     int finite_samples = 0;
     for (int row = 0; row < TerrainTileGridSize; ++row)
     {
@@ -1538,8 +1920,28 @@ TerrainProviderFetchResult CopernicusTerrainProvider::fetchTile(
             double longitude_deg = 0.0;
             coordinateForNormalizedGridSample(address, column, row,
                                               &latitude_deg, &longitude_deg);
-            const std::optional<float> elevation_m =
-                raster_set.sample(latitude_deg, longitude_deg);
+            std::optional<float> elevation_m;
+            bool point_sample = !area_average;
+            if (area_average)
+            {
+                const std::size_t box = std::size_t(row) * std::size_t(TerrainTileGridSize) +
+                                        std::size_t(column);
+                double pixel_width_deg = 0.0;
+                double pixel_height_deg = 0.0;
+                const bool box_covers_pixel =
+                    !raster_set.pixelSizeAt(latitude_deg, longitude_deg,
+                                            &pixel_width_deg, &pixel_height_deg) ||
+                    (longitude_edges[std::size_t(column) + 1] - longitude_edges[std::size_t(column)] >=
+                         pixel_width_deg &&
+                     latitude_edges[std::size_t(row)] - latitude_edges[std::size_t(row) + 1] >=
+                         pixel_height_deg);
+                if (box_covers_pixel && box_weights[box] > 0.0)
+                    elevation_m = float(box_sums[box] / box_weights[box]);
+                else if (!box_covers_pixel)
+                    point_sample = true;
+            }
+            if (point_sample)
+                elevation_m = raster_set.sample(latitude_deg, longitude_deg);
 
             const int index = row * TerrainTileGridSize + column;
             if (elevation_m.has_value())

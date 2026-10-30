@@ -13,6 +13,13 @@ namespace Aowis::Map
 {
 
 inline constexpr quint16 TerrainTileFormatVersion = 1;
+// Revision of how normalizers derive samples from their sources, independent
+// of the binary format. It is part of the normalized cache namespace, so tiles
+// built by an older normalizer are never served after a semantic change.
+//   1: point samples (bilinear) at every zoom.
+//   2: below the provider's native zoom a sample is the area average of the
+//      source over its sample box; at the native zoom still bilinear.
+inline constexpr quint16 TerrainNormalizationRevision = 2;
 inline constexpr int TerrainTileGridSize = 65;
 inline constexpr int TerrainTileCellCount = TerrainTileGridSize - 1;
 inline constexpr int TerrainTileSampleCount = TerrainTileGridSize * TerrainTileGridSize;

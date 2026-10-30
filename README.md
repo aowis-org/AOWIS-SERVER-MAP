@@ -44,7 +44,7 @@ The write command refuses to overwrite an existing file unless explicitly given 
 | **Raster XYZ tiles** | Configurable OSM/CyclOSM/OpenTopoMap/ArcGIS providers, 256 MiB RAM cache, persistent disk cache, deduplicated upstream fetching |
 | **Provider catalog** | Stable provider UUIDs, runtime GET/PUT editing, atomic persistence separate from the administrator INI |
 | **Download controls** | Independent raster and terrain switches; optional named geographic regions and zoom-dependent coverage |
-| **Normalized terrain** | 65 × 65 `.aowterrain` Web-Mercator tiles with versioned metadata and CRC32, on-demand at zooms 8–14 for Copernicus GLO-30 |
+| **Normalized terrain** | 65 × 65 `.aowterrain` Web-Mercator tiles with versioned metadata and CRC32, on-demand at zooms 8–14 for Copernicus GLO-30; area-averaged below zoom 14, so coarse levels do not alias |
 | **Elevation lookup** | WGS84 point sampling with explicit source and requested vertical-datum semantics |
 | **DEM analysis windows** | Up to 512 × 512 native-source float32 samples in little-endian row-major order, for Hydrology and other consumers |
 | **Cache administration** | Delete raster tiles, normalized terrain or corresponding native source cells; cancel upstream activity |

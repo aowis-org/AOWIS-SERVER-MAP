@@ -69,7 +69,7 @@ Lookup status identifiers: `ready`, `disabled`, `not-initialized`, `invalid-coor
 
 ## Sampling behavior and availability
 
-`TerrainData::sampleElevation()` resolves point queries through `TerrainData::terrainTile()`. It selects the finest available normalized tile containing the point, converts the coordinate into a position within the 65 × 65 grid, and **bilinearly interpolates**. If contributing samples are no-data, the sampler can try a coarser cached normalized tile. Corrupt or unreadable cache entries are reported, not silently treated as valid elevations.
+`TerrainData::sampleElevation()` resolves point queries through `TerrainData::terrainTile()`. It selects the finest available normalized tile containing the point, converts the coordinate into a position within the 65 × 65 grid, and **bilinearly interpolates**. Normally that is a zoom-14 tile of bilinear source samples; a coarser tile holds area averages (zooms 8–13, see [Terrain providers](terrain-providers.md)), which are smoother than the point elevation. If contributing samples are no-data, the sampler can try a coarser cached normalized tile. Corrupt or unreadable cache entries are reported, not silently treated as valid elevations.
 
 When remote acquisition is allowed, the HTTP path acquires native sources needed for the finest supported tile on the remote-capable pool and then hands CPU-only sampling to the terrain processing pool. Remote admission is released at the handoff; global job admission lasts until the computation ends. Coarser cached tiles may be used for fallback without initiating extra remote downloads from the CPU workers. In offline mode, cached normalized or native source data is still usable, but missing Internet sources are not fetched.
 

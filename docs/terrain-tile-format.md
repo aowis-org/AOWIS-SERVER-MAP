@@ -32,7 +32,7 @@ The projection is Web Mercator / EPSG:3857 with the usual slippy-map orientation
 The normalized cache path is:
 
 ```text
-normalized/v1/<dataset>/<z>/<x>/<y>.aowterrain
+normalized/v1/r<revision>/<dataset>/<z>/<x>/<y>.aowterrain
 ```
 
 Dataset identifiers are stable lowercase ASCII identifiers containing only letters, digits, `-`, `_` and `.`, beginning with a letter or digit. Examples are `copernicus-glo30` and `nasadem`.
@@ -60,6 +60,8 @@ y = tile_y + r / 64
 ```
 
 converted through inverse Web Mercator at zoom `z`.
+
+A sample is an elevation estimate *for* that coordinate. A normalizer may derive it as a point sample or as an average over the sample's surrounding area (Copernicus: area average below its native zoom, see [Terrain providers](terrain-providers.md)).
 
 Consequently adjacent normalized tiles share their boundary coordinates exactly. Normalizers must sample a common boundary coordinate consistently so adjacent tiles receive matching edge elevations. The later renderer may still use skirts or another seam strategy when different levels of detail meet.
 
@@ -163,6 +165,8 @@ The payload carries a standard IEEE CRC32. This is intended to detect truncated 
 The v1 file itself is intentionally not internally compressed. HTTP transport may use content encoding and offline packages may compress their members. Keeping the canonical cache tile uncompressed makes decoding, random access and direct GPU-oriented staging simple. A typical v1 payload is only 8450 bytes before transport/package compression.
 
 The format version is independent of provider/dataset versions. A source-data revision does not require an AOWIS format-version change if it normalizes into the same v1 structure.
+
+How samples are derived from a source is versioned separately by the **normalization revision** `r<revision>` in the cache path (`TerrainNormalizationRevision`; 1 = point samples, 2 = area averages below the provider's native zoom). A semantic change bumps it, so a cache never mixes tiles of different normalizers; the binary format is unchanged.
 
 An incompatible binary/layout change requires a new AOWIS terrain format version and a separate normalized cache namespace such as `normalized/v2/...`. Existing v1 meanings must not be changed in place.
 

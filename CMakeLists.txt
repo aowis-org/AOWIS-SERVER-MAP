@@ -149,6 +149,23 @@ if(BUILD_TESTING)
         COMMAND aowis-server-map-terrain-provider-test
     )
 
+    add_executable(aowis-server-map-terrain-area-average-test
+        tests/test_terrain_area_average.cpp
+    )
+    target_link_libraries(aowis-server-map-terrain-area-average-test
+        PRIVATE
+            AOWIS::Map
+            TIFF::TIFF
+    )
+    target_compile_features(aowis-server-map-terrain-area-average-test
+        PRIVATE
+            cxx_std_20
+    )
+    add_test(
+        NAME aowis-server-map-terrain-area-average
+        COMMAND aowis-server-map-terrain-area-average-test
+    )
+
     add_executable(aowis-server-map-terrain-elevation-sampling-test
         tests/test_terrain_elevation_sampling.cpp
     )

@@ -47,7 +47,7 @@ On-demand normalization stops at zoom 14 because higher zooms would mostly overs
 ```text
 <terrain cache>/
   providers/copernicus/glo30/         Native downloaded source COGs
-  normalized/v1/copernicus-glo30/    <z>/<x>/<y>.aowterrain
+  normalized/v1/r2/copernicus-glo30/ <z>/<x>/<y>.aowterrain
   offline-packages/                  Reserved; no automatic mounting
 ```
 
@@ -57,12 +57,27 @@ On a normalized tile request the server:
 2. For a miss or corrupt entry, obtains the normalized tile's cache-fill lock and rechecks it.
 3. Opens already cached native COGs covering the requested tile.
 4. If native data is missing and remote fetching is enabled/allowed, obtains a per-source interprocess lock and downloads the missing COG.
-5. Uses libtiff to decode only needed raster tiles or strips, bilinearly normalizes samples to the common 65 × 65 heightfield, and atomically writes the `.aowterrain` bytes.
+5. Uses libtiff to decode only needed raster tiles or strips, normalizes them to the common 65 × 65 heightfield (see below), and atomically writes the `.aowterrain` bytes.
 6. Returns the validated normalized bytes to the caller.
 
 Cross-process cache-file locks deduplicate source acquisition even when two server instances share a source cache. The server also single-flights identical in-process terrain HTTP requests. Different tiles and independent native source cells can proceed concurrently subject to admission and worker limits. A damaged normalized file is repaired from locally available native sources; when they are missing, the integrity/read error is reported rather than serving corrupt data. Deleting the damaged normalized tile (`DELETE /terrain/v1/cache/…`) makes the next request acquire its sources again.
 
 The samplers assume the GLO-30 grid: *RasterPixelIsPoint*, the centre of pixel (0, 0) on the cell's north-west corner, exactly `width × height` pixels per degree (columns narrow above ±50° latitude, rows are always 1″). A native file that carries GeoTIFF georeferencing (`ModelTiepointTag`, `ModelPixelScaleTag`, `GTRasterTypeGeoKey`) is checked against that grid when opened and rejected as a source read error if it disagrees, so a reprocessed upstream product fails loudly instead of shifting elevations. Files without georeferencing tags are accepted.
+
+### How normalized samples are derived
+
+At **zoom 14**, the native zoom, the sample spacing is about the 30 m source spacing; every sample is the **bilinear** interpolation of the four surrounding source pixels.
+
+At **zooms 8–13** a sample stands for much more ground than a pixel (about 2.4 km at zoom 8 at the equator, 80 × 80 source pixels). A point sample there aliases: ridges, peaks and valleys between samples are lost or land at random, and hillshading makes that visible. Each sample is therefore the **area average** of the source over its sample box:
+
+- the box is centred on the sample and spans half a sample spacing to each side in XYZ (Web-Mercator) space, so the boxes of one zoom tile the plane and adjacent tiles compute identical values for their shared edge samples;
+- every source pixel footprint (centre ± half a pixel, *RasterPixelIsPoint*) contributes with its overlap area with the box, in square degrees; no-data pixels and missing source cells contribute nothing, and a box with no valid source is no-data;
+- boxes of the westernmost and easternmost tiles reach across ±180° and read the source cells on the other side;
+- where a box is smaller than one source pixel (zoom 13 at high latitudes, where GLO-30 columns widen and Mercator rows shrink), the sample stays bilinear, which is the better estimate there. The choice depends only on the sample, so shared edges still agree.
+
+Each source block is decoded once per tile however many boxes read it; a zoom-8 tile costs about 20 % more than with point samples, dominated by decoding the same blocks. The source cells acquired for a tile include the half spacing its boxes reach beyond it.
+
+The normalization revision (`TerrainNormalizationRevision`, currently 2) is part of the cache path. Tiles cached by an earlier normalizer (`normalized/v1/<dataset>/…`, revision 1) are never read again; that directory can be deleted.
 
 Original native COG files also serve **analysis grids** directly: output grid samples are selected from the containing source pixels, not bilinearly resampled from `.aowterrain`. This distinction matters for Hydrology and other numerical consumers. See the [elevation/analysis contract](terrain-elevation-contract.md) and [tile format](terrain-tile-format.md).
 

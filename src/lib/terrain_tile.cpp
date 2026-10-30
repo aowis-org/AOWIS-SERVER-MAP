@@ -230,8 +230,9 @@ QString normalizedTerrainTileRelativePath(const QString &dataset,
         return QString();
 
     return QDir::cleanPath(
-        QStringLiteral("v%1/%2/%3/%4/%5.%6")
+        QStringLiteral("v%1/r%2/%3/%4/%5/%6.%7")
             .arg(TerrainTileFormatVersion)
+            .arg(TerrainNormalizationRevision)
             .arg(dataset)
             .arg(address.zoom)
             .arg(address.x)

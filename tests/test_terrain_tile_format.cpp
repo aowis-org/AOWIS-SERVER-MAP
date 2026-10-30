@@ -98,7 +98,7 @@ int main()
         }
     }
 
-    const QString expected_path = QStringLiteral("v1/test-dem/3/4/2.aowterrain");
+    const QString expected_path = QStringLiteral("v1/r2/test-dem/3/4/2.aowterrain");
     if (!require(normalizedTerrainTileRelativePath(tile.dataset, tile.address) == expected_path,
                  "Normalized terrain tile path is not canonical"))
     {

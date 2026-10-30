@@ -88,11 +88,11 @@ Grid-byte admission accounts for **both** the float result vector and the serial
 ```text
 <terrain-cache>/
   providers/copernicus/glo30/       Native 1° COG cells, shared across normalized tiles
-  normalized/v1/copernicus-glo30/   <z>/<x>/<y>.aowterrain
+  normalized/v1/r2/copernicus-glo30/ <z>/<x>/<y>.aowterrain
   offline-packages/                Reserved; automatic package mounting unavailable
 ```
 
-A normalized tile request checks its validated local cache, acquires the provider-native 1° COGs needed by that tile and normalizes a 65 × 65 heightfield on demand (Copernicus supports normalized zooms 8–14). Each normalized tile and native source uses cache-fill locking, including cross-process `QLockFile` protection for shared source directories. Normalized files and complete native COGs are atomically published; corrupted or mismatched normalized tiles are not served and can be repaired from source data.
+A normalized tile request checks its validated local cache, acquires the provider-native 1° COGs needed by that tile and normalizes a 65 × 65 heightfield on demand (Copernicus supports normalized zooms 8–14; below zoom 14 each sample is the area average of the source over its sample box, see [Terrain providers](terrain-providers.md)). Each normalized tile and native source uses cache-fill locking, including cross-process `QLockFile` protection for shared source directories. Normalized files and complete native COGs are atomically published; corrupted or mismatched normalized tiles are not served and can be repaired from source data.
 
 Copernicus downloads use independent defaults: **30 s connection/initial response**, **120 s inactivity**, **1800 s absolute transfer deadline**, plus a 256 MiB source-size cap. Slow transfers that continue making progress can extend beyond the inactivity duration but not the absolute deadline. Source lock stale detection is set beyond the maximum download duration to avoid two processes treating a slow legitimate download as abandoned.
 
