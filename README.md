@@ -26,6 +26,20 @@ curl -fsS http://127.0.0.1:8122/terrain/v1/datasets
 
 If a read API key is configured, add `-H 'X-API-Key: YOUR_READ_KEY'` to GET requests. `./compile_linux.sh` **without** `--no-run` builds *and starts* the server; when another instance already uses port 8122, a subsequent bind failure does not indicate a compilation failure.
 
+### Listen on the LAN (`0.0.0.0`)
+
+To accept connections from **other machines** on all IPv4 interfaces, run:
+
+```bash
+./build-linux/aowis-server-map --listen-address 0.0.0.0 --port 8122
+# Or build and launch in one step:
+./compile_linux.sh --listen-address 0.0.0.0 --port 8122
+```
+
+`--listen-address` (`-a`) and `--port` (`-p`) override defaults and INI settings **for that process only**. To use a persistent INI, set `listen_address=0.0.0.0` under `[server]` and launch with `--config ./map-server.ini`. For the packaged systemd service, edit `[server]` in `/etc/aowis-server-map/map-server.ini` and run `sudo systemctl restart aowis-server-map`; command-line changes made in a shell do not alter the service configuration. See [Configuration](docs/configuration.md#listen-on-another-network-interface).
+
+Verify the listener with `ss -ltn | grep ':8122'` on the server, then request `http://<server-lan-ip>:8122/status` from another machine (with `X-API-Key` if configured). **Security:** `0.0.0.0` exposes the listener on *every* IPv4 interface, and `PUT /map/v1/providers` currently has no API-key enforcement. Restrict access to trusted clients with a firewall or reverse proxy; prefer a specific private interface when possible.
+
 Generate and validate a configuration **without starting the listener**:
 
 ```bash

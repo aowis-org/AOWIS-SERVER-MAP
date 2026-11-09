@@ -43,6 +43,32 @@ An ordinary user launch reads `~/.local/share/aowis-server-map/map-server.ini` w
 --version                           Show version
 ```
 
+### Listen on another network interface
+
+The default listener is `127.0.0.1:8122`, reachable **only from the same machine**. For access from another computer, bind to a suitable private IPv4 address or all IPv4 interfaces (`0.0.0.0`):
+
+```bash
+# Direct launch: listen on all IPv4 interfaces, TCP port 8122
+./build-linux/aowis-server-map --listen-address 0.0.0.0 --port 8122
+
+# Build and launch with exactly the same server options
+./compile_linux.sh --listen-address 0.0.0.0 --port 8122
+```
+
+CLI flags `--listen-address` / `-a` and `--port` / `-p` override the INI **only for the current process**. For persistent configuration, specify the listener in an INI file:
+
+```ini
+[server]
+listen_address=0.0.0.0
+port=8122
+```
+
+For a manually started server, pass `--config ./map-server.ini` (or place the INI at its default user configuration path). For the packaged systemd service, change `/etc/aowis-server-map/map-server.ini` and run `sudo systemctl restart aowis-server-map`; it does not inherit arguments passed to a separate shell launch.
+
+Use `ss -ltn | grep ':8122'` locally to confirm the listening socket. From another machine, use `curl http://<server-lan-ip>:8122/status`, supplying `-H 'X-API-Key: YOUR_READ_KEY'` when the read API key is set. A firewall must also permit the desired clients.
+
+**Security:** Binding `0.0.0.0` exposes the HTTP listener on *all* IPv4 interfaces, potentially including public ones. `PUT /map/v1/providers` does not currently check API keys. Bind to a private interface where possible, restrict network access, and use a controlled TLS reverse proxy for external deployment. See [systemd deployment](../configs/systemd/README.md#local-and-remote-reverse-proxies).
+
 ## INI keys and defaults
 
 | Section/key | Default | Purpose |
