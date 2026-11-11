@@ -101,6 +101,13 @@ target_link_libraries(aowis-server-map
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(aowis-server-map-legacy-standalone-migration-test
+        tests/test_map_legacy_standalone_migration.cpp)
+    target_link_libraries(aowis-server-map-legacy-standalone-migration-test PRIVATE AOWIS::Map)
+    add_test(NAME aowis-server-map-legacy-standalone-migration
+        COMMAND aowis-server-map-legacy-standalone-migration-test)
+    set_tests_properties(aowis-server-map-legacy-standalone-migration PROPERTIES LABELS "aowis")
+
     add_executable(aowis-server-map-settings-repository-test
         tests/test_map_settings_repository.cpp)
     target_link_libraries(aowis-server-map-settings-repository-test PRIVATE AOWIS::Map)
@@ -414,6 +421,7 @@ endif()
 if(BUILD_TESTING)
     set(AOWIS_SERVER_MAP_TEST_TARGETS
         aowis-server-map-settings-repository-test
+        aowis-server-map-legacy-standalone-migration-test
         aowis-server-map-provider-limits-test
         aowis-server-map-cache-reuse-test
         aowis-server-map-raster-cascade-test

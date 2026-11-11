@@ -6,7 +6,7 @@ AOWIS Server Map uses built-in defaults, an optional administrator INI, and a se
 
 `Aowis::Map::SettingsRepository` now persists the MAP cascade and raster-provider catalog in **AOWIS-CONFIG** records with separate `server-map` / `standalone-map` owner roots, strict validation and revision-checked writes. The host must access these through MAP's C++ library (or REST), not by editing CONFIG records. A failed/corrupt cascade read fails closed; an empty, valid owner store uses defaults.
 
-**Not enabled for the standalone/systemd runtime yet:** the server still reads its INI and `providers.ini`, and the GUI still uses its existing settings adapter. The next integration patch will switch those callers and handle previously saved GUI settings. This step does not migrate, delete or rewrite existing configuration.
+**Standalone integration:** callers can use `SettingsRepository::openStandaloneForCurrentUser()`. MAP migrates the prior `embedded_map_cascade` and `embedded_map_providers` GUI preference records only when the corresponding MAP CONFIG records are absent. Invalid legacy records fail closed. Imported records remain in place for rollback, and subsequent MAP writes use revision checks. The standalone/systemd server still reads its INI and `providers.ini`; its migration is separate.
 
 ## Locate and validate configuration
 

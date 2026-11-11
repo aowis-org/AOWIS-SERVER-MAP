@@ -22,12 +22,18 @@ class SettingsRepository final
 public:
     static std::unique_ptr<SettingsRepository> openForCurrentUser(
         const QString &owner, QString *error = nullptr);
+    // Standalone-only: import older GUI preference records into MAP's own
+    // CONFIG root once. GUI never reads or interprets MAP settings records.
+    static std::unique_ptr<SettingsRepository> openStandaloneForCurrentUser(
+        QString *error = nullptr);
     static std::unique_ptr<SettingsRepository> openAtOwnerRoot(
         const QString &owner, const QString &absolute_root, QString *error = nullptr);
 
     ~SettingsRepository();
     SettingsRepository(const SettingsRepository &) = delete;
     SettingsRepository &operator=(const SettingsRepository &) = delete;
+
+    bool migrateLegacyStandaloneGuiPreferences(QString *error = nullptr) const;
 
     bool readCascade(MapCascadeConfig *value, QString *revision = nullptr,
                      QString *error = nullptr) const;

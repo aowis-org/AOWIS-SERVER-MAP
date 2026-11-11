@@ -7,6 +7,8 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonParseError>
+#include <QDir>
+#include <QStandardPaths>
 #include <QRegularExpression>
 #include <QStringList>
 #include <QSet>
@@ -371,6 +373,80 @@ bool decodeProviderCatalog(const QByteArray &payload, const QVector<MapProvider>
     return success;
 }
 
+// Read the old Standalone MAP records as *opaque GUI preference envelopes*.
+// This code is deliberately in MAP, not GUI. It exists only to migrate earlier
+// released builds; after a successful import MAP never writes the old records.
+namespace
+{
+struct LegacyStandaloneRecords
+{
+    QJsonObject cascade;
+    QJsonObject providers;
+    bool has_cascade = false;
+    bool has_providers = false;
+};
+
+bool readLegacyStandaloneRecords(LegacyStandaloneRecords *result, QString *error)
+{
+    const QString base = QStandardPaths::writableLocation(QStandardPaths::GenericConfigLocation);
+    if (base.isEmpty() || !QDir::isAbsolutePath(base))
+        return fail(error, QStringLiteral("No GUI configuration location for MAP migration"));
+    const aowis::config::Result<aowis::config::OwnerId> owner =
+        aowis::config::OwnerId::parse("gui");
+    if (!owner)
+        return fail(error, configurationError(owner.error()));
+    const std::filesystem::path namespace_root =
+        std::filesystem::path(QDir::cleanPath(base).toStdString()) / "aowis";
+    const aowis::config::Result<aowis::config::ConfigRoot> root =
+        aowis::config::ConfigRoot::fromNamespaceRoot(owner.value(), namespace_root);
+    if (!root)
+        return fail(error, configurationError(root.error()));
+    const aowis::config::Result<aowis::config::OwnerStore> store =
+        aowis::config::OwnerStore::open(root.value());
+    if (!store)
+        return fail(error, configurationError(store.error()));
+    const aowis::config::Result<aowis::config::ObjectCollection> collection =
+        store.value().collection("preferences");
+    if (!collection)
+        return fail(error, configurationError(collection.error()));
+    const aowis::config::Result<aowis::config::ObjectSnapshot> snapshot =
+        collection.value().readAll();
+    if (!snapshot)
+        return fail(error, configurationError(snapshot.error()));
+    if (!snapshot.value().unreadable.empty())
+        return fail(error, QStringLiteral("Damaged GUI preferences prevent MAP migration"));
+    for (const aowis::config::StoredObject &stored : snapshot.value().objects)
+    {
+        const QJsonDocument document =
+            QJsonDocument::fromJson(QByteArray(stored.json.data(), qsizetype(stored.json.size())));
+        if (!document.isObject())
+            return fail(error, QStringLiteral("Invalid GUI preference envelope during MAP migration"));
+        const QJsonObject object = document.object();
+        const QString group = object.value(QStringLiteral("group")).toString();
+        const bool cascade = group == QStringLiteral("embedded_map_cascade");
+        const bool providers = group == QStringLiteral("embedded_map_providers");
+        if (!cascade && !providers)
+            continue;
+        if (!isInteger(object.value(QStringLiteral("preferences_version")), 1, 1) ||
+            !object.value(QStringLiteral("values")).isObject())
+            return fail(error, QStringLiteral("Invalid legacy MAP preference envelope"));
+        if ((cascade && result->has_cascade) || (providers && result->has_providers))
+            return fail(error, QStringLiteral("Duplicate legacy MAP configuration records"));
+        if (cascade)
+        {
+            result->has_cascade = true;
+            result->cascade = object.value(QStringLiteral("values")).toObject();
+        }
+        if (providers)
+        {
+            result->has_providers = true;
+            result->providers = object.value(QStringLiteral("values")).toObject();
+        }
+    }
+    return true;
+}
+}
+
 struct SettingsRepository::Impl
 {
     explicit Impl(aowis::config::OwnerStore opened) : store(std::move(opened)) {}
@@ -411,6 +487,56 @@ std::unique_ptr<SettingsRepository> SettingsRepository::openForCurrentUser(
         error->clear();
     return std::unique_ptr<SettingsRepository>(
         new SettingsRepository(std::make_unique<Impl>(store.value())));
+}
+
+std::unique_ptr<SettingsRepository> SettingsRepository::openStandaloneForCurrentUser(
+    QString *error)
+{
+    std::unique_ptr<SettingsRepository> repository =
+        openForCurrentUser(QStringLiteral("standalone-map"), error);
+    if (repository && !repository->migrateLegacyStandaloneGuiPreferences(error))
+        repository.reset();
+    return repository;
+}
+
+bool SettingsRepository::migrateLegacyStandaloneGuiPreferences(QString *error) const
+{
+    // Existing MAP records always win. This also makes the operation safely
+    // repeatable after a restart or an interrupted two-record migration.
+    MapCascadeConfig cascade;
+    QString cascade_revision;
+    if (!readCascade(&cascade, &cascade_revision, error))
+        return false;
+    QVector<MapProvider> providers;
+    QString provider_revision;
+    if (!readProviders(&providers, &provider_revision, error))
+        return false;
+    if (!cascade_revision.isEmpty() && !provider_revision.isEmpty())
+        return true;
+
+    LegacyStandaloneRecords legacy;
+    if (!readLegacyStandaloneRecords(&legacy, error))
+        return false;
+
+    // Validate both records before writing either, so malformed old data
+    // cannot accidentally switch acquisition back to direct-provider mode.
+    MapCascadeConfig imported_cascade;
+    QVector<MapProvider> imported_providers;
+    if (cascade_revision.isEmpty() && legacy.has_cascade &&
+        !decodeCascadeObject(legacy.cascade, &imported_cascade, error))
+        return false;
+    if (provider_revision.isEmpty() && legacy.has_providers &&
+        !decodeProviderObject(legacy.providers, &imported_providers, error))
+        return false;
+    if (cascade_revision.isEmpty() && legacy.has_cascade &&
+        !saveCascade(imported_cascade, QString(), nullptr, error))
+        return false;
+    if (provider_revision.isEmpty() && legacy.has_providers &&
+        !saveProviders(imported_providers, QString(), nullptr, error))
+        return false;
+    if (error != nullptr)
+        error->clear();
+    return true;
 }
 
 std::unique_ptr<SettingsRepository> SettingsRepository::openAtOwnerRoot(
