@@ -1,4 +1,5 @@
 #include <aowis/map/terrain_data.h>
+#include <aowis/map/terrain_transfer.h>
 
 #include <QCoreApplication>
 #include <QDir>
@@ -32,6 +33,8 @@ public:
     int response_status = 200;
     int request_count = 0;
     QByteArray last_request;
+    bool offer_zstd = false;
+    bool invalid_zstd = false;
 
     bool start() { return listen(QHostAddress::LocalHost, 0); }
     QUrl origin() const
@@ -62,11 +65,25 @@ protected:
             const bool authorized = this->required_key.isEmpty() ||
                 lowercase.contains("x-api-key: " + this->required_key.toLower() + "\r\n");
             const int status = authorized ? this->response_status : 401;
-            const QByteArray body = status == 200 ? this->response_body : QByteArrayLiteral("error");
+            QByteArray body = status == 200 ? this->response_body : QByteArrayLiteral("error");
+            bool compressed = false;
+            if (status == 200 && this->offer_zstd &&
+                lowercase.contains("accept-encoding: zstd"))
+            {
+                const std::optional<QByteArray> encoded =
+                    Aowis::Map::compressTerrainTileForTransfer(body);
+                if (encoded.has_value())
+                {
+                    body = this->invalid_zstd ? encoded->left(encoded->size() - 1) : *encoded;
+                    compressed = true;
+                }
+            }
             QByteArray response = "HTTP/1.1 " + QByteArray::number(status) +
                 (status == 200 ? " OK\r\n" : " Error\r\n");
             response += "Content-Type: application/vnd.aowis.terrain\r\n";
             response += "X-AOWIS-Terrain-Revision: " + this->revision + "\r\n";
+            if (compressed)
+                response += "Content-Encoding: zstd\r\n";
             response += "Content-Length: " + QByteArray::number(body.size()) + "\r\n";
             response += "Connection: close\r\n\r\n";
             socket->write(response + body);
@@ -137,10 +154,12 @@ int main(int argc, char **argv)
         return 1;
     failed.response_status = 503;
     healthy.required_key = QByteArrayLiteral("read-key");
+    healthy.offer_zstd = true;
 
     TerrainData::Config config;
     config.cache_directory = directory.path();
     config.cascade.allow_direct_fetch = false;
+    config.cascade.poor_internet_mode = true;
     config.cascade.upstreams.append(upstream("failed", failed));
     config.cascade.upstreams.append(upstream("healthy", healthy, healthy.required_key));
     TerrainData terrain(config);
@@ -163,7 +182,8 @@ int main(int argc, char **argv)
     if (!require(failed.request_count == 1 && healthy.request_count == 1,
                  "Terrain cascade did not try upstreams in order")) return 1;
     if (!require(healthy.last_request.toLower().contains("x-api-key: read-key\r\n") &&
-                 healthy.last_request.toLower().contains("x-aowis-cascade-visited: " + visited),
+                 healthy.last_request.toLower().contains("x-aowis-cascade-visited: " + visited) &&
+                 healthy.last_request.toLower().contains("accept-encoding: zstd\r\n"),
                  "Terrain cascade lost authentication or visited trace")) return 1;
     const TerrainTileLookupResult delivered = terrain.terrainTile(
         QStringLiteral("copernicus-glo30"), address, false);
@@ -198,6 +218,16 @@ int main(int argc, char **argv)
         return 1;
 
     incompatible.revision = QByteArrayLiteral("2");
+    incompatible.offer_zstd = true;
+    incompatible.response_body = encoded;
+    incompatible.invalid_zstd = true;
+    const TerrainProviderFetchResult invalid_frame = acquire(incompatible_data, address);
+    if (!require(invalid_frame.status != TerrainProviderFetchStatus::Ready &&
+                 !QFileInfo::exists(incompatible_data.normalizedTilePath(
+                     QStringLiteral("copernicus-glo30"), address)),
+                 "Truncated zstd response poisoned the normalized cache")) return 1;
+
+    incompatible.invalid_zstd = false;
     incompatible.response_body = encoded.left(encoded.size() - 7);
     const TerrainProviderFetchResult corrupt = acquire(incompatible_data, address);
     if (!require(corrupt.status != TerrainProviderFetchStatus::Ready &&
@@ -206,6 +236,7 @@ int main(int argc, char **argv)
                  "Truncated/CRC-invalid terrain poisoned the local cache"))
         return 1;
 
+    incompatible.offer_zstd = false; // Older upstream: identity must still work.
     incompatible.response_body = encoded;
     incompatible_data.cancelUpstreamDownloads();
     const TerrainProviderFetchResult repaired = acquire(incompatible_data, address);

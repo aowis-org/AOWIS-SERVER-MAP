@@ -13,6 +13,7 @@ RUN apt-get update -o APT::Update::Error-Mode=any \
       dpkg-dev \
       g++ \
       libtiff-dev \
+      libzstd-dev \
       ninja-build \
       pkg-config \
       qt6-base-dev \

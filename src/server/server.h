@@ -16,6 +16,7 @@
 #include <QPromise>
 #include <QTcpSocket>
 #include <QSharedPointer>
+#include <QSet>
 #include <QString>
 #include <QTcpServer>
 #include <QThreadPool>
@@ -44,6 +45,7 @@ class Server : public QObject
 {
     Q_OBJECT
     friend class TerrainSingleFlightTestAccess;
+    friend class TerrainZstdHttpTestAccess;
 
 public:
     struct Config
@@ -132,6 +134,8 @@ private:
     // client to join without creating a second job for the same key.
     QHash<QString, QTcpSocket *> terrain_client_sockets;
     QHash<QPromise<QHttpServerResponse> *, QTcpSocket *> terrain_waiter_sockets;
+    // Individual HTTP representations must not alter single-flight terrain work.
+    QSet<QPromise<QHttpServerResponse> *> terrain_zstd_waiters;
     QHash<QString, PendingPromises> pending_terrain_tiles;
     QHash<QString, PendingPromises> pending_terrain_elevations;
     QHash<QString, PendingPromises> pending_terrain_grids;

@@ -17,6 +17,8 @@ option(
 
 find_package(Qt6 REQUIRED COMPONENTS Core Network Concurrent)
 find_package(TIFF REQUIRED)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(AOWIS_ZSTD REQUIRED IMPORTED_TARGET libzstd)
 
 add_library(aowis-server-map-core STATIC
     src/lib/maptiles.cpp
@@ -28,6 +30,8 @@ add_library(aowis-server-map-core STATIC
     src/lib/http_client_tilefetch.h
     src/lib/terrain_elevation.cpp
     src/lib/terrain_tile.cpp
+    src/lib/terrain_transfer.cpp
+    include/aowis/map/terrain_transfer.h
     src/lib/terrain_provider.cpp
     src/lib/terrain_dataset.cpp
     src/lib/copernicus_terrain_provider.cpp
@@ -56,6 +60,7 @@ target_link_libraries(aowis-server-map-core
         Qt6::Concurrent
     PRIVATE
         TIFF::TIFF
+        PkgConfig::AOWIS_ZSTD
 )
 
 target_compile_features(aowis-server-map-core
@@ -121,6 +126,14 @@ if(BUILD_TESTING)
     target_link_libraries(aowis-server-map-terrain-cascade-test PRIVATE AOWIS::Map)
     add_test(NAME aowis-server-map-terrain-cascade
              COMMAND aowis-server-map-terrain-cascade-test)
+
+    add_executable(aowis-server-map-terrain-transfer-test
+        tests/test_terrain_transfer.cpp
+    )
+    target_link_libraries(aowis-server-map-terrain-transfer-test
+        PRIVATE AOWIS::Map PkgConfig::AOWIS_ZSTD)
+    add_test(NAME aowis-server-map-terrain-transfer
+             COMMAND aowis-server-map-terrain-transfer-test)
 
     add_executable(aowis-server-map-terrain-tile-delivery-test
         tests/test_terrain_tile_delivery.cpp
@@ -300,6 +313,20 @@ if(AOWIS_SERVER_MAP_BUILD_SERVER)
             PRIVATE cxx_std_20)
         add_test(NAME aowis-server-map-provider-state
                  COMMAND aowis-server-map-provider-state-test)
+        add_executable(aowis-server-map-terrain-zstd-http-test
+            tests/test_terrain_zstd_http.cpp
+            src/server/server.cpp
+            src/server/server.h
+            src/server/configuration.cpp
+            src/server/configuration.h
+        )
+        target_include_directories(aowis-server-map-terrain-zstd-http-test
+            PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/server")
+        target_link_libraries(aowis-server-map-terrain-zstd-http-test
+            PRIVATE AOWIS::Map Qt6::HttpServer Qt6::Concurrent)
+        add_test(NAME aowis-server-map-terrain-zstd-http
+            COMMAND aowis-server-map-terrain-zstd-http-test)
+
         add_executable(aowis-server-map-terrain-singleflight-http-test
             tests/test_terrain_singleflight_http.cpp
             src/server/server.cpp
@@ -333,6 +360,7 @@ if(BUILD_TESTING)
         aowis-server-map-terrain-tile-format-test
         aowis-server-map-terrain-tile-delivery-test
         aowis-server-map-terrain-cascade-test
+        aowis-server-map-terrain-transfer-test
         aowis-server-map-terrain-provider-test
         aowis-server-map-copernicus-resume-http-test
         aowis-server-map-terrain-elevation-sampling-test
@@ -348,6 +376,7 @@ if(BUILD_TESTING)
             aowis-server-map-cascade-configuration-test
             aowis-server-map-provider-state-test
             aowis-server-map-terrain-singleflight-http-test
+            aowis-server-map-terrain-zstd-http-test
             aowis-server-map-server)
     endif()
     add_executable(aowis-server-map-terrain-admission-test

@@ -1,5 +1,6 @@
 #include <aowis/map/terrain_data.h>
 #include <aowis/map/terrain_provider.h>
+#include <aowis/map/terrain_transfer.h>
 
 #include "copernicus_terrain_provider.h"
 
@@ -30,8 +31,7 @@ namespace
 constexpr double WebMercatorMaximumLatitudeDeg = 85.0511287798066;
 constexpr int NormalizedTileLockTimeoutMs = 180000;
 constexpr int NormalizedTileStaleLockMs = 10 * 60 * 1000;
-constexpr qint64 MaximumCascadeTerrainTileBytes =
-    64 + TerrainTileMaximumDatasetIdBytes + TerrainTileSampleCount * qint64(sizeof(quint16));
+constexpr qint64 MaximumCascadeTerrainTileBytes = MaximumCanonicalTerrainTileBytes;
 constexpr int CascadeRequestTimeoutMs = 10000;
 
 struct TerrainGridPosition
@@ -694,6 +694,8 @@ TerrainProviderFetchResult TerrainData::fetchNormalizedFromUpstreams(
                              QNetworkRequest::ManualRedirectPolicy);
         request.setTransferTimeout(CascadeRequestTimeoutMs);
         request.setRawHeader("Accept", terrainTileMimeType().toUtf8());
+        if (this->config.cascade.poor_internet_mode)
+            request.setRawHeader("Accept-Encoding", "zstd");
         request.setRawHeader("X-AOWIS-Cascade-Visited", visited);
         if (!upstream.api_key.isEmpty())
             request.setRawHeader("X-API-Key", upstream.api_key);
@@ -711,8 +713,8 @@ TerrainProviderFetchResult TerrainData::fetchNormalizedFromUpstreams(
         QObject::connect(reply, &QNetworkReply::downloadProgress, reply,
                          [reply](qint64 received, qint64 total)
         {
-            if (received > MaximumCascadeTerrainTileBytes ||
-                total > MaximumCascadeTerrainTileBytes)
+            if (received > maximumCompressedTerrainTileBytes() ||
+                total > maximumCompressedTerrainTileBytes())
                 reply->abort();
         });
         QTimer cancel_poll;
@@ -755,7 +757,7 @@ TerrainProviderFetchResult TerrainData::fetchNormalizedFromUpstreams(
         const QString content_type = reply->header(QNetworkRequest::ContentTypeHeader)
             .toString().section(';', 0, 0).trimmed().toLower();
         const QByteArray content_encoding = reply->rawHeader("Content-Encoding").trimmed();
-        const QByteArray bytes = succeeded ? reply->readAll() : QByteArray();
+        const QByteArray wire_bytes = succeeded ? reply->readAll() : QByteArray();
         const QByteArray content_length_header = reply->rawHeader("Content-Length").trimmed();
         bool declared_length_valid = false;
         const qint64 declared_length = content_length_header.toLongLong(&declared_length_valid);
@@ -783,13 +785,37 @@ TerrainProviderFetchResult TerrainData::fetchNormalizedFromUpstreams(
         }
         if (content_type != terrainTileMimeType() ||
             revision != QByteArray::number(TerrainNormalizationRevision) ||
-            !content_encoding.isEmpty() || bytes.isEmpty() ||
-            bytes.size() > MaximumCascadeTerrainTileBytes ||
-            (declared_length_valid && declared_length != bytes.size()))
+            (content_encoding != "zstd" && !content_encoding.isEmpty()) ||
+            (content_encoding == "zstd" && !this->config.cascade.poor_internet_mode) ||
+            wire_bytes.isEmpty() || wire_bytes.size() > maximumCompressedTerrainTileBytes() ||
+            (declared_length_valid && declared_length != wire_bytes.size()))
         {
             result.status = TerrainProviderFetchStatus::NetworkError;
             result.error_message = QStringLiteral("MAP upstream '%1' returned an incompatible terrain representation")
                 .arg(upstream.name);
+            continue;
+        }
+        QByteArray bytes;
+        if (content_encoding == "zstd")
+        {
+            QString decompression_error;
+            const std::optional<QByteArray> restored = decompressTerrainTileFromTransfer(
+                wire_bytes, &decompression_error);
+            if (!restored.has_value())
+            {
+                result.status = TerrainProviderFetchStatus::NetworkError;
+                result.error_message = QStringLiteral("MAP upstream '%1': %2")
+                    .arg(upstream.name, decompression_error);
+                continue;
+            }
+            bytes = restored.value();
+        }
+        else
+            bytes = wire_bytes;
+        if (bytes.size() > MaximumCascadeTerrainTileBytes)
+        {
+            result.status = TerrainProviderFetchStatus::NetworkError;
+            result.error_message = QStringLiteral("MAP upstream returned oversized canonical terrain");
             continue;
         }
         QString decode_error;
