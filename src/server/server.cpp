@@ -70,6 +70,33 @@ QFuture<QHttpServerResponse> makeReadyResponse(QHttpServerResponse response)
     return future;
 }
 
+// Preserve Content-Type while adding the source identity required by downstream
+// MAP servers. Qt 6.8+ exposes QHttpHeaders instead of setHeader().
+void setRasterSourceHeader(QHttpServerResponse &response, const QByteArray &source)
+{
+#if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
+    QHttpHeaders headers = response.headers();
+    headers.replaceOrAppend("X-AOWIS-Raster-Source", source);
+    response.setHeaders(std::move(headers));
+#else
+    response.setHeader("X-AOWIS-Raster-Source", source);
+#endif
+}
+
+// The r2 normalization semantics are independent of the .aowterrain binary
+// format version. A downstream must reject incompatible normalizer revisions.
+void setTerrainRevisionHeader(QHttpServerResponse &response)
+{
+    const QByteArray revision = QByteArray::number(Aowis::Map::TerrainNormalizationRevision);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
+    QHttpHeaders headers = response.headers();
+    headers.replaceOrAppend("X-AOWIS-Terrain-Revision", revision);
+    response.setHeaders(std::move(headers));
+#else
+    response.setHeader("X-AOWIS-Terrain-Revision", revision);
+#endif
+}
+
 // Upstream raster providers deliver PNG, JPEG or WebP (e.g. ArcGIS imagery
 // is JPEG); TileHttpClient only accepts these three signatures.
 QByteArray mapTileMimeType(const QByteArray &data)
@@ -306,7 +333,8 @@ Server::Server(const Config &config, QObject *parent)
               config.terrain_download_deadline_seconds,
               config.terrain_integration_source_url,
               config.terrain_coverage,
-              config.download_coverage
+              config.download_coverage,
+              config.cascade
           },
           this)),
       pending_request_count(0)
@@ -321,6 +349,8 @@ Server::Server(const Config &config, QObject *parent)
     this->terrain_remote_pool.setMaxThreadCount(
         qMax(1, qMin(config.maximum_terrain_remote_workers, config.maximum_terrain_jobs)));
     this->maptiles->setRemoteFetchEnabled(config.map_remote_fetch_enabled);
+    this->maptiles->setCascadeConfig(config.cascade);
+    this->terrain_data->setCascadeInstanceId(this->maptiles->cascadeInstanceId());
     this->maptiles->setPermanentDataDirectory(config.permanent_data_directory);
     this->maptiles->configureProviders(config.map_providers, config.download_coverage,
                                        config.map_coverage);
@@ -538,6 +568,8 @@ QFuture<QHttpServerResponse> Server::submitTerrainTile(
 {
     // Called exclusively on the HTTP event-loop thread. Each HTTP request owns
     // a distinct promise, but identical requests share one terrain worker job.
+    const QByteArray cascade_trace = client_request == nullptr ? QByteArray() :
+        client_request->value("x-aowis-cascade-visited");
     const QString key = dataset + QLatin1Char('/') + QString::number(zoom) +
         QLatin1Char('/') + QString::number(tile_x) + QLatin1Char('/') +
         QString::number(tile_y);
@@ -614,8 +646,12 @@ QFuture<QHttpServerResponse> Server::submitTerrainTile(
             {
                 forgetTerrainWaiter(waiter);
                 if (result.status == Aowis::Map::TerrainTileLookupStatus::Ready)
-                    waiter->addResult(QHttpServerResponse(
-                        Aowis::Map::terrainTileMimeType().toUtf8(), result.data));
+                {
+                    QHttpServerResponse response(
+                        Aowis::Map::terrainTileMimeType().toUtf8(), result.data);
+                    setTerrainRevisionHeader(response);
+                    waiter->addResult(std::move(response));
+                }
                 else
                     waiter->addResult(makeTerrainTileErrorResponse(result));
                 waiter->finish();
@@ -627,12 +663,12 @@ QFuture<QHttpServerResponse> Server::submitTerrainTile(
         this->terrain_worker_pool.start(process_tile);
         return future;
     }
-    this->terrain_remote_pool.start([this, key, dataset, address, process_tile, cancellation]()
+    this->terrain_remote_pool.start([this, key, dataset, address, process_tile, cancellation, cascade_trace]()
     {
         Aowis::Map::TerrainProviderFetchResult acquired;
         try
         {
-            acquired = this->terrain_data->acquireTileSources(dataset, address, cancellation);
+            acquired = this->terrain_data->acquireTileSources(dataset, address, cancellation, cascade_trace);
         }
         catch (...)
         {
@@ -1519,6 +1555,13 @@ void Server::setupRoutes()
             return makeReadyResponse(makeTerrainTileErrorResponse(invalid_result));
         }
 
+        if (!this->maptiles->acceptsCascadeTrace(
+                request.value("x-aowis-cascade-visited")))
+        {
+            return makeReadyResponse(QHttpServerResponse(
+                "Invalid or cyclic MAP cascade",
+                QHttpServerResponse::StatusCode::BadRequest));
+        }
         return submitTerrainTile(dataset, zoom, tile_x, tile_y, &request);
     });
 
@@ -1536,6 +1579,18 @@ void Server::setupRoutes()
         if (!isReadAuthorized(request))
             return makeReadyResponse(makeUnauthorizedResponse());
 
+        const QByteArray expected_source = this->maptiles->rasterSourceFingerprint(provider);
+        const QByteArray claimed_source = request.value("x-aowis-raster-source");
+        if (!claimed_source.isEmpty() && claimed_source != expected_source)
+            return makeReadyResponse(QHttpServerResponse(
+                "Raster provider source/style mismatch",
+                QHttpServerResponse::StatusCode::Conflict));
+        const QByteArray cascade_trace = request.value("x-aowis-cascade-visited");
+        if (!this->maptiles->acceptsCascadeTrace(cascade_trace))
+            return makeReadyResponse(QHttpServerResponse(
+                "Invalid or cyclic MAP cascade",
+                QHttpServerResponse::StatusCode::LoopDetected));
+
         const QString key = QString("%1_%2_%3_%4").arg(provider).arg(z).arg(x).arg(y);
         const QUrlQuery tile_query(request.url());
         const bool cache_first_delivery =
@@ -1543,17 +1598,27 @@ void Server::setupRoutes()
                 QStringLiteral("cache-first"), Qt::CaseInsensitive) == 0
             || request.value("x-aowis-tile-delivery").compare(
                 QByteArrayLiteral("cache-first"), Qt::CaseInsensitive) == 0;
-        const MapTiles::TileRequestResult tile_result = this->maptiles->getTileForHttp(provider, z, x, y, key);
+        const MapTiles::TileRequestResult tile_result = this->maptiles->getTileForHttp(provider, z, x, y, key, cascade_trace);
 
         if (tile_result.status == MapTiles::TileRequestStatus::Ready)
-            return makeReadyResponse(QHttpServerResponse(mapTileMimeType(tile_result.data),
-                                                         tile_result.data));
+        {
+            QHttpServerResponse response(mapTileMimeType(tile_result.data), tile_result.data);
+            setRasterSourceHeader(response, expected_source);
+            return makeReadyResponse(std::move(response));
+        }
 
         if (tile_result.status == MapTiles::TileRequestStatus::InvalidRequest)
         {
             return makeReadyResponse(QHttpServerResponse(
                 "Invalid map tile request",
                 QHttpServerResponse::StatusCode::BadRequest));
+        }
+
+        if (tile_result.status == MapTiles::TileRequestStatus::Unavailable)
+        {
+            return makeReadyResponse(QHttpServerResponse(
+                "Map tile is unavailable from the configured sources",
+                QHttpServerResponse::StatusCode::ServiceUnavailable));
         }
 
         if (tile_result.status == MapTiles::TileRequestStatus::ServerBusy)
@@ -1649,7 +1714,10 @@ void Server::onTileReady(QString key, QByteArray data)
     PendingPromises promises = takePendingPromises(key);
     for (const PendingPromise &promise : promises)
     {
-        promise->addResult(QHttpServerResponse(mapTileMimeType(data), data));
+        QHttpServerResponse response(mapTileMimeType(data), data);
+        const QString provider = key.section(QLatin1Char('_'), 0, 0);
+        setRasterSourceHeader(response, this->maptiles->rasterSourceFingerprint(provider));
+        promise->addResult(std::move(response));
         promise->finish();
     }
 }

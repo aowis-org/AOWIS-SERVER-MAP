@@ -2,6 +2,7 @@
 #define AOWIS_MAP_TERRAIN_DATA_H
 
 #include <aowis/map/terrain_tile.h>
+#include <aowis/map/map_cascade_config.h>
 #include <aowis/map/terrain_provider.h>
 #include <aowis/map/download_coverage.h>
 
@@ -10,11 +11,13 @@
 
 
 #include <QByteArray>
+#include <QHash>
 #include <QMutex>
 #include <QString>
 #include <QVector>
 
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <vector>
@@ -116,6 +119,7 @@ public:
         QUrl integration_source_url;
         QString coverage_profile;
         DownloadCoverage download_coverage;
+        MapCascadeConfig cascade;
     };
 
     struct StoragePaths
@@ -130,6 +134,8 @@ public:
     ~TerrainData() override;
 
     bool initialize(QString *error_message);
+    // Share the HTTP server identity with raster cascading for loop detection.
+    void setCascadeInstanceId(const QByteArray &instance_id);
 
     bool isEnabled() const;
     bool isInitialized() const;
@@ -153,7 +159,8 @@ public:
     // Network-only stage used before CPU normalization for uncached tiles.
     TerrainProviderFetchResult acquireTileSources(
         const QString &dataset, const TerrainTileAddress &address,
-        const std::shared_ptr<std::atomic_bool> &cancel_requested = {}) const;
+        const std::shared_ptr<std::atomic_bool> &cancel_requested = {},
+        const QByteArray &cascade_trace = {}) const;
 
     // Acquire the highest-resolution point tile sources before CPU-only sampling.
     TerrainProviderFetchResult acquireElevationSources(
@@ -220,11 +227,20 @@ private:
     bool ensureNormalizedTileDirectory(const QString &path, QString *error_message) const;
     TerrainTileLookupResult readNormalizedTile(const QString &dataset,
                                                const TerrainTileAddress &address) const;
+    TerrainProviderFetchResult fetchNormalizedFromUpstreams(
+        const QString &dataset, const TerrainTileAddress &address,
+        const std::shared_ptr<std::atomic_bool> &cancel_requested,
+        const QByteArray &cascade_trace) const;
     TerrainTileLookupResult fetchAndStoreNormalizedTile(const QString &dataset,
                                                         const TerrainTileAddress &address,
                                                         bool allow_remote_fetch) const;
 
     Config config;
+    QByteArray cascade_instance_id;
+    mutable QMutex cascade_cooldown_mutex;
+    mutable QHash<QString, qint64> cascade_cooldown_until_ms;
+    std::atomic_uint64_t cascade_cancel_generation{0};
+    mutable std::atomic_int cascade_active{0};
     StoragePaths storage_paths;
     std::vector<std::unique_ptr<TerrainProvider>> providers;
     mutable QMutex normalized_directory_mutex;

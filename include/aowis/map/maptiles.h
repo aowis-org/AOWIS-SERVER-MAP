@@ -3,6 +3,7 @@
 
 #include <QObject>
 #include <aowis/map/map_provider.h>
+#include <aowis/map/map_cascade_config.h>
 #include <aowis/map/download_coverage.h>
 
 #include <QByteArray>
@@ -17,6 +18,7 @@
 #include <QThreadPool>
 #include <QString>
 #include <QStringList>
+#include <QVector>
 
 class TileHttpClient;
 
@@ -38,6 +40,7 @@ public:
         Ready,
         Pending,
         InvalidRequest,
+        Unavailable,
         ServerBusy
     };
 
@@ -62,14 +65,22 @@ public:
     ~MapTiles() override;
 
     void setRemoteFetchEnabled(bool enabled);
+    void setCascadeConfig(const Aowis::Map::MapCascadeConfig &config);
     void setPermanentDataDirectory(const QString &directory);
     void configureProviders(const QVector<Aowis::Map::MapProvider> &providers,
                             const Aowis::Map::DownloadCoverage &coverage,
                             const QString &default_coverage);
 
-    TileRequestResult getTile(const QString &provider, int z, int x, int y, const QString &key);
+    TileRequestResult getTile(const QString &provider, int z, int x, int y, const QString &key,
+                              const QByteArray &cascade_trace = {});
+    // A source digest binds a provider UUID to its actual imagery/style URL.
+    QByteArray rasterSourceFingerprint(const QString &provider) const;
+    // Reject malformed traces, exhausted hop budgets, and our own instance ID.
+    bool acceptsCascadeTrace(const QByteArray &trace) const;
+    QByteArray cascadeInstanceId() const { return this->cascade_instance_id; }
     // HTTP path: offload established cold disk hits without occupying the event loop.
-    TileRequestResult getTileForHttp(const QString &provider, int z, int x, int y, const QString &key);
+    TileRequestResult getTileForHttp(const QString &provider, int z, int x, int y, const QString &key,
+                                     const QByteArray &cascade_trace = {});
     int deleteTiles(const QString &provider, int zoom, int tile_x_min, int tile_x_max,
                     int tile_y_min, int tile_y_max);
     UpstreamActivity upstreamActivity() const;
@@ -84,13 +95,22 @@ private:
         std::atomic_bool invalidated{false};
     };
 
-    struct QueuedDownload
+    struct DownloadSource
     {
         QString url;
-        QString path;
+        QByteArray api_key;
+        bool cascade = false;
+    };
+
+    struct QueuedDownload
+    {
+        QString url; // First attempt: existing per-origin admission accounting.
         QString tile_path;
         QString canonical_key;
         QString response_key;
+        QByteArray source_fingerprint;
+        QByteArray cascade_trace;
+        QVector<DownloadSource> sources;
     };
 
     enum class DownloadScheduleStatus
@@ -105,6 +125,7 @@ private:
 
     DownloadScheduleStatus scheduleMapTileDownload(const QueuedDownload &download);
     void startMapTileDownload(const QueuedDownload &download);
+    void attemptMapTileDownload(const QueuedDownload &download, int source_index);
     void startQueuedDownloads();
     bool canStartDownloadLocked(const QueuedDownload &download) const;
     void markDownloadStartedLocked(const QueuedDownload &download);
@@ -119,6 +140,11 @@ private:
     QString fscache_base;
     QString permanent_data_directory;
     bool remote_fetch_enabled = true;
+    Aowis::Map::MapCascadeConfig cascade_config;
+    QByteArray cascade_instance_id;
+    // New requests check these short transient-failure cooldowns;
+    // permanent misses/auth failures do not suppress a healthy upstream.
+    QHash<QString, qint64> cascade_cooldown_until_ms;
     QHash<QString, Aowis::Map::MapProvider> configured_providers;
     // First-use URL fingerprint selection. Separates cache contents when an
     // administrator changes the upstream URL without changing the UUID.

@@ -34,6 +34,7 @@ add_library(aowis-server-map-core STATIC
     src/lib/copernicus_terrain_provider.h
     src/lib/terrain_data.cpp
     include/aowis/map/maptiles.h
+    include/aowis/map/map_cascade_config.h
     include/aowis/map/terrain_elevation.h
     include/aowis/map/terrain_tile.h
     include/aowis/map/terrain_provider.h
@@ -79,6 +80,13 @@ if(BUILD_TESTING)
     target_link_libraries(aowis-server-map-provider-limits-test PRIVATE AOWIS::Map)
     add_test(NAME aowis-server-map-provider-limits
              COMMAND aowis-server-map-provider-limits-test)
+    add_executable(aowis-server-map-raster-cascade-test
+        tests/test_map_raster_cascade.cpp
+    )
+    target_link_libraries(aowis-server-map-raster-cascade-test PRIVATE AOWIS::Map)
+    add_test(NAME aowis-server-map-raster-cascade
+             COMMAND aowis-server-map-raster-cascade-test)
+
     add_executable(aowis-server-map-cache-reuse-test
         tests/test_map_cache_reuse.cpp
     )
@@ -106,6 +114,13 @@ if(BUILD_TESTING)
         NAME aowis-server-map-terrain-tile-format
         COMMAND aowis-server-map-terrain-tile-format-test
     )
+
+    add_executable(aowis-server-map-terrain-cascade-test
+        tests/test_map_terrain_cascade.cpp
+    )
+    target_link_libraries(aowis-server-map-terrain-cascade-test PRIVATE AOWIS::Map)
+    add_test(NAME aowis-server-map-terrain-cascade
+             COMMAND aowis-server-map-terrain-cascade-test)
 
     add_executable(aowis-server-map-terrain-tile-delivery-test
         tests/test_terrain_tile_delivery.cpp
@@ -264,6 +279,16 @@ if(AOWIS_SERVER_MAP_BUILD_SERVER)
     )
 
     if(BUILD_TESTING)
+        add_executable(aowis-server-map-cascade-configuration-test
+            tests/test_map_cascade_configuration.cpp
+            src/server/configuration.cpp
+            src/server/configuration.h
+        )
+        target_link_libraries(aowis-server-map-cascade-configuration-test
+            PRIVATE AOWIS::Map Qt6::HttpServer)
+        add_test(NAME aowis-server-map-cascade-configuration
+                 COMMAND aowis-server-map-cascade-configuration-test)
+
         add_executable(aowis-server-map-provider-state-test
             tests/test_provider_state.cpp
             src/server/configuration.cpp
@@ -303,9 +328,11 @@ if(BUILD_TESTING)
     set(AOWIS_SERVER_MAP_TEST_TARGETS
         aowis-server-map-provider-limits-test
         aowis-server-map-cache-reuse-test
+        aowis-server-map-raster-cascade-test
         aowis-server-map-download-coverage-test
         aowis-server-map-terrain-tile-format-test
         aowis-server-map-terrain-tile-delivery-test
+        aowis-server-map-terrain-cascade-test
         aowis-server-map-terrain-provider-test
         aowis-server-map-copernicus-resume-http-test
         aowis-server-map-terrain-elevation-sampling-test
@@ -318,6 +345,7 @@ if(BUILD_TESTING)
         # Compiling only the unit tests misses API errors in server.cpp.
         # The native test target must compile the production executable too.
         list(APPEND AOWIS_SERVER_MAP_TEST_TARGETS
+            aowis-server-map-cascade-configuration-test
             aowis-server-map-provider-state-test
             aowis-server-map-terrain-singleflight-http-test
             aowis-server-map-server)
