@@ -49,6 +49,7 @@ class Server : public QObject
     friend class TerrainSingleFlightTestAccess;
     friend class TerrainZstdHttpTestAccess;
     friend class RasterJpegHttpTestAccess;
+    friend class MapCascadeChainTestAccess;
 
 public:
     struct Config
