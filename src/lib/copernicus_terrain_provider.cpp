@@ -584,10 +584,19 @@ SourceLoadResult downloadSourceTile(const QString &provider_cache_directory,
         return result;
     }
 
+    // Some Qt/network backends can finish a reply without a NetworkError when
+    // the peer closes after fewer bytes than its declared Content-Length.
+    // Treat that as an interrupted transfer too: verified 200/206 prefixes
+    // remain resumable, while incomplete data is never published as a GeoTIFF.
+    const bool truncated_response =
+        (http_status == 200 || http_status == 206) && valid_content_length &&
+        content_length > 0 && downloaded_bytes < content_length;
+
     // Preserve a failed full response only when the server identifies an
     // immutable entity and the expected size. Interrupted resumptions leave
     // their previously validated prefix untouched.
-    if (network_error != QNetworkReply::NoError || connection_expired || deadline_expired)
+    if (network_error != QNetworkReply::NoError || connection_expired ||
+        deadline_expired || truncated_response)
     {
         if (http_status == 200 && downloaded_bytes > 0 &&
             valid_content_length && content_length > downloaded_bytes &&

@@ -80,7 +80,8 @@ MockUpstream launchUpstream(int step, const QByteArray &payload)
         socket->flush();
         socket->waitForBytesWritten(5000);
         socket->disconnectFromHost();
-        socket->waitForDisconnected(2000);
+        if (socket->state() != QAbstractSocket::UnconnectedState)
+            socket->waitForDisconnected(2000);
         completed.set_value(range_ok);
     });
     mock.port = port.get();
@@ -148,7 +149,8 @@ MockUpstream launchRecoveryUpstream(int scenario, const QByteArray &payload)
         socket->flush();
         socket->waitForBytesWritten(5000);
         socket->disconnectFromHost();
-        socket->waitForDisconnected(2000);
+        if (socket->state() != QAbstractSocket::UnconnectedState)
+            socket->waitForDisconnected(2000);
         completed.set_value(headers_ok);
     });
     mock.port = port.get();
@@ -215,7 +217,8 @@ bool verifySlowNetwork(const QString &root, int scenario)
             }
         }
         socket->disconnectFromHost();
-        socket->waitForDisconnected(1000);
+        if (socket->state() != QAbstractSocket::UnconnectedState)
+            socket->waitForDisconnected(1000);
         completed.set_value(request_ok);
     });
     const quint16 upstream_port = port.get();
@@ -614,9 +617,16 @@ int main(int argc, char **argv)
             const qint64 expected = step == 0 ? 300 : 700;
             const auto state = Aowis::Map::Internal::loadCopernicusPartialState(
                 partial, metadata, 256LL * 1024LL * 1024LL);
-            if (!require(state.has_value() && state->downloaded_bytes == expected,
-                         "Interrupted bytes not preserved") ||
-                !require(!QFile::exists(source), "Incomplete source became visible"))
+            if (!state || state->downloaded_bytes != expected)
+            {
+                std::cerr << "Interrupted bytes not preserved at resume step " << step
+                          << ": expected=" << expected
+                          << ", partial_size=" << QFileInfo(partial).size()
+                          << ", metadata_exists=" << QFile::exists(metadata)
+                          << ", download_error=" << error.toStdString() << '\n';
+                return 1;
+            }
+            if (!require(!QFile::exists(source), "Incomplete source became visible"))
                 return 1;
         }
     }
