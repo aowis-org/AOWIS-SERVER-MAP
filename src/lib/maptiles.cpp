@@ -3,6 +3,7 @@
 #include "http_client_tilefetch.h"
 
 #include <QDebug>
+#include <QDateTime>
 #include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
@@ -16,6 +17,7 @@
 #include <QStandardPaths>
 #include <QStringList>
 #include <QUrl>
+#include <QUuid>
 
 namespace
 {
@@ -101,6 +103,7 @@ MapTiles::MapTiles(const QString &cache_base_directory, int maximum_active_downl
       maximum_active_downloads(qMax(1, maximum_active_downloads)),
       maximum_queued_downloads(qMax(0, maximum_queued_downloads))
 {
+    this->cascade_instance_id = QUuid::createUuid().toString(QUuid::WithoutBraces).toLatin1();
     this->cache_write_pool.setMaxThreadCount(2);
     this->cache_read_pool.setMaxThreadCount(2);
     configureProviders(Aowis::Map::defaultMapProviders(), {}, {});
@@ -122,6 +125,47 @@ void MapTiles::setPermanentDataDirectory(const QString &directory)
 void MapTiles::setRemoteFetchEnabled(bool enabled)
 {
     this->remote_fetch_enabled = enabled;
+}
+
+void MapTiles::setCascadeConfig(const Aowis::Map::MapCascadeConfig &config)
+{
+    this->cascade_config = config;
+}
+
+QByteArray MapTiles::rasterSourceFingerprint(const QString &provider) const
+{
+    const QHash<QString, Aowis::Map::MapProvider>::const_iterator source =
+        this->configured_providers.constFind(provider);
+    if (source == this->configured_providers.cend()) return {};
+    return QCryptographicHash::hash(source->url_template.toUtf8(),
+                                    QCryptographicHash::Sha256).toHex();
+}
+
+bool MapTiles::acceptsCascadeTrace(const QByteArray &trace) const
+{
+    if (trace.isEmpty()) return true;
+    // Eight total hops maximum. Strict ASCII syntax avoids header injection and
+    // forwards an unambiguous visited-instance set across all cascade levels.
+    if (trace.size() > 8 * 36 + 7) return false;
+    const QList<QByteArray> ids = trace.split(',');
+    if (ids.size() >= 8) return false;
+    QSet<QByteArray> visited;
+    for (const QByteArray &id : ids)
+    {
+        if (id.size() != 36 || id == this->cascade_instance_id || visited.contains(id))
+            return false;
+        for (int index = 0; index < id.size(); ++index)
+        {
+            const char character = id.at(index);
+            const bool hyphen = index == 8 || index == 13 || index == 18 || index == 23;
+            if (hyphen ? character != '-' :
+                !((character >= '0' && character <= '9') ||
+                  (character >= 'a' && character <= 'f')))
+                return false;
+        }
+        visited.insert(id);
+    }
+    return true;
 }
 
 void MapTiles::configureProviders(const QVector<Aowis::Map::MapProvider> &providers,
@@ -202,8 +246,11 @@ QString MapTiles::canonicalTileKey(const QString &provider, int zoom, int x, int
 }
 
 MapTiles::TileRequestResult MapTiles::getTile(const QString &provider, int z, int x, int y,
-                                              const QString &key)
+                                              const QString &key,
+                                              const QByteArray &cascade_trace)
 {
+    if (!acceptsCascadeTrace(cascade_trace))
+        return { TileRequestStatus::Unavailable, {} };
     // Reject invalid providers/coordinates before consulting either cache.
     // A warm RAM hit should not require providerCachePath(), which may perform
     // filesystem reads and writes when the provider variant is first resolved.
@@ -285,10 +332,37 @@ MapTiles::TileRequestResult MapTiles::getTile(const QString &provider, int z, in
         this->download_coverage.permitsTile(policy, z, wrapped_x, y);
     if (!may_fetch)
         return { TileRequestStatus::InvalidRequest, {} };
-
-    const QueuedDownload download = {
-        providerUrl(provider, z, wrapped_x, y), {}, tile_path, canonical_key, key
-    };
+    QueuedDownload download;
+    download.tile_path = tile_path;
+    download.canonical_key = canonical_key;
+    download.response_key = key;
+    download.source_fingerprint = rasterSourceFingerprint(provider);
+    download.cascade_trace = cascade_trace.isEmpty()
+        ? this->cascade_instance_id : cascade_trace + ',' + this->cascade_instance_id;
+    const QString path = QStringLiteral("/%1/%2/%3/%4.png")
+        .arg(provider).arg(z).arg(wrapped_x).arg(y);
+    const qint64 now_ms = QDateTime::currentMSecsSinceEpoch();
+    for (const Aowis::Map::MapCascadeUpstream &upstream : this->cascade_config.upstreams)
+    {
+        const QString upstream_origin = upstream.url.toString(
+            QUrl::RemovePath | QUrl::RemoveQuery | QUrl::RemoveFragment);
+        if (this->cascade_cooldown_until_ms.value(upstream_origin) > now_ms)
+            continue;
+        DownloadSource source;
+        source.url = upstream_origin + path;
+        source.api_key = upstream.api_key;
+        source.cascade = true;
+        download.sources.append(source);
+    }
+    if (this->cascade_config.allow_direct_fetch)
+    {
+        DownloadSource source;
+        source.url = providerUrl(provider, z, wrapped_x, y);
+        download.sources.append(source);
+    }
+    if (download.sources.isEmpty())
+        return { TileRequestStatus::Unavailable, {} };
+    download.url = download.sources.first().url;
     if (scheduleMapTileDownload(download) == DownloadScheduleStatus::QueueFull)
         return { TileRequestStatus::ServerBusy, {} };
 
@@ -296,8 +370,11 @@ MapTiles::TileRequestResult MapTiles::getTile(const QString &provider, int z, in
 }
 
 MapTiles::TileRequestResult MapTiles::getTileForHttp(
-    const QString &provider, int z, int x, int y, const QString &key)
+    const QString &provider, int z, int x, int y, const QString &key,
+    const QByteArray &cascade_trace)
 {
+    if (!acceptsCascadeTrace(cascade_trace))
+        return { TileRequestStatus::Unavailable, {} };
     if (!this->configured_providers.contains(provider) || z < 0 || z > 30)
         return { TileRequestStatus::InvalidRequest, {} };
     const int tile_count = 1 << z;
@@ -338,7 +415,7 @@ MapTiles::TileRequestResult MapTiles::getTileForHttp(
     }
 
     // Missing files follow the established download/coverage path unchanged.
-    if (read_path.isEmpty()) return getTile(provider, z, x, y, key);
+    if (read_path.isEmpty()) return getTile(provider, z, x, y, key, cascade_trace);
 
     // Coalesce disk reads for the same tile. Each HTTP request retains its own
     // response key; the first worker fans out completion to all requesters.
@@ -365,7 +442,7 @@ MapTiles::TileRequestResult MapTiles::getTileForHttp(
     const quint64 generation = this->cache_generation;
     QFutureWatcher<QByteArray> *watcher = new QFutureWatcher<QByteArray>(this);
     connect(watcher, &QFutureWatcher<QByteArray>::finished, this,
-            [this, watcher, read_key, canonical_key, generation, permanent, provider, z, wrapped_x, y, file_size]()
+            [this, watcher, read_key, canonical_key, generation, permanent, provider, z, wrapped_x, y, file_size, cascade_trace]()
     {
         this->pending_cache_read_bytes -= file_size;
         const QStringList request_keys = this->cache_reads_pending.take(read_key);
@@ -392,10 +469,11 @@ MapTiles::TileRequestResult MapTiles::getTileForHttp(
         // Fall back to the normal request path only for that genuine miss.
         for (const QString &response_key : request_keys)
         {
-            const TileRequestResult result = getTile(provider, z, wrapped_x, y, response_key);
+            const TileRequestResult result = getTile(provider, z, wrapped_x, y, response_key, cascade_trace);
             if (result.status == TileRequestStatus::Ready)
                 emit tileReady(response_key, result.data);
             else if (result.status == TileRequestStatus::InvalidRequest ||
+                     result.status == TileRequestStatus::Unavailable ||
                      result.status == TileRequestStatus::ServerBusy)
                 emit tileFailed(response_key, TileFailureReason::UpstreamError);
         }
@@ -682,7 +760,16 @@ QStringList MapTiles::takeResponseKeysLocked(const QueuedDownload &download)
 
 void MapTiles::startMapTileDownload(const QueuedDownload &download)
 {
-    TileHttpClient *rest = new TileHttpClient(this->network_manager, download.url, this);
+    attemptMapTileDownload(download, 0);
+}
+
+void MapTiles::attemptMapTileDownload(const QueuedDownload &download, int source_index)
+{
+    const DownloadSource &source = download.sources.at(source_index);
+    TileHttpClient *rest = new TileHttpClient(this->network_manager, source.url, this);
+    if (source.cascade)
+        rest->configureCascade(source.api_key, download.source_fingerprint,
+                               download.cascade_trace);
     {
         QMutexLocker locker(&this->downloads_mutex);
         this->downloads_active_clients.insert(download.canonical_key, rest);
@@ -764,18 +851,48 @@ void MapTiles::startMapTileDownload(const QueuedDownload &download)
         }));
     });
     connect(rest, &TileHttpClient::requestError, this,
-            [this, rest, download](TileHttpClient::RequestFailureReason reason, const QString &error)
+            [this, rest, download, source_index](TileHttpClient::RequestFailureReason reason, const QString &error)
     {
         if (reason == TileHttpClient::RequestFailureReason::Timeout)
             qWarning() << "Tile request timed out:" << download.response_key << error;
         else if (reason != TileHttpClient::RequestFailureReason::Cancelled)
             qWarning() << "Tile request failed:" << download.response_key << error;
 
+        // Temporarily skip unreachable origins for new tile requests. Do not
+        // quarantine 404, authentication or source-mismatch responses: they
+        // describe a particular request, not a transient server outage.
+        if (download.sources.at(source_index).cascade &&
+            (reason == TileHttpClient::RequestFailureReason::TransientError ||
+             reason == TileHttpClient::RequestFailureReason::Timeout))
+        {
+            const QUrl upstream_url(download.sources.at(source_index).url);
+            const QString upstream_origin = upstream_url.toString(
+                QUrl::RemovePath | QUrl::RemoveQuery | QUrl::RemoveFragment);
+            this->cascade_cooldown_until_ms.insert(
+                upstream_origin, QDateTime::currentMSecsSinceEpoch() + 5000);
+        }
+
+        // A failed attempt still owns the same active slot and joined waiters.
+        // Do not release that slot until all configured sources have failed.
+        bool invalidated = false;
+        {
+            QMutexLocker locker(&this->downloads_mutex);
+            invalidated = this->downloads_invalidated.contains(download.canonical_key);
+            if (this->downloads_active_clients.value(download.canonical_key) == rest)
+                this->downloads_active_clients.remove(download.canonical_key);
+        }
+        if (reason != TileHttpClient::RequestFailureReason::Cancelled && !invalidated &&
+            source_index + 1 < download.sources.size())
+        {
+            rest->deleteLater();
+            attemptMapTileDownload(download, source_index + 1);
+            return;
+        }
+
         QStringList response_keys;
         {
             QMutexLocker locker(&this->downloads_mutex);
             markDownloadFinishedLocked(download);
-            this->downloads_active_clients.remove(download.canonical_key);
             this->downloads_invalidated.remove(download.canonical_key);
             response_keys = takeResponseKeysLocked(download);
         }
@@ -791,7 +908,7 @@ void MapTiles::startMapTileDownload(const QueuedDownload &download)
         const UpstreamActivity activity = upstreamActivity();
         emit upstreamActivityChanged(activity.active, activity.queued);
     });
-    rest->get(download.path);
+    rest->get(QString());
 }
 
 void MapTiles::startQueuedDownloads()

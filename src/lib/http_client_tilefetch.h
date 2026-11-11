@@ -5,6 +5,7 @@
 
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QByteArray>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
@@ -17,6 +18,7 @@ public:
     enum class RequestFailureReason
     {
         UpstreamError,
+        TransientError,
         Timeout,
         InvalidResponse,
         Cancelled
@@ -26,6 +28,10 @@ public:
     explicit TileHttpClient(QNetworkAccessManager *network_manager, const QString &url_base,
                             QObject *parent = nullptr);
 
+    // Cascade requests are authenticated, source-bound, loop-tracked and
+    // redirect-restricted. Normal provider downloads remain unchanged.
+    void configureCascade(const QByteArray &api_key, const QByteArray &source_fingerprint,
+                          const QByteArray &visited);
     void get(const QString &endpoint);
     void post(const QString &endpoint, const QJsonObject &payload);
     void cancel();
@@ -43,6 +49,11 @@ private:
     QString url_base;
     QNetworkReply *active_reply = nullptr;
     bool cancel_requested = false;
+    bool cascade_request = false;
+    QByteArray cascade_api_key;
+    QByteArray cascade_source;
+    QByteArray cascade_visited;
+    void prepareRequest(QNetworkRequest *request) const;
 
 signals:
     void requestFinished(const QByteArray &data, bool may_store);

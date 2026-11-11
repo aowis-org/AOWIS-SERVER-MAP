@@ -412,6 +412,106 @@ bool MapServerConfiguration::loadConfigFile(const QString &path, Server::Config 
         return false;
     }
 
+    // Cascading configuration is shared with the embedded MAP core. Parse the
+    // named order explicitly instead of relying on QSettings child-group order.
+    if (!readBoolean(&settings, QStringLiteral("upstream/allow_direct_fetch"),
+                     &config->cascade.allow_direct_fetch, error_message) ||
+        !readBoolean(&settings, QStringLiteral("bandwidth/poor_internet_mode"),
+                     &config->cascade.poor_internet_mode, error_message) ||
+        !readBoolean(&settings, QStringLiteral("bandwidth/adaptive_compression"),
+                     &config->cascade.adaptive_compression, error_message))
+        return false;
+
+    if (settings.contains(QStringLiteral("bandwidth/jpeg_quality")))
+    {
+        if (!readPositiveInt(&settings, QStringLiteral("bandwidth/jpeg_quality"),
+                             100, &config->cascade.jpeg_quality, error_message))
+            return false;
+    }
+
+    config->cascade.upstreams.clear();
+    const QString configured_names = joinedValue(settings.value(QStringLiteral("upstream/servers")));
+    // Empty list means no upstreams; an empty entry *inside* a list is a
+    // configuration mistake, not a reason to silently change failover order.
+    const QStringList upstream_names = configured_names.trimmed().isEmpty()
+        ? QStringList() : configured_names.split(QLatin1Char(','), Qt::KeepEmptyParts);
+    QSet<QString> known_names;
+    QSet<QString> known_urls;
+    const QRegularExpression valid_upstream_name(
+        QStringLiteral("^[a-zA-Z][a-zA-Z0-9_-]{0,63}$"));
+    if (upstream_names.size() > 32)
+    {
+        *error_message = QStringLiteral("Too many MAP upstreams (maximum 32)");
+        return false;
+    }
+    for (const QString &raw_name : upstream_names)
+    {
+        const QString name = raw_name.trimmed();
+        if (!valid_upstream_name.match(name).hasMatch() || known_names.contains(name))
+        {
+            *error_message = QStringLiteral("Invalid or duplicate MAP upstream name: %1").arg(name);
+            return false;
+        }
+        known_names.insert(name);
+        const QString group = QStringLiteral("upstream.%1/").arg(name);
+        settings.beginGroup(QStringLiteral("upstream.%1").arg(name));
+        for (const QString &key : settings.childKeys())
+        {
+            if (key != QStringLiteral("url") && key != QStringLiteral("api_key"))
+            {
+                *error_message = QStringLiteral("Unknown MAP upstream setting: %1/%2")
+                                     .arg(group.left(group.size() - 1), key);
+                settings.endGroup();
+                return false;
+            }
+        }
+        settings.endGroup();
+        QString raw_url;
+        if (!readSingleString(&settings, group + QStringLiteral("url"), {},
+                              &raw_url, error_message))
+            return false;
+        const QUrl url(raw_url.trimmed(), QUrl::StrictMode);
+        const QString scheme = url.scheme().toLower();
+        if (!url.isValid() || (scheme != QStringLiteral("https") &&
+                               scheme != QStringLiteral("http")) ||
+            url.host().isEmpty() || !url.userInfo().isEmpty() ||
+            !url.query().isEmpty() || !url.fragment().isEmpty() ||
+            (url.path() != QString() && url.path() != QStringLiteral("/")) ||
+            url.port(-1) == 0)
+        {
+            *error_message = QStringLiteral("Invalid MAP upstream URL for '%1' (use HTTP(S) origin only)")
+                                 .arg(name);
+            return false;
+        }
+        const QString normalized_url = url.toString(QUrl::RemovePath | QUrl::RemoveQuery |
+                                                      QUrl::RemoveFragment).toLower();
+        if (known_urls.contains(normalized_url))
+        {
+            *error_message = QStringLiteral("Duplicate MAP upstream URL for '%1'").arg(name);
+            return false;
+        }
+        known_urls.insert(normalized_url);
+        QString api_key;
+        if (!readSingleString(&settings, group + QStringLiteral("api_key"), {},
+                              &api_key, error_message))
+            return false;
+        Aowis::Map::MapCascadeUpstream upstream;
+        upstream.name = name;
+        upstream.url = url;
+        upstream.api_key = api_key.toUtf8();
+        config->cascade.upstreams.append(upstream);
+    }
+    for (const QString &group : settings.childGroups())
+    {
+        if (group.startsWith(QStringLiteral("upstream.")) &&
+            !known_names.contains(group.mid(9)))
+        {
+            *error_message = QStringLiteral("MAP upstream group is not listed in [upstream]/servers: %1")
+                                 .arg(group);
+            return false;
+        }
+    }
+
     if (settings.contains(QStringLiteral("storage/permanent_data_directory")))
     {
         const QString value = settings.value(QStringLiteral("storage/permanent_data_directory"))
@@ -661,6 +761,14 @@ QByteArray MapServerConfiguration::defaultConfigText()
         "remote_fetch_enabled=true\nmax_active_downloads=%4\ncache_directory=\n"
         "; Empty = unrestricted; example below: coverage=projects\n"
         "coverage=\n\n"
+        "[upstream]\n"
+        "; Ordered names from [upstream.NAME], e.g. servers=primary,backup\n"
+        "servers=\nallow_direct_fetch=true\n\n"
+        "; [upstream.primary]\n"
+        "; url=https://maps.example.org\n"
+        "; api_key=\n\n"
+        "[bandwidth]\n"
+        "poor_internet_mode=false\njpeg_quality=75\nadaptive_compression=true\n\n"
         "[terrain]\n"
         "enabled=true\nremote_fetch_enabled=true\n"
         "default_dataset=%5\nmaximum_jobs=%6\nmaximum_workers=%7\nmaximum_remote_workers=%8\n"

@@ -142,6 +142,7 @@ The package installs a dedicated `aowis-server-map` systemd service, preserves e
 | [Debian package build](docs/debian-package-build.md) | Docker builds, isolated installation and upgrade qualification |
 | [Configuration](docs/configuration.md) | INI, CLI, providers, region/zoom policies, state-file precedence |
 | [HTTP API](docs/http-api.md) | Requests, responses, authentication, cache and upstream operations |
+| [MAP-to-MAP cascading (planned)](docs/map-cascading.md) | Ordered upstream failover, optional direct fetch, low-bandwidth tile transfer and acceptance criteria; **not implemented yet** |
 | [Architecture and resource limits](docs/architecture.md) | Execution model, concurrency, memory, cancellation, test and benchmark tools |
 | [Terrain sources](docs/terrain-providers.md) | Copernicus GLO-30, cache fill, resumable download, data provenance |
 | [Elevation and DEM contract](docs/terrain-elevation-contract.md) | Coordinate/datum rules, sampling, error statuses and analysis data |

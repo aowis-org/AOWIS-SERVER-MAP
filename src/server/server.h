@@ -29,6 +29,7 @@
 #include "terrain_byte_admission.h"
 
 #include <aowis/map/maptiles.h>
+#include <aowis/map/map_cascade_config.h>
 #include <aowis/map/map_provider.h>
 #include <aowis/map/download_coverage.h>
 
@@ -60,6 +61,7 @@ public:
         QUrl terrain_integration_source_url;
         int maximum_active_downloads = 32;
         bool map_remote_fetch_enabled = true;
+        Aowis::Map::MapCascadeConfig cascade;
         QString provider_state_file;
         QString cache_directory;
         QString permanent_data_directory;

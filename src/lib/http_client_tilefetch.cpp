@@ -62,6 +62,28 @@ TileHttpClient::TileHttpClient(QNetworkAccessManager *network_manager, const QSt
     Q_ASSERT(this->network_manager != nullptr);
 }
 
+void TileHttpClient::configureCascade(const QByteArray &api_key,
+                                      const QByteArray &source_fingerprint,
+                                      const QByteArray &visited)
+{
+    this->cascade_request = true;
+    this->cascade_api_key = api_key;
+    this->cascade_source = source_fingerprint;
+    this->cascade_visited = visited;
+}
+
+void TileHttpClient::prepareRequest(QNetworkRequest *request) const
+{
+    if (!this->cascade_request) return;
+    request->setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                          QNetworkRequest::ManualRedirectPolicy);
+    request->setTransferTimeout(10000);
+    if (!this->cascade_api_key.isEmpty())
+        request->setRawHeader("X-API-Key", this->cascade_api_key);
+    request->setRawHeader("X-AOWIS-Raster-Source", this->cascade_source);
+    request->setRawHeader("X-AOWIS-Cascade-Visited", this->cascade_visited);
+}
+
 void TileHttpClient::get(const QString &endpoint)
 {
     this->cancel_requested = false;
@@ -72,6 +94,7 @@ void TileHttpClient::get(const QString &endpoint)
     request.setRawHeader("User-Agent", "aowis-server-map/1.0 (https://github.com/aowis-org/AOWIS-SERVER-MAP)");
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/octet-stream");
     request.setRawHeader("Accept", "*/*");
+    prepareRequest(&request);
 
     QNetworkReply *reply = this->network_manager->get(request);
     this->active_reply = reply;
@@ -105,6 +128,7 @@ void TileHttpClient::getAttempt(const QString &endpoint, int attempt)
     request.setRawHeader("User-Agent", "aowis-server-map/1.0 (https://github.com/aowis-org/AOWIS-SERVER-MAP)");
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/octet-stream");
     request.setRawHeader("Accept", "*/*");
+    prepareRequest(&request);
     request.setTransferTimeout(transfer_timeout_ms);
     request.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
 
@@ -222,7 +246,9 @@ void TileHttpClient::handleReply(QNetworkReply *reply, bool validate_tile_respon
 
     if (network_error != QNetworkReply::NoError)
     {
-        emit requestError(RequestFailureReason::UpstreamError, reply->errorString());
+        emit requestError(this->cascade_request ? RequestFailureReason::TransientError
+                                                : RequestFailureReason::UpstreamError,
+                          reply->errorString());
         reply->deleteLater();
         return;
     }
@@ -261,7 +287,9 @@ void TileHttpClient::handleReply(QNetworkReply *reply, bool validate_tile_respon
 
     if (reply->error() != QNetworkReply::NoError)
     {
-        emit requestError(RequestFailureReason::UpstreamError, reply->errorString());
+        emit requestError(this->cascade_request ? RequestFailureReason::TransientError
+                                                : RequestFailureReason::UpstreamError,
+                          reply->errorString());
         reply->deleteLater();
         return;
     }
@@ -283,6 +311,16 @@ void TileHttpClient::handleReply(QNetworkReply *reply, bool validate_tile_respon
     const QByteArray cache_control = reply->rawHeader("Cache-Control").toLower();
     const bool may_store = !cache_control.contains("no-store") &&
                            !cache_control.contains("private");
+    // A MAP-to-MAP tile must be a complete successful representation.
+    // In particular, never treat 202 (still fetching) or 206 as image data.
+    if (this->cascade_request && status_code != 200)
+    {
+        emit requestError(status_code >= 500 ? RequestFailureReason::TransientError
+                                              : RequestFailureReason::UpstreamError,
+                          QStringLiteral("MAP upstream returned HTTP %1").arg(status_code));
+        reply->deleteLater();
+        return;
+    }
     if (status_code < 200 || status_code >= 300)
     {
         emit requestError(RequestFailureReason::UpstreamError,
@@ -292,6 +330,26 @@ void TileHttpClient::handleReply(QNetworkReply *reply, bool validate_tile_respon
     }
 
     const QByteArray data = reply->readAll();
+    if (validate_tile_response && this->cascade_request)
+    {
+        bool length_ok = false;
+        const qint64 expected_length = reply->rawHeader("Content-Length").toLongLong(&length_ok);
+        if (length_ok && (expected_length < 0 || expected_length != data.size()))
+        {
+            emit requestError(RequestFailureReason::InvalidResponse,
+                              QStringLiteral("Truncated MAP upstream raster tile response"));
+            reply->deleteLater();
+            return;
+        }
+    }
+    if (validate_tile_response && this->cascade_request &&
+        reply->rawHeader("X-AOWIS-Raster-Source") != this->cascade_source)
+    {
+        emit requestError(RequestFailureReason::InvalidResponse,
+                          QStringLiteral("MAP upstream raster source/style mismatch or missing identity"));
+        reply->deleteLater();
+        return;
+    }
     if (validate_tile_response)
     {
         if (data.isEmpty())
