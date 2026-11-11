@@ -2,6 +2,7 @@
 
 #include <aowis/map/terrain_data.h>
 #include <aowis/map/terrain_dataset.h>
+#include <aowis/map/terrain_transfer.h>
 
 #include <QDebug>
 #if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
@@ -95,6 +96,51 @@ void setTerrainRevisionHeader(QHttpServerResponse &response)
 #else
     response.setHeader("X-AOWIS-Terrain-Revision", revision);
 #endif
+}
+
+// Mark every canonical tile representation as varying with compression
+// negotiation. Never change the underlying normalized tile cache.
+void setTerrainTransferHeaders(QHttpServerResponse &response, bool compressed)
+{
+#if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
+    QHttpHeaders headers = response.headers();
+    headers.replaceOrAppend("Vary", "Accept-Encoding");
+    if (compressed)
+        headers.replaceOrAppend("Content-Encoding", "zstd");
+    response.setHeaders(std::move(headers));
+#else
+    response.setHeader("Vary", "Accept-Encoding");
+    if (compressed)
+        response.setHeader("Content-Encoding", "zstd");
+#endif
+}
+
+bool requestAcceptsTerrainZstd(const QHttpServerRequest *request)
+{
+    if (request == nullptr) return false;
+    // Qt may advertise zstd automatically for ordinary GUI HTTP requests.
+    // Only MAP-to-MAP requests carry a nonempty, validated cascade trace;
+    // never change the canonical terrain representation sent to GUI clients.
+    if (request->value("x-aowis-cascade-visited").isEmpty()) return false;
+    const QList<QByteArray> encodings = request->value("accept-encoding").toLower().split(',');
+    for (const QByteArray &encoding : encodings)
+    {
+        const QList<QByteArray> attributes = encoding.split(';');
+        if (attributes.first().trimmed() != "zstd") continue;
+        bool disabled = false;
+        for (qsizetype index = 1; index < attributes.size(); ++index)
+        {
+            const QByteArray parameter = attributes.at(index).trimmed();
+            if (parameter.startsWith("q="))
+            {
+                bool valid = false;
+                const double quality = parameter.mid(2).toDouble(&valid);
+                if (!valid || quality <= 0.0) disabled = true;
+            }
+        }
+        if (!disabled) return true;
+    }
+    return false;
 }
 
 // Upstream raster providers deliver PNG, JPEG or WebP (e.g. ArcGIS imagery
@@ -404,6 +450,7 @@ void Server::attachTerrainWaiter(const PendingPromise &promise,
 void Server::forgetTerrainWaiter(const PendingPromise &promise)
 {
     this->terrain_waiter_sockets.remove(promise.data());
+    this->terrain_zstd_waiters.remove(promise.data());
 }
 
 void Server::abandonTerrainWaiters(QTcpSocket *socket)
@@ -436,6 +483,7 @@ void Server::abandonTerrainWaiters(QTcpSocket *socket)
                 if (this->terrain_waiter_sockets.value(promise.data(), nullptr) != socket)
                     continue;
                 this->terrain_waiter_sockets.remove(promise.data());
+                this->terrain_zstd_waiters.remove(promise.data());
                 promises.removeAt(index);
                 --this->pending_terrain_tile_count;
                 promise->addResult(QHttpServerResponse(
@@ -519,6 +567,7 @@ Server::~Server()
     this->elevation_cancellations.clear();
     this->grid_cancellations.clear();
     this->terrain_waiter_sockets.clear();
+    this->terrain_zstd_waiters.clear();
     this->terrain_client_sockets.clear();
 
     for (const PendingPromises &promises : std::as_const(pending))
@@ -610,6 +659,8 @@ QFuture<QHttpServerResponse> Server::submitTerrainTile(
     promise->start();
     QFuture<QHttpServerResponse> future = promise->future();
     this->pending_terrain_tiles[key].append(promise);
+    if (requestAcceptsTerrainZstd(client_request))
+        this->terrain_zstd_waiters.insert(promise.data());
     attachTerrainWaiter(promise, client_request);
     ++this->pending_terrain_tile_count;
     if (existing)
@@ -642,14 +693,25 @@ QFuture<QHttpServerResponse> Server::submitTerrainTile(
             this->tile_cancellations.remove(key);
             const PendingPromises waiters = this->pending_terrain_tiles.take(key);
             this->pending_terrain_tile_count -= waiters.size();
+            bool compression_attempted = false;
+            std::optional<QByteArray> compressed;
             for (const PendingPromise &waiter : waiters)
             {
+                const bool wants_zstd = this->terrain_zstd_waiters.contains(waiter.data());
                 forgetTerrainWaiter(waiter);
                 if (result.status == Aowis::Map::TerrainTileLookupStatus::Ready)
                 {
+                    if (wants_zstd && !compression_attempted)
+                    {
+                        compressed = Aowis::Map::compressTerrainTileForTransfer(result.data);
+                        compression_attempted = true;
+                    }
+                    const bool use_zstd = wants_zstd && compressed.has_value();
                     QHttpServerResponse response(
-                        Aowis::Map::terrainTileMimeType().toUtf8(), result.data);
+                        Aowis::Map::terrainTileMimeType().toUtf8(),
+                        use_zstd ? compressed.value() : result.data);
                     setTerrainRevisionHeader(response);
+                    setTerrainTransferHeaders(response, use_zstd);
                     waiter->addResult(std::move(response));
                 }
                 else

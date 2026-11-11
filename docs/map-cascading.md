@@ -1,6 +1,6 @@
 # MAP-to-MAP cascading (implementation specification)
 
-**Status:** staged implementation. Steps 1–3 (configuration/policy, raster cascading, normalized terrain cascading) implemented; bandwidth codecs and Standalone settings are pending. Scope is raster map imagery and normalized 3D globe terrain only. Native Copernicus GeoTIFF replication, point-elevation and hydrology/analysis-grid behavior are out of scope.
+**Status:** staged implementation. Steps 1–4 (configuration/policy, raster/terrain cascading, terrain zstd transport) implemented; adaptive raster compression and Standalone settings are pending. Scope is raster map imagery and normalized 3D globe terrain only. Native Copernicus GeoTIFF replication, point-elevation and hydrology/analysis-grid behavior are out of scope.
 
 ## Configuration and acquisition order
 
@@ -50,7 +50,7 @@ A downstream with `poor_internet_mode=true` requests optimized representations f
 
 **Raster imagery:** for an eligible *opaque PNG* tile, the upstream may respond with a libjpeg-turbo JPEG at the requested quality; its actual `Content-Type` must be `image/jpeg` even though the current XYZ URL ends in `.png`. Otherwise send the original bytes and MIME type. Never flatten transparency or re-encode an existing JPEG (including one received from another MAP server). Preserve existing WebP/JPEG unless a later measured, explicitly lossless-safe optimization is introduced. Honor upstream cache restrictions and provider-specific opt-outs from lossy transfer.
 
-**Terrain:** losslessly zstd-compress the existing canonical `.aowterrain` bytes if the compressed representation is smaller; otherwise send them unchanged. Use a negotiated HTTP content encoding (e.g. `Accept-Encoding: zstd` / `Content-Encoding: zstd`), **not** a new terrain tile format. The downstream decompresses with strict byte/size limits, validates dataset, XYZ, format/normalization revision and CRC, then atomically caches canonical bytes. Do not mix incompatible normalization revisions or silently accept a different terrain dataset.
+**Terrain:** losslessly zstd-compress the existing canonical `.aowterrain` bytes if the compressed representation is smaller; otherwise send them unchanged. Use negotiated HTTP content encoding: a MAP-to-MAP request must include both a nonempty, validated `X-AOWIS-Cascade-Visited` trace and `Accept-Encoding: zstd`; only then may the reply carry `Content-Encoding: zstd`. `Accept-Encoding` alone is insufficient because Qt GUI clients may send it automatically. Ordinary GUI responses remain uncompressed. This is **not** a new terrain tile format. The downstream decompresses with strict byte/size limits, validates dataset, XYZ, format/normalization revision and CRC, then atomically caches canonical bytes. Do not mix incompatible normalization revisions or silently accept a different terrain dataset.
 
 The downstream must verify raster provider identity **and effective imagery source/style** before accepting an upstream raster tile; matching UUID alone is not sufficient if provider configurations differ. Keep upstream read authentication distinct from credentials exposed to ordinary GUI clients.
 
