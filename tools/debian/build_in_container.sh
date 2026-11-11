@@ -10,6 +10,7 @@ trap 'rm -rf -- "$scratch"' EXIT
 # package. The checked-out source is mounted read-only by the Docker wrapper.
 tar -C /source \
     --exclude='./.git' \
+    --exclude='*/.git' \
     --exclude='./build' \
     --exclude='./build-*' \
     --exclude='./dist' \

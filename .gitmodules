@@ -1,0 +1,3 @@
+[submodule "external/AOWIS-CONFIG"]
+	path = external/AOWIS-CONFIG
+	url = https://github.com/aowis-org/AOWIS-CONFIG.git

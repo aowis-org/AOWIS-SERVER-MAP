@@ -103,6 +103,13 @@ For cache layout, limits, locking, cancellation and memory behavior see [Archite
 
 ## Build and qualification
 
+Initialize the pinned [AOWIS-CONFIG](https://github.com/aowis-org/AOWIS-CONFIG) submodule before building:
+
+```bash
+./git_submodule_init.sh
+```
+
+
 ```bash
 ./compile_linux_tests.sh --debug       # build server + native tests, run Debug tests
 ./compile_linux_tests.sh --release     # build server + native tests, run Release tests

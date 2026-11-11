@@ -184,6 +184,7 @@ mkdir -p "$source_directory" "$dist_directory"
 
 tar \
     --exclude='./.git' \
+    --exclude='*/.git' \
     --exclude='./build-linux' \
     --exclude='./build-deb' \
     --exclude='./dist' \

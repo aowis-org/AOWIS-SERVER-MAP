@@ -9,6 +9,17 @@ project(
 
 set(CMAKE_AUTOMOC ON)
 
+# The standalone MAP server owns its CONFIG dependency. When MAP is embedded
+# in another AOWIS project (e.g. GUI), reuse that project's existing target.
+if(NOT TARGET aowis::config)
+    if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/AOWIS-CONFIG/CMakeLists.txt")
+        message(FATAL_ERROR
+            "AOWIS-CONFIG submodule is missing. Run ./git_submodule_init.sh "
+            "or git submodule update --init -- external/AOWIS-CONFIG")
+    endif()
+    add_subdirectory(external/AOWIS-CONFIG EXCLUDE_FROM_ALL)
+endif()
+
 option(
     AOWIS_SERVER_MAP_BUILD_SERVER
     "Build AOWIS map REST server executable"
@@ -64,6 +75,7 @@ target_link_libraries(aowis-server-map-core
         Qt6::Core
         Qt6::Network
         Qt6::Concurrent
+        aowis::config
     PRIVATE
         TIFF::TIFF
         PkgConfig::AOWIS_ZSTD
@@ -327,6 +339,20 @@ if(AOWIS_SERVER_MAP_BUILD_SERVER)
             PRIVATE cxx_std_20)
         add_test(NAME aowis-server-map-provider-state
                  COMMAND aowis-server-map-provider-state-test)
+        add_executable(aowis-server-map-cascade-chain-test
+            tests/test_map_cascade_chain.cpp
+            src/server/server.cpp
+            src/server/server.h
+            src/server/configuration.cpp
+            src/server/configuration.h)
+        target_include_directories(aowis-server-map-cascade-chain-test
+            PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/server")
+        target_link_libraries(aowis-server-map-cascade-chain-test
+            PRIVATE AOWIS::Map Qt6::HttpServer Qt6::Concurrent PNG::PNG)
+        add_test(NAME aowis-server-map-cascade-chain
+            COMMAND aowis-server-map-cascade-chain-test)
+        set_tests_properties(aowis-server-map-cascade-chain
+            PROPERTIES TIMEOUT 60)
         add_executable(aowis-server-map-raster-jpeg-http-test
             tests/test_raster_jpeg_http.cpp
             src/server/server.cpp
@@ -404,6 +430,7 @@ if(BUILD_TESTING)
             aowis-server-map-provider-state-test
             aowis-server-map-terrain-singleflight-http-test
             aowis-server-map-terrain-zstd-http-test
+            aowis-server-map-cascade-chain-test
             aowis-server-map-raster-jpeg-http-test
             aowis-server-map-server)
     endif()
