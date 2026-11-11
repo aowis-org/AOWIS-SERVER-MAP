@@ -17,6 +17,9 @@ option(
 
 find_package(Qt6 REQUIRED COMPONENTS Core Network Concurrent)
 find_package(TIFF REQUIRED)
+find_package(PNG REQUIRED)
+find_path(AOWIS_TURBOJPEG_INCLUDE_DIR NAMES turbojpeg.h REQUIRED)
+find_library(AOWIS_TURBOJPEG_LIBRARY NAMES turbojpeg REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(AOWIS_ZSTD REQUIRED IMPORTED_TARGET libzstd)
 
@@ -31,6 +34,8 @@ add_library(aowis-server-map-core STATIC
     src/lib/terrain_elevation.cpp
     src/lib/terrain_tile.cpp
     src/lib/terrain_transfer.cpp
+    src/lib/raster_transfer.cpp
+    include/aowis/map/raster_transfer.h
     include/aowis/map/terrain_transfer.h
     src/lib/terrain_provider.cpp
     src/lib/terrain_dataset.cpp
@@ -51,6 +56,7 @@ target_include_directories(aowis-server-map-core
         "${CMAKE_CURRENT_SOURCE_DIR}/include"
     PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src/lib"
+        "${AOWIS_TURBOJPEG_INCLUDE_DIR}"
 )
 
 target_link_libraries(aowis-server-map-core
@@ -61,6 +67,8 @@ target_link_libraries(aowis-server-map-core
     PRIVATE
         TIFF::TIFF
         PkgConfig::AOWIS_ZSTD
+        PNG::PNG
+        "${AOWIS_TURBOJPEG_LIBRARY}"
 )
 
 target_compile_features(aowis-server-map-core
@@ -85,6 +93,12 @@ if(BUILD_TESTING)
     target_link_libraries(aowis-server-map-provider-limits-test PRIVATE AOWIS::Map)
     add_test(NAME aowis-server-map-provider-limits
              COMMAND aowis-server-map-provider-limits-test)
+    add_executable(aowis-server-map-raster-transfer-test
+        tests/test_raster_transfer.cpp)
+    target_link_libraries(aowis-server-map-raster-transfer-test
+        PRIVATE AOWIS::Map PNG::PNG)
+    add_test(NAME aowis-server-map-raster-transfer
+             COMMAND aowis-server-map-raster-transfer-test)
     add_executable(aowis-server-map-raster-cascade-test
         tests/test_map_raster_cascade.cpp
     )
@@ -313,6 +327,18 @@ if(AOWIS_SERVER_MAP_BUILD_SERVER)
             PRIVATE cxx_std_20)
         add_test(NAME aowis-server-map-provider-state
                  COMMAND aowis-server-map-provider-state-test)
+        add_executable(aowis-server-map-raster-jpeg-http-test
+            tests/test_raster_jpeg_http.cpp
+            src/server/server.cpp
+            src/server/server.h
+            src/server/configuration.cpp
+            src/server/configuration.h)
+        target_include_directories(aowis-server-map-raster-jpeg-http-test
+            PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/server")
+        target_link_libraries(aowis-server-map-raster-jpeg-http-test
+            PRIVATE AOWIS::Map Qt6::HttpServer Qt6::Concurrent PNG::PNG)
+        add_test(NAME aowis-server-map-raster-jpeg-http
+            COMMAND aowis-server-map-raster-jpeg-http-test)
         add_executable(aowis-server-map-terrain-zstd-http-test
             tests/test_terrain_zstd_http.cpp
             src/server/server.cpp
@@ -356,6 +382,7 @@ if(BUILD_TESTING)
         aowis-server-map-provider-limits-test
         aowis-server-map-cache-reuse-test
         aowis-server-map-raster-cascade-test
+        aowis-server-map-raster-transfer-test
         aowis-server-map-download-coverage-test
         aowis-server-map-terrain-tile-format-test
         aowis-server-map-terrain-tile-delivery-test
@@ -377,6 +404,7 @@ if(BUILD_TESTING)
             aowis-server-map-provider-state-test
             aowis-server-map-terrain-singleflight-http-test
             aowis-server-map-terrain-zstd-http-test
+            aowis-server-map-raster-jpeg-http-test
             aowis-server-map-server)
     endif()
     add_executable(aowis-server-map-terrain-admission-test

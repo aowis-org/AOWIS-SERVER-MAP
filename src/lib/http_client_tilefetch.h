@@ -31,7 +31,8 @@ public:
     // Cascade requests are authenticated, source-bound, loop-tracked and
     // redirect-restricted. Normal provider downloads remain unchanged.
     void configureCascade(const QByteArray &api_key, const QByteArray &source_fingerprint,
-                          const QByteArray &visited);
+                          const QByteArray &visited, bool poor_internet_mode = false,
+                          int jpeg_quality = 75);
     void get(const QString &endpoint);
     void post(const QString &endpoint, const QJsonObject &payload);
     void cancel();
@@ -53,6 +54,8 @@ private:
     QByteArray cascade_api_key;
     QByteArray cascade_source;
     QByteArray cascade_visited;
+    bool cascade_poor_internet = false;
+    int cascade_jpeg_quality = 75;
     void prepareRequest(QNetworkRequest *request) const;
 
 signals:

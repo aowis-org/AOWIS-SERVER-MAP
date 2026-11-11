@@ -17,6 +17,7 @@
 #include <QTcpSocket>
 #include <QSharedPointer>
 #include <QSet>
+#include <QSemaphore>
 #include <QString>
 #include <QTcpServer>
 #include <QThreadPool>
@@ -31,6 +32,7 @@
 
 #include <aowis/map/maptiles.h>
 #include <aowis/map/map_cascade_config.h>
+#include <aowis/map/raster_transfer.h>
 #include <aowis/map/map_provider.h>
 #include <aowis/map/download_coverage.h>
 
@@ -46,6 +48,7 @@ class Server : public QObject
     Q_OBJECT
     friend class TerrainSingleFlightTestAccess;
     friend class TerrainZstdHttpTestAccess;
+    friend class RasterJpegHttpTestAccess;
 
 public:
     struct Config
@@ -115,6 +118,8 @@ private:
     void forgetTerrainWaiter(const PendingPromise &promise);
     bool appendPendingPromise(const QString &key, const PendingPromise &promise);
     PendingPromises takePendingPromises(const QString &key);
+    void completeRasterPromises(const PendingPromises &promises, const QByteArray &data,
+                                const QByteArray &source, int zoom, int requested_quality);
 
     Config config;
     QHttpServer http;
@@ -122,6 +127,9 @@ private:
     QThreadPool terrain_worker_pool;
     // Slow source acquisition is isolated from cached terrain processing.
     QThreadPool terrain_remote_pool;
+    QThreadPool raster_encode_pool;
+    QSemaphore raster_encode_admission{2};
+    Aowis::Map::RasterTransferOptimizer raster_transfer;
     TerrainAdmission terrain_admission;
     // Bounds queued and running remote-capable jobs independently of all terrain jobs.
     TerrainAdmission terrain_remote_admission;
@@ -147,6 +155,8 @@ private:
     int pending_terrain_tile_count = 0;
     QMutex mutex_pending;
     QHash<QString, PendingPromises> connections_pending;
+    // 0 means an ordinary client; otherwise the requested JPEG quality.
+    QHash<QPromise<QHttpServerResponse> *, int> raster_transfer_waiters;
     int pending_request_count;
     bool shutting_down = false;
 

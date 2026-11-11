@@ -250,7 +250,9 @@ bool readMapProviderCatalog(QSettings *settings, Server::Config *config,
             }
             if (!readBoolean(settings, QStringLiteral("enabled"), &provider.enabled, error_message) ||
                 !readBoolean(settings, QStringLiteral("remote_fetch_enabled"),
-                             &provider.remote_fetch_enabled, error_message))
+                             &provider.remote_fetch_enabled, error_message) ||
+                !readBoolean(settings, QStringLiteral("allow_lossy_transfer"),
+                             &provider.allow_lossy_transfer, error_message))
             {
                 settings->endGroup();
                 return false;
@@ -799,7 +801,8 @@ QByteArray MapServerConfiguration::defaultConfigText()
         "; Deleting/commenting one of these sections removes that default provider.\n"
         "[map_provider.0381bc44-67e9-5af9-aeb0-023ccba36658]\nname=OpenStreetMap\n"
         "url=https://tile.openstreetmap.org/{z}/{x}/{y}.png\n"
-        "min_zoom=0\nmax_zoom=19\nenabled=true\nremote_fetch_enabled=true\n\n"
+        "min_zoom=0\nmax_zoom=19\nenabled=true\nremote_fetch_enabled=true\n"
+        "; allow_lossy_transfer=false to protect fine map labels\n\n"
         "[map_provider.49bda1b9-15aa-55e6-8933-2172c785e775]\nname=CyclOSM\n"
         "url=https://{s}.tile-cyclosm.openstreetmap.fr/cyclosm/{z}/{x}/{y}.png\n"
         "min_zoom=0\nmax_zoom=20\nenabled=true\nremote_fetch_enabled=true\n\n"
@@ -981,6 +984,9 @@ bool MapServerConfiguration::saveMapProvidersToState(const QString &path,
                     QLatin1Char('\n'));
         text.append(QStringLiteral("remote_fetch_enabled=") +
                     (provider.remote_fetch_enabled ? QStringLiteral("true") : QStringLiteral("false")) +
+                    QLatin1Char('\n'));
+        text.append(QStringLiteral("allow_lossy_transfer=") +
+                    (provider.allow_lossy_transfer ? QStringLiteral("true") : QStringLiteral("false")) +
                     QLatin1Char('\n'));
         if (!provider.coverage.isEmpty())
             text.append(QStringLiteral("coverage=") + iniQuotedValue(provider.coverage) +

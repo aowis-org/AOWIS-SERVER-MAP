@@ -141,6 +141,13 @@ QByteArray MapTiles::rasterSourceFingerprint(const QString &provider) const
                                     QCryptographicHash::Sha256).toHex();
 }
 
+bool MapTiles::allowsLossyRasterTransfer(const QString &provider) const
+{
+    const QHash<QString, Aowis::Map::MapProvider>::const_iterator found =
+        this->configured_providers.constFind(provider);
+    return found != this->configured_providers.constEnd() && found->allow_lossy_transfer;
+}
+
 bool MapTiles::acceptsCascadeTrace(const QByteArray &trace) const
 {
     if (trace.isEmpty()) return true;
@@ -769,7 +776,8 @@ void MapTiles::attemptMapTileDownload(const QueuedDownload &download, int source
     TileHttpClient *rest = new TileHttpClient(this->network_manager, source.url, this);
     if (source.cascade)
         rest->configureCascade(source.api_key, download.source_fingerprint,
-                               download.cascade_trace);
+                               download.cascade_trace, this->cascade_config.poor_internet_mode,
+                               this->cascade_config.jpeg_quality);
     {
         QMutexLocker locker(&this->downloads_mutex);
         this->downloads_active_clients.insert(download.canonical_key, rest);

@@ -69,6 +69,8 @@ install_debian_dependencies()
         qt6-websockets-dev
         libtiff-dev
         libzstd-dev
+        libpng-dev
+        libturbojpeg0-dev
     )
 
     if ! command -v apt-get >/dev/null 2>&1; then

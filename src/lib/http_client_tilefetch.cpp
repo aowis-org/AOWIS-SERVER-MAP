@@ -64,8 +64,11 @@ TileHttpClient::TileHttpClient(QNetworkAccessManager *network_manager, const QSt
 
 void TileHttpClient::configureCascade(const QByteArray &api_key,
                                       const QByteArray &source_fingerprint,
-                                      const QByteArray &visited)
+                                      const QByteArray &visited, bool poor_internet_mode,
+                                      int jpeg_quality)
 {
+    this->cascade_poor_internet = poor_internet_mode;
+    this->cascade_jpeg_quality = jpeg_quality;
     this->cascade_request = true;
     this->cascade_api_key = api_key;
     this->cascade_source = source_fingerprint;
@@ -82,6 +85,9 @@ void TileHttpClient::prepareRequest(QNetworkRequest *request) const
         request->setRawHeader("X-API-Key", this->cascade_api_key);
     request->setRawHeader("X-AOWIS-Raster-Source", this->cascade_source);
     request->setRawHeader("X-AOWIS-Cascade-Visited", this->cascade_visited);
+    if (this->cascade_poor_internet)
+        request->setRawHeader("X-AOWIS-Raster-Transfer",
+                              "adaptive-jpeg;quality=" + QByteArray::number(this->cascade_jpeg_quality));
 }
 
 void TileHttpClient::get(const QString &endpoint)

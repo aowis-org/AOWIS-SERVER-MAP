@@ -14,6 +14,8 @@ RUN apt-get update -o APT::Update::Error-Mode=any \
       g++ \
       libtiff-dev \
       libzstd-dev \
+      libpng-dev \
+      libturbojpeg0-dev \
       ninja-build \
       pkg-config \
       qt6-base-dev \

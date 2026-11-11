@@ -84,6 +84,34 @@ void setRasterSourceHeader(QHttpServerResponse &response, const QByteArray &sour
 #endif
 }
 
+void setRasterTransferVary(QHttpServerResponse &response)
+{
+#if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
+    QHttpHeaders headers = response.headers();
+    headers.replaceOrAppend("Vary", "X-AOWIS-Raster-Transfer, X-AOWIS-Cascade-Visited");
+    response.setHeaders(std::move(headers));
+#else
+    response.setHeader("Vary", "X-AOWIS-Raster-Transfer, X-AOWIS-Cascade-Visited");
+#endif
+}
+
+// Only an upstream MAP peer with a valid cascade trace may request lossy
+// transport. A GUI supplying this header without the trace is ignored.
+int requestedRasterJpegQuality(const QHttpServerRequest &request)
+{
+    if (request.value("x-aowis-cascade-visited").isEmpty()) return 0;
+    const QByteArray value = request.value("x-aowis-raster-transfer").trimmed().toLower();
+    const QByteArray prefix = QByteArrayLiteral("adaptive-jpeg;quality=");
+    if (!value.startsWith(prefix)) return 0;
+    const QByteArray digits = value.mid(prefix.size());
+    if (digits.isEmpty() || digits.size() > 3) return 0;
+    for (char digit : digits)
+        if (digit < '0' || digit > '9') return 0;
+    bool valid = false;
+    const int quality = digits.toInt(&valid);
+    return valid && quality >= 1 && quality <= 100 ? quality : 0;
+}
+
 // The r2 normalization semantics are independent of the .aowterrain binary
 // format version. A downstream must reject incompatible normalizer revisions.
 void setTerrainRevisionHeader(QHttpServerResponse &response)
@@ -153,6 +181,14 @@ QByteArray mapTileMimeType(const QByteArray &data)
     if (data.size() >= 12 && data.startsWith("RIFF") && data.mid(8, 4) == "WEBP")
         return QByteArrayLiteral("image/webp");
     return QByteArrayLiteral("image/png");
+}
+
+QHttpServerResponse makeRasterResponse(const QByteArray &bytes, const QByteArray &source)
+{
+    QHttpServerResponse response(mapTileMimeType(bytes), bytes);
+    setRasterSourceHeader(response, source);
+    setRasterTransferVary(response);
+    return response;
 }
 
 QHttpServerResponse makeOptionsResponse()
@@ -394,6 +430,8 @@ Server::Server(const Config &config, QObject *parent)
     this->terrain_remote_pool.setObjectName(QStringLiteral("aowis-map-terrain-remote"));
     this->terrain_remote_pool.setMaxThreadCount(
         qMax(1, qMin(config.maximum_terrain_remote_workers, config.maximum_terrain_jobs)));
+    this->raster_encode_pool.setObjectName(QStringLiteral("aowis-map-raster-encode"));
+    this->raster_encode_pool.setMaxThreadCount(2);
     this->maptiles->setRemoteFetchEnabled(config.map_remote_fetch_enabled);
     this->maptiles->setCascadeConfig(config.cascade);
     this->terrain_data->setCascadeInstanceId(this->maptiles->cascadeInstanceId());
@@ -514,6 +552,7 @@ Server::~Server()
         this->shutting_down = true;
         pending.swap(this->connections_pending);
         this->pending_request_count = 0;
+        this->raster_transfer_waiters.clear();
     }
 
     this->tcp->close();
@@ -524,6 +563,7 @@ Server::~Server()
     // before QObject child destruction starts; no new requests are accepted.
     this->terrain_remote_pool.waitForDone();
     this->terrain_worker_pool.waitForDone();
+    this->raster_encode_pool.waitForDone();
 
     // Any queued terrain-tile completion callbacks are canceled on shutdown.
     for (const PendingPromises &promises : std::as_const(this->pending_terrain_tiles))
@@ -1376,6 +1416,7 @@ void Server::setupRoutes()
             entry.insert(QStringLiteral("maximum_zoom"), provider.maximum_zoom);
             entry.insert(QStringLiteral("enabled"), provider.enabled);
             entry.insert(QStringLiteral("remote_fetch_enabled"), provider.remote_fetch_enabled);
+            entry.insert(QStringLiteral("allow_lossy_transfer"), provider.allow_lossy_transfer);
             entry.insert(QStringLiteral("coverage"), provider.coverage);
             providers.append(entry);
         }
@@ -1415,6 +1456,7 @@ void Server::setupRoutes()
             provider.maximum_zoom = entry.value(QStringLiteral("maximum_zoom")).toInt(-1);
             provider.enabled = entry.value(QStringLiteral("enabled")).toBool(true);
             provider.remote_fetch_enabled = entry.value(QStringLiteral("remote_fetch_enabled")).toBool(true);
+            provider.allow_lossy_transfer = entry.value(QStringLiteral("allow_lossy_transfer")).toBool(true);
             const QUrl parsed(provider.url_template);
             if (QUuid(provider.id).isNull() || provider.id.contains(QLatin1Char('{')) ||
                 ids.contains(provider.id) || provider.name.isEmpty() ||
@@ -1660,13 +1702,19 @@ void Server::setupRoutes()
                 QStringLiteral("cache-first"), Qt::CaseInsensitive) == 0
             || request.value("x-aowis-tile-delivery").compare(
                 QByteArrayLiteral("cache-first"), Qt::CaseInsensitive) == 0;
+        const int raster_quality = this->maptiles->allowsLossyRasterTransfer(provider)
+            ? requestedRasterJpegQuality(request) : 0;
         const MapTiles::TileRequestResult tile_result = this->maptiles->getTileForHttp(provider, z, x, y, key, cascade_trace);
 
         if (tile_result.status == MapTiles::TileRequestStatus::Ready)
         {
-            QHttpServerResponse response(mapTileMimeType(tile_result.data), tile_result.data);
-            setRasterSourceHeader(response, expected_source);
-            return makeReadyResponse(std::move(response));
+            if (raster_quality == 0)
+                return makeReadyResponse(makeRasterResponse(tile_result.data, expected_source));
+            PendingPromise promise = PendingPromise::create();
+            promise->start();
+            QFuture<QHttpServerResponse> future = promise->future();
+            completeRasterPromises({promise}, tile_result.data, expected_source, z, raster_quality);
+            return future;
         }
 
         if (tile_result.status == MapTiles::TileRequestStatus::InvalidRequest)
@@ -1707,6 +1755,8 @@ void Server::setupRoutes()
                 QHttpServerResponse::StatusCode::ServiceUnavailable));
             promise->finish();
         }
+        else if (raster_quality != 0)
+            this->raster_transfer_waiters.insert(promise.data(), raster_quality);
 
         return future;
     });
@@ -1771,17 +1821,77 @@ Server::PendingPromises Server::takePendingPromises(const QString &key)
     return promises;
 }
 
+void Server::completeRasterPromises(const PendingPromises &promises, const QByteArray &data,
+                                    const QByteArray &source, int zoom, int requested_quality)
+{
+    if (promises.isEmpty()) return;
+    if (requested_quality == 0 || mapTileMimeType(data) != "image/png" || data.size() < 12 * 1024)
+    {
+        for (const PendingPromise &promise : promises)
+        {
+            promise->addResult(makeRasterResponse(data, source));
+            promise->finish();
+        }
+        return;
+    }
+
+    const std::optional<Aowis::Map::RasterTransferOptimizer::Selection> cached =
+        this->raster_transfer.lookup(data, requested_quality);
+    if (cached.has_value())
+    {
+        for (const PendingPromise &promise : promises)
+        {
+            this->raster_transfer.recordTransfer(data.size(), cached->bytes.size());
+            promise->addResult(makeRasterResponse(cached->bytes, source));
+            promise->finish();
+        }
+        return;
+    }
+
+    // No unbounded queue. If both workers are occupied, send canonical bytes
+    // immediately. In-progress identical encodes are also deduplicated by the
+    // selector and cannot delay unrelated tile responses.
+    if (!this->raster_encode_admission.tryAcquire())
+    {
+        for (const PendingPromise &promise : promises)
+        {
+            this->raster_transfer.recordTransfer(data.size(), data.size());
+            promise->addResult(makeRasterResponse(data, source));
+            promise->finish();
+        }
+        return;
+    }
+
+    this->raster_encode_pool.start([this, promises, data, source, zoom, requested_quality]()
+    {
+        const Aowis::Map::RasterTransferOptimizer::Selection choice =
+            this->raster_transfer.select(data, source, zoom, requested_quality,
+                                         this->config.cascade.adaptive_compression);
+        for (const PendingPromise &promise : promises)
+        {
+            this->raster_transfer.recordTransfer(data.size(), choice.bytes.size());
+            promise->addResult(makeRasterResponse(choice.bytes, source));
+            promise->finish();
+        }
+        this->raster_encode_admission.release();
+    });
+}
+
 void Server::onTileReady(QString key, QByteArray data)
 {
     PendingPromises promises = takePendingPromises(key);
+    const QString provider = key.section(QLatin1Char('_'), 0, 0);
+    const QByteArray source = this->maptiles->rasterSourceFingerprint(provider);
+    const int zoom = key.section(QLatin1Char('_'), 1, 1).toInt();
+    QHash<int, PendingPromises> groups;
     for (const PendingPromise &promise : promises)
     {
-        QHttpServerResponse response(mapTileMimeType(data), data);
-        const QString provider = key.section(QLatin1Char('_'), 0, 0);
-        setRasterSourceHeader(response, this->maptiles->rasterSourceFingerprint(provider));
-        promise->addResult(std::move(response));
-        promise->finish();
+        const int quality = this->raster_transfer_waiters.take(promise.data());
+        groups[quality].append(promise);
     }
+    for (QHash<int, PendingPromises>::const_iterator group = groups.constBegin();
+         group != groups.constEnd(); ++group)
+        completeRasterPromises(group.value(), data, source, zoom, group.key());
 }
 
 void Server::onTileFailed(const QString &key, MapTiles::TileFailureReason reason)
@@ -1802,6 +1912,7 @@ void Server::onTileFailed(const QString &key, MapTiles::TileFailureReason reason
 
     for (const PendingPromise &promise : promises)
     {
+        this->raster_transfer_waiters.remove(promise.data());
         promise->addResult(QHttpServerResponse(message, status));
         promise->finish();
     }

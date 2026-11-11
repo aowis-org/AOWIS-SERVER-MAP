@@ -16,6 +16,7 @@ struct MapProvider
     bool remote_fetch_enabled = true;
     int minimum_zoom = 0;
     int maximum_zoom = 19;
+    bool allow_lossy_transfer = true;
 };
 
 QVector<MapProvider> defaultMapProviders();

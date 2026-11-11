@@ -1,6 +1,6 @@
 # MAP-to-MAP cascading (implementation specification)
 
-**Status:** staged implementation. Steps 1–4 (configuration/policy, raster/terrain cascading, terrain zstd transport) implemented; adaptive raster compression and Standalone settings are pending. Scope is raster map imagery and normalized 3D globe terrain only. Native Copernicus GeoTIFF replication, point-elevation and hydrology/analysis-grid behavior are out of scope.
+**Status:** staged implementation. Steps 1–5 (configuration/policy, raster/terrain cascading, zstd terrain, adaptive JPEG raster transfer) implemented; Standalone settings and final acceptance testing are pending. Scope is raster map imagery and normalized 3D globe terrain only. Native Copernicus GeoTIFF replication, point-elevation and hydrology/analysis-grid behavior are out of scope.
 
 ## Configuration and acquisition order
 
@@ -46,9 +46,9 @@ For Step 2 raster requests, upstreams exchange `X-AOWIS-Raster-Source` (SHA-256 
 
 ## Wire representation on slow links
 
-A downstream with `poor_internet_mode=true` requests optimized representations from each MAP upstream. Upstreams support this opt-in even if their own poor-internet mode is off. Normal GUI endpoints, tile addresses and public API behavior stay compatible.
+A downstream with `poor_internet_mode=true` requests optimized representations from each MAP upstream. For raster data it sends `X-AOWIS-Raster-Transfer: adaptive-jpeg;quality=75` (using configured quality) alongside a valid `X-AOWIS-Cascade-Visited` trace. The upstream ignores the compression request without a cascade trace. Responses vary on `X-AOWIS-Raster-Transfer`. Upstreams support this opt-in even if their own poor-internet mode is off. Normal GUI endpoints, tile addresses and public API behavior stay compatible.
 
-**Raster imagery:** for an eligible *opaque PNG* tile, the upstream may respond with a libjpeg-turbo JPEG at the requested quality; its actual `Content-Type` must be `image/jpeg` even though the current XYZ URL ends in `.png`. Otherwise send the original bytes and MIME type. Never flatten transparency or re-encode an existing JPEG (including one received from another MAP server). Preserve existing WebP/JPEG unless a later measured, explicitly lossless-safe optimization is introduced. Honor upstream cache restrictions and provider-specific opt-outs from lossy transfer.
+**Raster imagery:** for an eligible *opaque PNG* tile, the upstream may respond with a libjpeg-turbo JPEG at the requested quality; its actual `Content-Type` must be `image/jpeg` even though the current XYZ URL ends in `.png`. Otherwise send the original bytes and MIME type. Never flatten transparency or re-encode an existing JPEG (including one received from another MAP server). Preserve existing WebP/JPEG unless a later measured, explicitly lossless-safe optimization is introduced. Honor upstream cache restrictions and `allow_lossy_transfer=false` in `[map_provider.UUID]` as a provider-specific hard opt-out. The field is also persisted by the provider-state API.
 
 **Terrain:** losslessly zstd-compress the existing canonical `.aowterrain` bytes if the compressed representation is smaller; otherwise send them unchanged. Use negotiated HTTP content encoding: a MAP-to-MAP request must include both a nonempty, validated `X-AOWIS-Cascade-Visited` trace and `Accept-Encoding: zstd`; only then may the reply carry `Content-Encoding: zstd`. `Accept-Encoding` alone is insufficient because Qt GUI clients may send it automatically. Ordinary GUI responses remain uncompressed. This is **not** a new terrain tile format. The downstream decompresses with strict byte/size limits, validates dataset, XYZ, format/normalization revision and CRC, then atomically caches canonical bytes. Do not mix incompatible normalization revisions or silently accept a different terrain dataset.
 
@@ -70,7 +70,7 @@ Buckets are keyed by **provider/source style, zoom band and original byte-size b
 
 For **every** JPEG actually encoded, compare its real size to the real original size. Select JPEG only if it saves at least **10% and 2 KiB** (initial thresholds); otherwise transmit the original. These are *size* decisions, not evidence of acceptable visual quality: keep transparency and provider opt-outs as hard restrictions. Do not use machine learning or image recognition.
 
-Keep a bounded transfer-variant/decision cache keyed by original content identity, codec and quality; never repeatedly decode/encode unchanged tiles. Upstream original caches remain unmodified. A downstream may retain a received JPEG for offline raster rendering and must not apply a further lossy generation at the next cascade hop. A changed source or quality invalidates its old decision. When transcoding workers are saturated, forward original bytes immediately instead of building an unbounded queue. Deduplicate concurrent encodes for the same content.
+Keep a bounded in-memory transfer-variant/decision cache keyed by original content SHA-256 and quality (currently 16 MiB / 4096 entries, reset on restart); never repeatedly decode/encode unchanged tiles. Upstream original caches remain unmodified. A downstream may retain a received JPEG for offline raster rendering and must not apply a further lossy generation at the next cascade hop. A changed source or quality invalidates its old decision. When transcoding workers are saturated, forward original bytes immediately instead of building an unbounded queue. Deduplicate concurrent encodes for the same content.
 
 Expose counters for original/transmitted bytes, actual savings, selected JPEGs, skipped/sampled tiles, terrain zstd savings, encode CPU time, encoding-cache hits and upstream failover. Test with real imagery; savings estimates in discussions are *not* benchmarks.
 
@@ -88,3 +88,5 @@ Expose counters for original/transmitted bytes, actual savings, selected JPEGs, 
 4. zstd versus identity terrain: decode/validate/store canonical bytes; corrupt/truncated/oversized payloads rejected; tile bytes match the non-cascaded result exactly.
 5. Existing public GUI endpoints and no-upstream configuration remain backward compatible; standalone and systemd use the same library behavior.
 6. Repeatable benchmark reports **wire bytes and CPU time** for mixed real raster tiles and Copernicus heightfields; no claim of performance improvement without measurements.
+
+Step 5 implementation uses libpng for opaque-PNG detection/decoding and libjpeg-turbo for JPEG encoding. It admits at most two concurrent encoding jobs; saturated servers return original tiles without queuing. Variant selection applies to both warm-cache and completed async requests.

@@ -75,6 +75,7 @@ public:
                               const QByteArray &cascade_trace = {});
     // A source digest binds a provider UUID to its actual imagery/style URL.
     QByteArray rasterSourceFingerprint(const QString &provider) const;
+    bool allowsLossyRasterTransfer(const QString &provider) const;
     // Reject malformed traces, exhausted hop budgets, and our own instance ID.
     bool acceptsCascadeTrace(const QByteArray &trace) const;
     QByteArray cascadeInstanceId() const { return this->cascade_instance_id; }

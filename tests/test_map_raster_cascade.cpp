@@ -172,6 +172,8 @@ int main(int argc, char **argv)
 
     Aowis::Map::MapCascadeConfig config;
     config.allow_direct_fetch = false;
+    config.poor_internet_mode = true;
+    config.jpeg_quality = 72;
     config.upstreams = {upstream("primary", failed_primary),
                         upstream("secondary", valid_secondary, QByteArrayLiteral("read-key"))};
 
@@ -189,7 +191,9 @@ int main(int argc, char **argv)
         if (!require(valid_secondary.requests[0].toLower().contains(
                          "x-aowis-raster-source: " + fingerprint) &&
                      valid_secondary.requests[0].toLower().contains("x-api-key: read-key") &&
-                     valid_secondary.requests[0].toLower().contains("x-aowis-cascade-visited: "),
+                     valid_secondary.requests[0].toLower().contains("x-aowis-cascade-visited: ") &&
+                     valid_secondary.requests[0].toLower().contains(
+                         "x-aowis-raster-transfer: adaptive-jpeg;quality=72"),
                      "MAP-to-MAP request is missing source binding, read key, or loop trace")) return 1;
         const QString tile_path = QDir(cache).filePath(
             QStringLiteral("maptiles/%1/6/30/20.png").arg(provider_id));
