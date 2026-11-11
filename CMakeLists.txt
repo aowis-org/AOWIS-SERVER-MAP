@@ -38,6 +38,8 @@ add_library(aowis-server-map-core STATIC
     src/lib/maptiles.cpp
     src/lib/download_coverage.cpp
     src/lib/map_provider.cpp
+    src/lib/settings_repository.cpp
+    include/aowis/map/settings_repository.h
     include/aowis/map/map_provider.h
     include/aowis/map/download_coverage.h
     src/lib/http_client_tilefetch.cpp
@@ -99,6 +101,12 @@ target_link_libraries(aowis-server-map
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(aowis-server-map-settings-repository-test
+        tests/test_map_settings_repository.cpp)
+    target_link_libraries(aowis-server-map-settings-repository-test PRIVATE AOWIS::Map)
+    add_test(NAME aowis-server-map-settings-repository
+             COMMAND aowis-server-map-settings-repository-test)
+
     add_executable(aowis-server-map-provider-limits-test
         tests/test_map_provider_limits.cpp
     )
@@ -405,6 +413,7 @@ endif()
 # runner to distinguish this project's tests from any tests in dependencies.
 if(BUILD_TESTING)
     set(AOWIS_SERVER_MAP_TEST_TARGETS
+        aowis-server-map-settings-repository-test
         aowis-server-map-provider-limits-test
         aowis-server-map-cache-reuse-test
         aowis-server-map-raster-cascade-test

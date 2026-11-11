@@ -2,6 +2,12 @@
 
 AOWIS Server Map uses built-in defaults, an optional administrator INI, and a separate persistent catalog for raster-provider edits made through the GUI/API. **Normal startup and configuration validation never rewrite the administrator INI.**
 
+## MAP-owned CONFIG library (staged)
+
+`Aowis::Map::SettingsRepository` now persists the MAP cascade and raster-provider catalog in **AOWIS-CONFIG** records with separate `server-map` / `standalone-map` owner roots, strict validation and revision-checked writes. The host must access these through MAP's C++ library (or REST), not by editing CONFIG records. A failed/corrupt cascade read fails closed; an empty, valid owner store uses defaults.
+
+**Not enabled for the standalone/systemd runtime yet:** the server still reads its INI and `providers.ini`, and the GUI still uses its existing settings adapter. The next integration patch will switch those callers and handle previously saved GUI settings. This step does not migrate, delete or rewrite existing configuration.
+
 ## Locate and validate configuration
 
 Configuration is applied in this order:
