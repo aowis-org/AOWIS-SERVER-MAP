@@ -19,22 +19,30 @@ installation and trusted project sources.
 If the Debian base image downloads successfully but `apt-get update` reports
 `Temporary failure resolving 'deb.debian.org'`, the failure is Docker's
 container DNS/network path, **not** a C++ build or missing Debian packages.
-On Linux, try the existing host networking stack for the *image build*:
+The Docker **toolchain image build now uses host networking by default** on
+Linux so that Debian dependency installation can use the host's DNS setup:
 
 ```bash
-./compile_deb_docker.sh --build-network host
+./compile_deb_docker.sh
 ```
 
-The default remains Docker bridge networking. The `--build-network` option
-changes networking **only while installing the toolchain inside the Docker
-image**; it does not change the network of the installed service on your host.
-It relies on the host having working Debian repository DNS and HTTP access.
-
-For the optional installation qualification, the test container has its own
-network setting. If it also fails to resolve Debian package repositories:
+To explicitly use Docker bridge networking for that image build instead:
 
 ```bash
-./compile_deb_docker.sh --test --build-network host --test-network host
+./compile_deb_docker.sh --build-network bridge
+```
+
+`--build-network` affects **only the Docker toolchain image build**; the
+subsequent package-build container and optional qualification container still
+use Docker's bridge networking by default. It does not change the network of
+the installed service on your host. Host mode relies on the host having working
+Debian repository DNS and HTTP access.
+
+For the optional installation qualification, the test container has its own
+network setting. If it fails to resolve Debian package repositories, use:
+
+```bash
+./compile_deb_docker.sh --test --test-network host
 ```
 
 **Caution:** `--test-network host` shares the host's network namespace. The
@@ -43,7 +51,8 @@ of the test. Use this only on a trusted Linux development machine with that
 port free; the default bridge network keeps it isolated. The test still uses
 its own disposable filesystem, users and processes and does not modify the
 host's map service on port 8122. Fixing Docker daemon DNS is preferable for
-repeatable isolated tests in CI. No `--network host` mode is silently enabled.
+repeatable isolated tests in CI. Host networking for qualification is **not**
+enabled by default.
 
 A Docker warning about the deprecated legacy image builder is unrelated to
 Debian DNS resolution. Installing the Docker buildx plugin removes that
@@ -57,8 +66,9 @@ From the project root:
 ./compile_deb_docker.sh
 ```
 
-For Linux hosts whose Docker bridge cannot resolve Debian repositories, use
-`--build-network host` as described above.
+The toolchain image uses host networking by default to avoid Docker bridge
+DNS failures during `apt-get update`. Specify `--build-network bridge` if you
+prefer isolated bridge networking for that step.
 
 To build a different Debian package revision:
 

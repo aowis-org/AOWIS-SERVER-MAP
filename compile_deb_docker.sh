@@ -6,7 +6,7 @@ dist_directory="$project_root/dist"
 docker_image="aowis-server-map-debian-builder:trixie"
 revision="${DEB_REVISION:-1}"
 run_tests=false
-build_network="bridge"
+build_network="host"
 test_network="bridge"
 
 usage()
@@ -25,7 +25,7 @@ container without installing Debian build dependencies on the host.
   --revision NUMBER   Initial Debian revision (positive integer, default: 1).
   --build-network MODE
                       Docker network for installing build dependencies while
-                      building the toolchain image (bridge or host; default bridge).
+                      building the toolchain image (bridge or host; default host).
   --test-network MODE Docker network for package-installation qualification
                       (bridge or host; default bridge). With host networking,
                       the test HTTP listener uses the HOST loopback port 18122.
