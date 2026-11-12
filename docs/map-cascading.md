@@ -111,3 +111,31 @@ selected JPEG/zstd counts and codec CPU time. It does **not** measure network
 latency, HTTP framing, provider-specific lossless-only policy or concurrent
 server load. Representative imagery and terrain from the actual project area
 are needed before making real-world savings claims.
+
+### Geographic benchmark: Bitkine, Chad
+
+For a meaningful project-area comparison, sample cached tiles intersecting a
+**25 km radius around Bitkine (11.9801° N, 18.2138° E)** instead of taking the
+first files in lexical order. The following two commands use the *same* regional
+sample, across available providers and zoom levels:
+
+```bash
+./build-linux-tests/aowis-server-map-transfer-benchmark \
+  --raster "$HOME/.local/share/aowis-server-gui/maptiles" \
+  --terrain "$HOME/.local/share/aowis-server-gui/terrain/normalized" \
+  --region bitkine --radius-km 25 --min-zoom 8 --max-zoom 16 \
+  --max-files 2000 > bitkine-adaptive.json
+
+./build-linux-tests/aowis-server-map-transfer-benchmark \
+  --raster "$HOME/.local/share/aowis-server-gui/maptiles" \
+  --terrain "$HOME/.local/share/aowis-server-gui/terrain/normalized" \
+  --region bitkine --radius-km 25 --min-zoom 8 --max-zoom 16 \
+  --max-files 2000 --exhaustive-jpeg > bitkine-exhaustive.json
+```
+
+`region_coverage` reports candidate and sampled tiles, split by zoom and source.
+The tool fails when a requested category has no cached tiles in the region;
+**it never substitutes tiles from elsewhere or downloads new data**. Visit
+Bitkine in the GUI first to populate the raster/3D terrain cache, with an
+imagery provider whose terms permit such use. A sparse cache is not evidence
+of representative savings. No tile imagery is fetched by the benchmark.

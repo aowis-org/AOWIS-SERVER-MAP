@@ -1,0 +1,30 @@
+{
+    "adaptive_jpeg": true,
+    "jpeg_quality": 75,
+    "max_files_per_category": 2000,
+    "raster": {
+        "codec_time_ms": 4577.05,
+        "examined_files": 2000,
+        "invalid_or_unreadable": 0,
+        "jpeg_encodes_attempted": 1048,
+        "optimized_tiles": 1045,
+        "original_payload_bytes": 50477762,
+        "saved_percent": 40.23168657913162,
+        "selected_payload_bytes": 30169707,
+        "skipped_by_predictor": 400,
+        "skipped_small": 552,
+        "skipped_unsafe": 0,
+        "valid_tiles": 2000,
+        "variant_cache_hits": 0
+    },
+    "terrain": {
+        "codec_time_ms": 81.422866,
+        "examined_files": 2000,
+        "invalid_or_unreadable": 0,
+        "optimized_tiles": 833,
+        "original_payload_bytes": 17060000,
+        "saved_percent": 15.325967174677608,
+        "selected_payload_bytes": 14445390,
+        "valid_tiles": 2000
+    }
+}

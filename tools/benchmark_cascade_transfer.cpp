@@ -7,6 +7,11 @@
 #include <QCommandLineParser>
 #include <QCoreApplication>
 #include <QDir>
+#include <QDirIterator>
+#include <QCryptographicHash>
+#include <QMap>
+#include <QStringList>
+#include <QVector>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
@@ -16,6 +21,8 @@
 
 #include <png.h>
 
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <functional>
 #include <optional>
@@ -86,6 +93,189 @@ void visitFiles(const QString &root, quint64 limit,
     visit(root);
 }
 
+// Region filtering uses the cached tile's XYZ bounds, not its file order.
+// Bounding-box intersection at low zoom matters: a coarse tile may cover the
+// town even when the tile centre is hundreds of kilometres away.
+struct GeographicRegion
+{
+    QString name;
+    double latitude = 0.0;
+    double longitude = 0.0;
+    double radius_km = 25.0;
+    int minimum_zoom = 8;
+    int maximum_zoom = 16;
+};
+
+struct CachedTile
+{
+    QString path;
+    QString source;
+    int zoom = 0;
+    int x = 0;
+    int y = 0;
+    QByteArray shuffle_key;
+};
+
+struct RegionCoverage
+{
+    quint64 available = 0;
+    quint64 selected = 0;
+    QMap<int, quint64> available_by_zoom;
+    QMap<int, quint64> selected_by_zoom;
+    QMap<QString, quint64> selected_by_source;
+};
+
+constexpr double Pi = 3.14159265358979323846;
+
+int tileXAtLongitude(double longitude, int zoom)
+{
+    const double scale = std::ldexp(1.0, zoom);
+    return std::clamp(int(std::floor((longitude + 180.0) / 360.0 * scale)),
+                      0, int(scale) - 1);
+}
+
+int tileYAtLatitude(double latitude, int zoom)
+{
+    const double clamped = std::clamp(latitude, -85.05112878, 85.05112878);
+    const double radians = clamped * Pi / 180.0;
+    const double scale = std::ldexp(1.0, zoom);
+    return std::clamp(int(std::floor((1.0 - std::asinh(std::tan(radians)) / Pi) *
+                                     0.5 * scale)), 0, int(scale) - 1);
+}
+
+double latitudeAtTileY(int y, int zoom)
+{
+    const double scale = std::ldexp(1.0, zoom);
+    return std::atan(std::sinh(Pi * (1.0 - 2.0 * double(y) / scale))) *
+           180.0 / Pi;
+}
+
+bool intersectsRegion(int zoom, int x, int y, const GeographicRegion &region)
+{
+    const double scale = std::ldexp(1.0, zoom);
+    const double west = double(x) / scale * 360.0 - 180.0;
+    const double east = double(x + 1) / scale * 360.0 - 180.0;
+    const double north = latitudeAtTileY(y, zoom);
+    const double south = latitudeAtTileY(y + 1, zoom);
+    const double nearest_lat = std::clamp(region.latitude, south, north);
+    const double nearest_lon = std::clamp(region.longitude, west, east);
+    const double north_south_km = (nearest_lat - region.latitude) * 111.32;
+    const double east_west_km = (nearest_lon - region.longitude) * 111.32 *
+        std::cos(region.latitude * Pi / 180.0);
+    return north_south_km * north_south_km + east_west_km * east_west_km <=
+           region.radius_km * region.radius_km;
+}
+
+std::optional<CachedTile> cachedTileAddress(const QString &root,
+                                           const QString &path, bool raster)
+{
+    const QStringList parts = QDir::fromNativeSeparators(
+        QDir(root).relativeFilePath(path)).split(QLatin1Char('/'));
+    // Raster: provider/z/x/y.png, also provider/variants/hash/z/x/y.png.
+    // Terrain: v1/r2/dataset/z/x/y.aowterrain.
+    if (parts.size() < (raster ? 4 : 6)) return std::nullopt;
+    bool zoom_ok = false;
+    bool x_ok = false;
+    bool y_ok = false;
+    const int zoom = parts.at(parts.size() - 3).toInt(&zoom_ok);
+    const int x = parts.at(parts.size() - 2).toInt(&x_ok);
+    const int y = QFileInfo(parts.last()).completeBaseName().toInt(&y_ok);
+    if (!zoom_ok || !x_ok || !y_ok || zoom < 0 || zoom > 22 ||
+        x < 0 || y < 0 || x >= (1 << zoom) || y >= (1 << zoom))
+        return std::nullopt;
+    CachedTile tile;
+    tile.path = path;
+    tile.zoom = zoom;
+    tile.x = x;
+    tile.y = y;
+    tile.source = raster ? parts.first() : parts.at(parts.size() - 4);
+    tile.shuffle_key = QCryptographicHash::hash(
+        QDir(root).relativeFilePath(path).toUtf8(), QCryptographicHash::Sha256);
+    return tile;
+}
+
+void visitRegionFiles(const QString &root, quint64 limit, bool raster,
+                      const GeographicRegion &region,
+                      const std::function<void(const QString &)> &consume,
+                      RegionCoverage *coverage)
+{
+    // Enumerate *all* cached tiles in this area before sampling. The previous
+    // first-N directory traversal disproportionately selected the first
+    // provider/zoom/geographic region, making results unrepresentative.
+    QMap<QString, QVector<CachedTile>> groups;
+    QDirIterator iterator(root, QDir::Files | QDir::NoSymLinks,
+                          QDirIterator::Subdirectories);
+    while (iterator.hasNext())
+    {
+        const QString path = iterator.next();
+        if (raster ? !isRasterFile(path) :
+            !path.endsWith(QStringLiteral(".aowterrain"), Qt::CaseInsensitive))
+            continue;
+        const std::optional<CachedTile> tile = cachedTileAddress(root, path, raster);
+        if (!tile.has_value() || tile->zoom < region.minimum_zoom ||
+            tile->zoom > region.maximum_zoom ||
+            !intersectsRegion(tile->zoom, tile->x, tile->y, region))
+            continue;
+        ++coverage->available;
+        ++coverage->available_by_zoom[tile->zoom];
+        groups[QStringLiteral("%1/%2").arg(tile->source).arg(tile->zoom)].append(*tile);
+    }
+    for (QMap<QString, QVector<CachedTile>>::iterator it = groups.begin();
+         it != groups.end(); ++it)
+    {
+        std::sort(it.value().begin(), it.value().end(),
+                  [](const CachedTile &a, const CachedTile &b)
+                  {
+                      return a.shuffle_key < b.shuffle_key ||
+                             (a.shuffle_key == b.shuffle_key && a.path < b.path);
+                  });
+    }
+    // Deterministic round-robin among provider/zoom strata, seeded by a
+    // stable content-independent hash of each filename. Re-running adaptive
+    // and exhaustive JPEG therefore benchmarks *the exact same* input files.
+    qsizetype round = 0;
+    while (coverage->selected < limit)
+    {
+        bool any = false;
+        for (QMap<QString, QVector<CachedTile>>::const_iterator it = groups.cbegin();
+             it != groups.cend() && coverage->selected < limit; ++it)
+        {
+            if (round >= it.value().size()) continue;
+            const CachedTile &tile = it.value().at(round);
+            any = true;
+            ++coverage->selected;
+            ++coverage->selected_by_zoom[tile.zoom];
+            ++coverage->selected_by_source[tile.source];
+            consume(tile.path);
+        }
+        if (!any) break;
+        ++round;
+    }
+}
+
+QJsonObject geographicCoverageJson(const RegionCoverage &coverage)
+{
+    QJsonObject result;
+    result.insert(QStringLiteral("cached_candidates"), qint64(coverage.available));
+    result.insert(QStringLiteral("sampled_tiles"), qint64(coverage.selected));
+    QJsonObject available_by_zoom;
+    QJsonObject sampled_by_zoom;
+    QJsonObject sampled_by_source;
+    for (QMap<int, quint64>::const_iterator it = coverage.available_by_zoom.cbegin();
+         it != coverage.available_by_zoom.cend(); ++it)
+        available_by_zoom.insert(QString::number(it.key()), qint64(it.value()));
+    for (QMap<int, quint64>::const_iterator it = coverage.selected_by_zoom.cbegin();
+         it != coverage.selected_by_zoom.cend(); ++it)
+        sampled_by_zoom.insert(QString::number(it.key()), qint64(it.value()));
+    for (QMap<QString, quint64>::const_iterator it = coverage.selected_by_source.cbegin();
+         it != coverage.selected_by_source.cend(); ++it)
+        sampled_by_source.insert(it.key(), qint64(it.value()));
+    result.insert(QStringLiteral("cached_by_zoom"), available_by_zoom);
+    result.insert(QStringLiteral("sampled_by_zoom"), sampled_by_zoom);
+    result.insert(QStringLiteral("sampled_by_source"), sampled_by_source);
+    return result;
+}
+
 QJsonObject jsonTotals(const Totals &totals)
 {
     const double saved = totals.original_bytes == 0 ? 0.0 :
@@ -103,11 +293,13 @@ QJsonObject jsonTotals(const Totals &totals)
     return result;
 }
 
-QJsonObject benchmarkRaster(const QString &root, int quality, quint64 limit, bool adaptive)
+QJsonObject benchmarkRaster(const QString &root, int quality, quint64 limit, bool adaptive,
+                            const std::optional<GeographicRegion> &region = std::nullopt)
 {
     Totals totals;
     Aowis::Map::RasterTransferOptimizer optimizer;
-    visitFiles(root, limit, isRasterFile, [&](const QString &path)
+    RegionCoverage coverage;
+    const std::function<void(const QString &)> consume = [&](const QString &path)
     {
         ++totals.examined;
         QByteArray original;
@@ -116,19 +308,19 @@ QJsonObject benchmarkRaster(const QString &root, int quality, quint64 limit, boo
             ++totals.invalid;
             return;
         }
-        QDir directory = QFileInfo(path).dir();  // x directory
-        directory.cdUp();                         // z directory
-        bool valid_zoom = false;
-        const int zoom = directory.dirName().toInt(&valid_zoom);
-        directory.cdUp();                         // provider directory
-        const QByteArray source = directory.dirName().toUtf8();
+        const std::optional<CachedTile> address = cachedTileAddress(root, path, true);
+        const QByteArray source = address.has_value() ?
+            address->source.toUtf8() : QByteArrayLiteral("unknown");
+        const int zoom = address.has_value() ? address->zoom : 0;
         const Aowis::Map::RasterTransferOptimizer::Selection selection =
-            optimizer.select(original, source, valid_zoom ? zoom : 0, quality, adaptive);
+            optimizer.select(original, source, zoom, quality, adaptive);
         ++totals.valid;
         totals.original_bytes += quint64(original.size());
         totals.transfer_bytes += quint64(selection.bytes.size());
         if (selection.jpeg) ++totals.optimized;
-    });
+    };
+    if (region.has_value()) visitRegionFiles(root, limit, true, *region, consume, &coverage);
+    else visitFiles(root, limit, isRasterFile, consume);
     const Aowis::Map::RasterTransferOptimizer::Statistics statistics = optimizer.statistics();
     totals.codec_nanoseconds = statistics.encoding_microseconds * 1000;
     QJsonObject result = jsonTotals(totals);
@@ -137,15 +329,16 @@ QJsonObject benchmarkRaster(const QString &root, int quality, quint64 limit, boo
     result.insert(QStringLiteral("skipped_by_predictor"), qint64(statistics.skipped_predictor));
     result.insert(QStringLiteral("skipped_unsafe"), qint64(statistics.skipped_unsafe));
     result.insert(QStringLiteral("variant_cache_hits"), qint64(statistics.cache_hits));
+    if (region.has_value()) result.insert(QStringLiteral("region_coverage"), geographicCoverageJson(coverage));
     return result;
 }
 
-QJsonObject benchmarkTerrain(const QString &root, quint64 limit)
+QJsonObject benchmarkTerrain(const QString &root, quint64 limit,
+                             const std::optional<GeographicRegion> &region = std::nullopt)
 {
     Totals totals;
-    visitFiles(root, limit,
-               [](const QString &name) { return name.endsWith(QStringLiteral(".aowterrain")); },
-               [&](const QString &path)
+    RegionCoverage coverage;
+    const std::function<void(const QString &)> consume = [&](const QString &path)
     {
         ++totals.examined;
         QByteArray original;
@@ -175,8 +368,14 @@ QJsonObject benchmarkTerrain(const QString &root, quint64 limit)
         totals.transfer_bytes += quint64(compressed.has_value() ?
                                          compressed->size() : original.size());
         if (compressed.has_value()) ++totals.optimized;
-    });
-    return jsonTotals(totals);
+    };
+    if (region.has_value()) visitRegionFiles(root, limit, false, *region, consume, &coverage);
+    else visitFiles(root, limit,
+                    [](const QString &name) { return name.endsWith(QStringLiteral(".aowterrain")); },
+                    consume);
+    QJsonObject result = jsonTotals(totals);
+    if (region.has_value()) result.insert(QStringLiteral("region_coverage"), geographicCoverageJson(coverage));
+    return result;
 }
 
 bool writeFile(const QString &path, const QByteArray &bytes)
@@ -226,10 +425,30 @@ bool selfTest()
         return false;
     const QJsonObject raster = benchmarkRaster(raster_dir, 75, 10, false);
     const QJsonObject heights = benchmarkTerrain(terrain_dir, 10);
+    GeographicRegion bitkine{QStringLiteral("Bitkine, Chad"), 11.9801, 18.2138, 25.0, 8, 16};
+    const int bitkine_x = tileXAtLongitude(bitkine.longitude, 12);
+    const int bitkine_y = tileYAtLatitude(bitkine.latitude, 12);
+    terrain.address = {12, bitkine_x, bitkine_y};
+    const QByteArray bitkine_canonical = Aowis::Map::encodeTerrainTile(terrain);
+    if (bitkine_canonical.isEmpty() ||
+        !writeFile(raster_dir + QStringLiteral("/provider/12/%1/%2.png")
+                    .arg(bitkine_x).arg(bitkine_y), image) ||
+        !writeFile(terrain_dir + QStringLiteral("/v1/r2/copernicus-glo30/12/%1/%2.aowterrain")
+                    .arg(bitkine_x).arg(bitkine_y), bitkine_canonical))
+        return false;
+    const QJsonObject region_raster = benchmarkRaster(raster_dir, 75, 10, false, bitkine);
+    const QJsonObject region_terrain = benchmarkTerrain(terrain_dir, 10, bitkine);
+    const QJsonObject absent_raster = benchmarkRaster(raster_dir, 75, 10, false,
+        GeographicRegion{QStringLiteral("unpopulated"), -33.0, -60.0, 5.0, 12, 12});
     return raster.value(QStringLiteral("valid_tiles")).toInteger() == 1 &&
            heights.value(QStringLiteral("valid_tiles")).toInteger() == 1 &&
            heights.value(QStringLiteral("optimized_tiles")).toInteger() == 1 &&
-           heights.value(QStringLiteral("saved_percent")).toDouble() > 0.0;
+           heights.value(QStringLiteral("saved_percent")).toDouble() > 0.0 &&
+           region_raster.value(QStringLiteral("valid_tiles")).toInteger() == 1 &&
+           region_terrain.value(QStringLiteral("valid_tiles")).toInteger() == 1 &&
+           absent_raster.value(QStringLiteral("valid_tiles")).toInteger() == 0 &&
+           region_raster.value(QStringLiteral("region_coverage")).toObject()
+             .value(QStringLiteral("cached_candidates")).toInteger() == 1;
 }
 }
 
@@ -251,10 +470,22 @@ int main(int argc, char **argv)
         QStringLiteral("1000"));
     const QCommandLineOption exhaustive_option(QStringList{QStringLiteral("exhaustive-jpeg")},
         QStringLiteral("Try JPEG on all eligible PNGs instead of adaptive sampling"));
+    const QCommandLineOption region_option(QStringList{QStringLiteral("region")},
+        QStringLiteral("Geographic sample: bitkine (Chad)"), QStringLiteral("name"));
+    const QCommandLineOption radius_option(QStringList{QStringLiteral("radius-km")},
+        QStringLiteral("Region radius in km (1-100; default 25)"),
+        QStringLiteral("km"), QStringLiteral("25"));
+    const QCommandLineOption min_zoom_option(QStringList{QStringLiteral("min-zoom")},
+        QStringLiteral("Minimum zoom for geographic sample (default 8)"),
+        QStringLiteral("zoom"), QStringLiteral("8"));
+    const QCommandLineOption max_zoom_option(QStringList{QStringLiteral("max-zoom")},
+        QStringLiteral("Maximum zoom for geographic sample (default 16)"),
+        QStringLiteral("zoom"), QStringLiteral("16"));
     const QCommandLineOption selftest_option(QStringList{QStringLiteral("self-test")},
-        QStringLiteral("Run the built-in codec and file discovery smoke test"));
+        QStringLiteral("Run the built-in codec and geographic selection smoke test"));
     parser.addOptions({raster_option, terrain_option, quality_option, max_option,
-                       exhaustive_option, selftest_option});
+                       exhaustive_option, region_option, radius_option,
+                       min_zoom_option, max_zoom_option, selftest_option});
     parser.process(application);
     if (parser.isSet(selftest_option))
         return selfTest() ? 0 : 1;
@@ -272,11 +503,54 @@ int main(int argc, char **argv)
         std::fprintf(stderr, "Provide --raster and/or --terrain (see --help)\n");
         return 2;
     }
+    std::optional<GeographicRegion> region;
+    if (parser.isSet(region_option))
+    {
+        if (parser.value(region_option).compare(QStringLiteral("bitkine"),
+                                                Qt::CaseInsensitive) != 0)
+        {
+            std::fprintf(stderr, "Unknown region. Supported: bitkine\n");
+            return 2;
+        }
+        bool radius_ok = false;
+        bool minimum_ok = false;
+        bool maximum_ok = false;
+        const double radius = parser.value(radius_option).toDouble(&radius_ok);
+        const int minimum = parser.value(min_zoom_option).toInt(&minimum_ok);
+        const int maximum_zoom = parser.value(max_zoom_option).toInt(&maximum_ok);
+        if (!radius_ok || !std::isfinite(radius) || radius < 1.0 || radius > 100.0 ||
+            !minimum_ok || !maximum_ok || minimum < 0 || maximum_zoom > 20 ||
+            minimum > maximum_zoom)
+        {
+            std::fprintf(stderr, "Invalid geographic radius or zoom limits\n");
+            return 2;
+        }
+        region = GeographicRegion{QStringLiteral("Bitkine, Chad"), 11.9801, 18.2138,
+                                  radius, minimum, maximum_zoom};
+    }
+    else if (parser.isSet(radius_option) || parser.isSet(min_zoom_option) ||
+             parser.isSet(max_zoom_option))
+    {
+        std::fprintf(stderr, "--radius-km and zoom limits require --region\n");
+        return 2;
+    }
     QJsonObject report;
+    if (region.has_value())
+    {
+        QJsonObject area;
+        area.insert(QStringLiteral("name"), region->name);
+        area.insert(QStringLiteral("latitude"), region->latitude);
+        area.insert(QStringLiteral("longitude"), region->longitude);
+        area.insert(QStringLiteral("radius_km"), region->radius_km);
+        area.insert(QStringLiteral("min_zoom"), region->minimum_zoom);
+        area.insert(QStringLiteral("max_zoom"), region->maximum_zoom);
+        report.insert(QStringLiteral("region"), area);
+    }
     report.insert(QStringLiteral("jpeg_quality"), quality);
     report.insert(QStringLiteral("adaptive_jpeg"), !parser.isSet(exhaustive_option));
     report.insert(QStringLiteral("max_files_per_category"), qint64(maximum));
     quint64 valid = 0;
+    bool region_missing_data = false;
     if (parser.isSet(raster_option))
     {
         const QString root = parser.value(raster_option);
@@ -286,9 +560,16 @@ int main(int argc, char **argv)
             return 2;
         }
         const QJsonObject result = benchmarkRaster(root, quality, maximum,
-                                                   !parser.isSet(exhaustive_option));
+                                                   !parser.isSet(exhaustive_option), region);
         report.insert(QStringLiteral("raster"), result);
-        valid += quint64(result.value(QStringLiteral("valid_tiles")).toInteger());
+        const quint64 raster_valid = quint64(result.value(QStringLiteral("valid_tiles")).toInteger());
+        valid += raster_valid;
+        if (region.has_value() && raster_valid == 0)
+        {
+            region_missing_data = true;
+            std::fprintf(stderr, "No cached raster tiles around Bitkine; visit the area "
+                                 "in the GUI using a permitted imagery provider.\n");
+        }
     }
     if (parser.isSet(terrain_option))
     {
@@ -298,10 +579,17 @@ int main(int argc, char **argv)
             std::fprintf(stderr, "Terrain directory does not exist\n");
             return 2;
         }
-        const QJsonObject result = benchmarkTerrain(root, maximum);
+        const QJsonObject result = benchmarkTerrain(root, maximum, region);
         report.insert(QStringLiteral("terrain"), result);
-        valid += quint64(result.value(QStringLiteral("valid_tiles")).toInteger());
+        const quint64 terrain_valid = quint64(result.value(QStringLiteral("valid_tiles")).toInteger());
+        valid += terrain_valid;
+        if (region.has_value() && terrain_valid == 0)
+        {
+            region_missing_data = true;
+            std::fprintf(stderr, "No cached terrain tiles around Bitkine; render the "
+                                 "area in 3D before benchmarking terrain.\n");
+        }
     }
     std::fputs(QJsonDocument(report).toJson(QJsonDocument::Indented).constData(), stdout);
-    return valid > 0 ? 0 : 1;
+    return valid > 0 && !region_missing_data ? 0 : 1;
 }
