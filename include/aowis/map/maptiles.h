@@ -69,7 +69,8 @@ public:
     void setPermanentDataDirectory(const QString &directory);
     void configureProviders(const QVector<Aowis::Map::MapProvider> &providers,
                             const Aowis::Map::DownloadCoverage &coverage,
-                            const QString &default_coverage);
+                            const QString &default_coverage,
+                            const QHash<QString, QSet<QString>> &inherited_upstreams = {});
 
     TileRequestResult getTile(const QString &provider, int z, int x, int y, const QString &key,
                               const QByteArray &cascade_trace = {});
@@ -147,6 +148,8 @@ private:
     // permanent misses/auth failures do not suppress a healthy upstream.
     QHash<QString, qint64> cascade_cooldown_until_ms;
     QHash<QString, Aowis::Map::MapProvider> configured_providers;
+    // Remote-only providers can never use a direct origin URL fallback.
+    QHash<QString, QSet<QString>> inherited_upstreams;
     // First-use URL fingerprint selection. Separates cache contents when an
     // administrator changes the upstream URL without changing the UUID.
     mutable QHash<QString, QString> provider_cache_paths;

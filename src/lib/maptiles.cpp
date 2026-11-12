@@ -177,9 +177,11 @@ bool MapTiles::acceptsCascadeTrace(const QByteArray &trace) const
 
 void MapTiles::configureProviders(const QVector<Aowis::Map::MapProvider> &providers,
                                   const Aowis::Map::DownloadCoverage &coverage,
-                                  const QString &default_coverage)
+                                  const QString &default_coverage,
+                                  const QHash<QString, QSet<QString>> &inherited_upstreams)
 {
     ++this->cache_generation;
+    this->inherited_upstreams = inherited_upstreams;
     this->configured_providers.clear();
     this->permanent_cached_keys.clear();
     this->provider_cache_paths.clear();
@@ -353,7 +355,9 @@ MapTiles::TileRequestResult MapTiles::getTile(const QString &provider, int z, in
     {
         const QString upstream_origin = upstream.url.toString(
             QUrl::RemovePath | QUrl::RemoveQuery | QUrl::RemoveFragment);
-        if (this->cascade_cooldown_until_ms.value(upstream_origin) > now_ms)
+        if (this->cascade_cooldown_until_ms.value(upstream_origin) > now_ms ||
+            (this->inherited_upstreams.contains(provider) &&
+             !this->inherited_upstreams.value(provider).contains(upstream.name)))
             continue;
         DownloadSource source;
         source.url = upstream_origin + path;
@@ -361,7 +365,8 @@ MapTiles::TileRequestResult MapTiles::getTile(const QString &provider, int z, in
         source.cascade = true;
         download.sources.append(source);
     }
-    if (this->cascade_config.allow_direct_fetch)
+    if (this->cascade_config.allow_direct_fetch &&
+        !this->inherited_upstreams.contains(provider))
     {
         DownloadSource source;
         source.url = providerUrl(provider, z, wrapped_x, y);

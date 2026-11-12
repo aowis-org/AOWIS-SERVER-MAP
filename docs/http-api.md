@@ -14,7 +14,8 @@ Except where noted, successful GETs use HTTP `200`. `OPTIONS` is supported for t
 | Method | Route | Result |
 | --- | --- | --- |
 | GET | `/status` | Plain-text Qt/server and terrain status |
-| GET | `/map/v1/providers` | JSON raster-provider catalog |
+| GET | `/map/v1/providers` | Local editable raster-provider catalog |
+| GET | `/map/v1/providers/available` | Local + inherited providers, read-only |
 | PUT | `/map/v1/providers` | Replace and persist provider catalog (**unauthenticated**) |
 | GET | `/<provider-uuid>/<z>/<x>/<y>.png` | `image/png` raster tile |
 | DELETE | `/cache/<provider-uuid>/<z>/<xmin>/<xmax>/<ymin>/<ymax>` | Number of deleted raster cache entries |
@@ -64,6 +65,14 @@ curl -fsS http://127.0.0.1:8122/map/v1/providers
 
 The response is a JSON object with a `providers` array; each entry contains `id`, `name`, `url`, `minimum_zoom`, `maximum_zoom`, `enabled`, `remote_fetch_enabled` and `coverage`. Disabled providers are included and configured URLs are visible.
 
+`GET /map/v1/providers/available` provides the combined catalog for downstream
+MAP servers and GUI clients. Each entry has the usual provider fields plus
+`origin` (`local` or `inherited`) and `upstreams` (ordered immediate MAP server
+names). This endpoint requires the ordinary read API key if configured.
+It retains validated, last-known-good inherited providers when an upstream is
+unreachable. Editing via PUT remains **local-only**; it cannot alter inherited
+providers or upstream catalogs.
+
 A PUT replaces **the entire catalog**, not just selected entries:
 
 ```bash
@@ -83,7 +92,7 @@ curl -i -X PUT 'http://127.0.0.1:8122/map/v1/providers' \
   }'
 ```
 
-Up to 100 providers are accepted. The server validates the UUIDs, URL templates and zoom limits before updating the in-memory catalog and atomically saving `providers.ini`. It **never rewrites the administrator's `map-server.ini`**. The `providers` array can be intentionally empty. A URL change separates the disk-cache variant so imagery from the previous upstream is not silently reused.
+Up to 100 providers are accepted. The server validates the UUIDs, URL templates and zoom limits before updating the in-memory catalog and atomically saving MAP-owned AOWIS-CONFIG records. It **never rewrites the administrator's `map-server.ini`**. The `providers` array can be intentionally empty. A URL change separates the disk-cache variant so imagery from the previous upstream is not silently reused.
 
 > The PUT endpoint currently has **no read-key or delete-key authentication**. Apply trusted-client restrictions before deploying this feature on any shared network.
 

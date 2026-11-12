@@ -44,6 +44,32 @@ For Step 3 terrain requests, upstreams exchange `X-AOWIS-Cascade-Visited` and op
 
 For Step 2 raster requests, upstreams exchange `X-AOWIS-Raster-Source` (SHA-256 of the effective raster provider URL template), `X-AOWIS-Cascade-Visited` (comma-separated process UUIDs, maximum eight hops), and optional `X-API-Key`. A mismatched or missing response fingerprint is rejected. Redirects are not followed. Cascade-only instances never contact original raster providers.
 
+## Raster provider discovery (Stage A)
+
+With configured MAP upstreams, the server fetches each upstream's read-only
+`GET /map/v1/providers/available` catalog (falling back to the older
+`GET /map/v1/providers` when necessary). It merges local and inherited providers
+**without modifying local AOWIS-CONFIG provider records**. Downstream clients
+read the combined catalog from `/map/v1/providers/available`, where each entry
+includes `origin: local|inherited` and the ordered immediate `upstreams` names.
+The existing `/map/v1/providers` GET/PUT continues to manage **local** providers
+only. Provider edits are never propagated upstream.
+
+- A local definition (including a disabled one) takes precedence over an
+  inherited provider with the same UUID. Upstream UUID collisions with
+  different URL/style templates are not merged; the earlier upstream wins.
+- Inherited raster providers are fetched only through the upstreams that
+  advertise the matching source. They **never** fall back to a direct provider
+  origin, even when global `allow_direct_fetch=true`. They still obey the
+  downstream's raster remote-fetch and geographic coverage restrictions.
+- Validated upstream catalog snapshots are stored under the MAP cache's
+  `provider-catalogs/` directory. They survive restart and upstream outages.
+  A failed refresh never replaces a last-known-good snapshot. No secret
+  upstream API keys are written to these snapshots.
+- Discovery is read-only and asynchronous, refreshing at startup and every 15
+  minutes while upstreams are configured. It does not yet provide GUI-side
+  inherited-provider toggles or per-provider routing controls (later stages).
+
 ## Wire representation on slow links
 
 A downstream with `poor_internet_mode=true` requests optimized representations from each MAP upstream. For raster data it sends `X-AOWIS-Raster-Transfer: adaptive-jpeg;quality=75` (using configured quality) alongside a valid `X-AOWIS-Cascade-Visited` trace. The upstream ignores the compression request without a cascade trace. Responses vary on `X-AOWIS-Raster-Transfer`. Upstreams support this opt-in even if their own poor-internet mode is off. Normal GUI endpoints, tile addresses and public API behavior stay compatible.

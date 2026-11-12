@@ -435,11 +435,23 @@ Server::Server(const Config &config, QObject *parent)
     this->maptiles->setCascadeConfig(config.cascade);
     this->terrain_data->setCascadeInstanceId(this->maptiles->cascadeInstanceId());
     this->maptiles->setPermanentDataDirectory(config.permanent_data_directory);
-    this->maptiles->configureProviders(config.map_providers, config.download_coverage,
-                                       config.map_coverage);
+    this->provider_catalog = new Aowis::Map::ProviderCatalog(config.cache_directory, this);
+    connect(this->provider_catalog, &Aowis::Map::ProviderCatalog::catalogChanged,
+            this, &Server::applyAvailableProviders);
+    this->provider_catalog->configure(config.map_providers, config.cascade);
+    applyAvailableProviders();
     connect(this->maptiles, &MapTiles::tileReady, this, &Server::onTileReady);
     connect(this->maptiles, &MapTiles::tileFailed, this, &Server::onTileFailed);
     setupRoutes();
+}
+
+void Server::applyAvailableProviders()
+{
+    QVector<Aowis::Map::MapProvider> active;
+    for (const Aowis::Map::AvailableMapProvider &entry : this->provider_catalog->available())
+        active.append(entry.provider);
+    this->maptiles->configureProviders(active, this->config.download_coverage,
+        this->config.map_coverage, this->provider_catalog->inheritedUpstreams());
 }
 
 QString Server::terrainClientKey(const QHostAddress &address, quint16 port)
@@ -1215,6 +1227,7 @@ bool Server::start()
                           .arg(terrain_paths.root, this->config.terrain_default_dataset)
                     : QString())
             << read_authentication_status << "and" << delete_authentication_status;
+    this->provider_catalog->refresh();
     return true;
 }
 
@@ -1398,6 +1411,22 @@ void Server::setupRoutes()
         return makeOptionsResponse();
     });
 
+    // Read-only merged catalog for downstream MAP servers and GUI clients.
+    // PUT /map/v1/providers remains local-only and never edits inherited rows.
+    this->http.route("/map/v1/providers/available", QHttpServerRequest::Method::Get,
+                     [this](const QHttpServerRequest &request)
+    {
+        if (!isReadAuthorized(request)) return makeUnauthorizedResponse();
+        if (!this->maptiles->acceptsCascadeTrace(
+                request.value("x-aowis-cascade-visited")))
+            return QHttpServerResponse("Cascade loop detected",
+                QHttpServerResponse::StatusCode::Conflict);
+        return QHttpServerResponse(QByteArrayLiteral("application/json"),
+            this->provider_catalog->encodedAvailable(), QHttpServerResponse::StatusCode::Ok);
+    });
+    this->http.route("/map/v1/providers/available", QHttpServerRequest::Method::Options,
+                     []() { return makeOptionsResponse(); });
+
     // Discoverable catalog of map layers. Only server-configured providers
     // are exposed; URLs and credentials stay on the server.
     this->http.route("/map/v1/providers", QHttpServerRequest::Method::Get,
@@ -1454,9 +1483,7 @@ void Server::setupRoutes()
         this->config.provider_revision = new_revision;
         this->maptiles->cancelUpstreamDownloads();
         this->config.map_providers = proposed;
-        this->maptiles->configureProviders(this->config.map_providers,
-                                           this->config.download_coverage,
-                                           this->config.map_coverage);
+        this->provider_catalog->setLocalProviders(this->config.map_providers);
         return QHttpServerResponse("Map providers saved and applied",
                                    QHttpServerResponse::StatusCode::Ok);
     });

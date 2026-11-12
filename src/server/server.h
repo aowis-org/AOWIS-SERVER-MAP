@@ -34,6 +34,7 @@
 #include <aowis/map/map_cascade_config.h>
 #include <aowis/map/raster_transfer.h>
 #include <aowis/map/map_provider.h>
+#include <aowis/map/provider_catalog.h>
 #include <aowis/map/download_coverage.h>
 
 namespace Aowis::Map
@@ -51,6 +52,7 @@ class Server : public QObject
     friend class RasterJpegHttpTestAccess;
     friend class MapCascadeChainTestAccess;
     friend class MapManagedSettingsHttpTestAccess;
+    friend class ProviderDiscoveryTestAccess;
 
 public:
     struct Config
@@ -126,7 +128,10 @@ private:
     void completeRasterPromises(const PendingPromises &promises, const QByteArray &data,
                                 const QByteArray &source, int zoom, int requested_quality);
 
+    void applyAvailableProviders();
+
     Config config;
+    Aowis::Map::ProviderCatalog *provider_catalog = nullptr;
     QHttpServer http;
     QTcpServer *tcp;
     QThreadPool terrain_worker_pool;
