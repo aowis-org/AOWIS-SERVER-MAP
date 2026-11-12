@@ -39,6 +39,14 @@ struct Totals
     quint64 transfer_bytes = 0;
     quint64 optimized = 0;
     quint64 codec_nanoseconds = 0;
+    quint64 png_tiles = 0;
+    quint64 jpeg_tiles = 0;
+    quint64 webp_tiles = 0;
+    quint64 jpeg_attempts = 0;
+    quint64 skipped_small = 0;
+    quint64 skipped_unsafe = 0;
+    quint64 skipped_predictor = 0;
+    quint64 variant_hits = 0;
 };
 
 bool readFile(const QString &path, QByteArray *data, qint64 maximum)
@@ -299,6 +307,7 @@ QJsonObject benchmarkRaster(const QString &root, int quality, quint64 limit, boo
     Totals totals;
     QMap<QString, Totals> by_source;
     Aowis::Map::RasterTransferOptimizer optimizer;
+    Aowis::Map::RasterTransferOptimizer::Statistics last_statistics;
     RegionCoverage coverage;
     const std::function<void(const QString &)> consume = [&](const QString &path)
     {
@@ -315,10 +324,21 @@ QJsonObject benchmarkRaster(const QString &root, int quality, quint64 limit, boo
             ++source_totals.invalid;
             return;
         }
+        if (original.startsWith("\x89PNG\r\n\x1a\n")) ++source_totals.png_tiles;
+        else if (original.startsWith("\xff\xd8\xff")) ++source_totals.jpeg_tiles;
+        else ++source_totals.webp_tiles;
         const QByteArray source = source_name.toUtf8();
         const int zoom = address.has_value() ? address->zoom : 0;
         const Aowis::Map::RasterTransferOptimizer::Selection selection =
             optimizer.select(original, source, zoom, quality, adaptive);
+        const Aowis::Map::RasterTransferOptimizer::Statistics now = optimizer.statistics();
+        source_totals.jpeg_attempts += now.tiles_evaluated - last_statistics.tiles_evaluated;
+        source_totals.skipped_small += now.skipped_small - last_statistics.skipped_small;
+        source_totals.skipped_unsafe += now.skipped_unsafe - last_statistics.skipped_unsafe;
+        source_totals.skipped_predictor +=
+            now.skipped_predictor - last_statistics.skipped_predictor;
+        source_totals.variant_hits += now.cache_hits - last_statistics.cache_hits;
+        last_statistics = now;
         ++totals.valid;
         ++source_totals.valid;
         totals.original_bytes += quint64(original.size());
@@ -350,6 +370,14 @@ QJsonObject benchmarkRaster(const QString &root, int quality, quint64 limit, boo
     {
         QJsonObject provider = jsonTotals(it.value());
         provider.remove(QStringLiteral("codec_time_ms"));
+        provider.insert(QStringLiteral("png_tiles"), qint64(it.value().png_tiles));
+        provider.insert(QStringLiteral("jpeg_tiles"), qint64(it.value().jpeg_tiles));
+        provider.insert(QStringLiteral("webp_tiles"), qint64(it.value().webp_tiles));
+        provider.insert(QStringLiteral("jpeg_encodes_attempted"), qint64(it.value().jpeg_attempts));
+        provider.insert(QStringLiteral("skipped_small"), qint64(it.value().skipped_small));
+        provider.insert(QStringLiteral("skipped_unsafe"), qint64(it.value().skipped_unsafe));
+        provider.insert(QStringLiteral("skipped_by_predictor"), qint64(it.value().skipped_predictor));
+        provider.insert(QStringLiteral("variant_cache_hits"), qint64(it.value().variant_hits));
         source_results.insert(it.key(), provider);
     }
     result.insert(QStringLiteral("by_source"), source_results);
@@ -452,7 +480,8 @@ bool selfTest()
     GeographicRegion bitkine{QStringLiteral("Bitkine, Chad"), 11.9801, 18.2138, 25.0, 8, 16};
     const int bitkine_x = tileXAtLongitude(bitkine.longitude, 12);
     const int bitkine_y = tileYAtLatitude(bitkine.latitude, 12);
-    terrain.address = {12, bitkine_x, bitkine_y};
+    terrain.address = {12, static_cast<quint32>(bitkine_x),
+                       static_cast<quint32>(bitkine_y)};
     const QByteArray bitkine_canonical = Aowis::Map::encodeTerrainTile(terrain);
     if (bitkine_canonical.isEmpty() ||
         !writeFile(raster_dir + QStringLiteral("/provider/12/%1/%2.png")
@@ -473,6 +502,10 @@ bool selfTest()
            region_terrain.value(QStringLiteral("valid_tiles")).toInteger() == 1 &&
            provider_breakdown.value(QStringLiteral("provider")).toObject()
              .value(QStringLiteral("valid_tiles")).toInteger() == 1 &&
+           provider_breakdown.value(QStringLiteral("provider")).toObject()
+             .value(QStringLiteral("png_tiles")).toInteger() == 1 &&
+           provider_breakdown.value(QStringLiteral("provider")).toObject()
+             .value(QStringLiteral("jpeg_encodes_attempted")).toInteger() == 1 &&
            absent_raster.value(QStringLiteral("valid_tiles")).toInteger() == 0 &&
            region_raster.value(QStringLiteral("region_coverage")).toObject()
              .value(QStringLiteral("cached_candidates")).toInteger() == 1;
