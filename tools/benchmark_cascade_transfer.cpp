@@ -297,27 +297,39 @@ QJsonObject benchmarkRaster(const QString &root, int quality, quint64 limit, boo
                             const std::optional<GeographicRegion> &region = std::nullopt)
 {
     Totals totals;
+    QMap<QString, Totals> by_source;
     Aowis::Map::RasterTransferOptimizer optimizer;
     RegionCoverage coverage;
     const std::function<void(const QString &)> consume = [&](const QString &path)
     {
         ++totals.examined;
+        const std::optional<CachedTile> address = cachedTileAddress(root, path, true);
+        const QString source_name = address.has_value() ?
+            address->source : QStringLiteral("unknown");
+        Totals &source_totals = by_source[source_name];
+        ++source_totals.examined;
         QByteArray original;
         if (!readFile(path, &original, 16 * 1024 * 1024) || !isRasterPayload(original))
         {
             ++totals.invalid;
+            ++source_totals.invalid;
             return;
         }
-        const std::optional<CachedTile> address = cachedTileAddress(root, path, true);
-        const QByteArray source = address.has_value() ?
-            address->source.toUtf8() : QByteArrayLiteral("unknown");
+        const QByteArray source = source_name.toUtf8();
         const int zoom = address.has_value() ? address->zoom : 0;
         const Aowis::Map::RasterTransferOptimizer::Selection selection =
             optimizer.select(original, source, zoom, quality, adaptive);
         ++totals.valid;
+        ++source_totals.valid;
         totals.original_bytes += quint64(original.size());
+        source_totals.original_bytes += quint64(original.size());
         totals.transfer_bytes += quint64(selection.bytes.size());
-        if (selection.jpeg) ++totals.optimized;
+        source_totals.transfer_bytes += quint64(selection.bytes.size());
+        if (selection.jpeg)
+        {
+            ++totals.optimized;
+            ++source_totals.optimized;
+        }
     };
     if (region.has_value()) visitRegionFiles(root, limit, true, *region, consume, &coverage);
     else visitFiles(root, limit, isRasterFile, consume);
@@ -329,6 +341,18 @@ QJsonObject benchmarkRaster(const QString &root, int quality, quint64 limit, boo
     result.insert(QStringLiteral("skipped_by_predictor"), qint64(statistics.skipped_predictor));
     result.insert(QStringLiteral("skipped_unsafe"), qint64(statistics.skipped_unsafe));
     result.insert(QStringLiteral("variant_cache_hits"), qint64(statistics.cache_hits));
+    // Compression economics can differ sharply between satellite imagery and
+    // text/road maps even in one geographic region. Show the actual bytes
+    // saved per provider; no provider's data is silently pooled into another.
+    QJsonObject source_results;
+    for (QMap<QString, Totals>::const_iterator it = by_source.cbegin();
+         it != by_source.cend(); ++it)
+    {
+        QJsonObject provider = jsonTotals(it.value());
+        provider.remove(QStringLiteral("codec_time_ms"));
+        source_results.insert(it.key(), provider);
+    }
+    result.insert(QStringLiteral("by_source"), source_results);
     if (region.has_value()) result.insert(QStringLiteral("region_coverage"), geographicCoverageJson(coverage));
     return result;
 }
@@ -438,6 +462,7 @@ bool selfTest()
         return false;
     const QJsonObject region_raster = benchmarkRaster(raster_dir, 75, 10, false, bitkine);
     const QJsonObject region_terrain = benchmarkTerrain(terrain_dir, 10, bitkine);
+    const QJsonObject provider_breakdown = region_raster.value(QStringLiteral("by_source")).toObject();
     const QJsonObject absent_raster = benchmarkRaster(raster_dir, 75, 10, false,
         GeographicRegion{QStringLiteral("unpopulated"), -33.0, -60.0, 5.0, 12, 12});
     return raster.value(QStringLiteral("valid_tiles")).toInteger() == 1 &&
@@ -446,6 +471,8 @@ bool selfTest()
            heights.value(QStringLiteral("saved_percent")).toDouble() > 0.0 &&
            region_raster.value(QStringLiteral("valid_tiles")).toInteger() == 1 &&
            region_terrain.value(QStringLiteral("valid_tiles")).toInteger() == 1 &&
+           provider_breakdown.value(QStringLiteral("provider")).toObject()
+             .value(QStringLiteral("valid_tiles")).toInteger() == 1 &&
            absent_raster.value(QStringLiteral("valid_tiles")).toInteger() == 0 &&
            region_raster.value(QStringLiteral("region_coverage")).toObject()
              .value(QStringLiteral("cached_candidates")).toInteger() == 1;

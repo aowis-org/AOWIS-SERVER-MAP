@@ -1,6 +1,6 @@
 # MAP-to-MAP cascading (protocol and test specification)
 
-**Status:** MAP-to-MAP raster and normalized-terrain cascading, zstd terrain transfer and adaptive JPEG imagery transfer are implemented. This document records the wire protocol, policy and acceptance criteria; it is not a deployment walkthrough. See [Configuration](configuration.md) for settings, paths and precedence. Real-project bandwidth benchmarks remain to be completed. Native Copernicus GeoTIFF replication and hydrology-specific data are out of scope.
+**Status:** MAP-to-MAP raster and normalized-terrain cascading, zstd terrain transfer and adaptive JPEG imagery transfer are implemented. This document records the wire protocol, policy and acceptance criteria; it is not a deployment walkthrough. See [Configuration](configuration.md) for settings, paths and precedence. Bitkine cached-payload benchmarks are available; real WAN performance remains unmeasured. Native Copernicus GeoTIFF replication and hydrology-specific data are out of scope.
 
 ## Configuration and acquisition order
 
@@ -56,17 +56,17 @@ The downstream must verify raster provider identity **and effective imagery sour
 
 ## Adaptive PNG → JPEG decision
 
-Do not encode every raster tile. Evaluate content in strata rather than imposing a single provider-wide decision. **Initial tuning values (benchmark and adjust):**
+Do not blindly encode every raster tile. Evaluate content in strata rather than imposing a single provider-wide decision. **Thresholds and behavior (motivated by Bitkine cache measurements; rerun to validate the new selector):**
 
 | Input | Action |
 | --- | --- |
 | Existing JPEG/WebP; PNG with transparency; provider opt-out | Forward original, no lossy conversion |
 | PNG below 12 KiB | Forward original |
-| Opaque PNG 12–32 KiB | Sparse sampling (initially 1 in 8) |
-| Opaque PNG 32–96 KiB | Sample first; then follow learned bucket outcome |
-| Opaque PNG above 96 KiB | Usually try JPEG, subject to CPU limits |
+| Opaque PNG 12–96 KiB | Encode the first eight candidates in each source/zoom/size bucket; continue if JPEG has won recently |
+| Bucket with eight consecutive losing encodes | Probe one in 32 eligible tiles; a winning probe immediately restores full encoding |
+| Opaque PNG above 96 KiB | Always try JPEG, subject to CPU limits |
 
-Buckets are keyed by **provider/source style, zoom band and original byte-size band**, not just provider. For each bucket, retain recent sample count, JPEG win rate, bytes saved and end-to-end PNG decode + JPEG encode CPU cost. Begin with sparse exploration; when a bucket reliably saves bytes, evaluate most eligible tiles; otherwise evaluate only occasional samples (initially 1 in 32) so behavior can change with geographic content. Very large PNGs remain eligible even if their bucket generally loses.
+Buckets are keyed by **provider/source style, zoom band and original byte-size band**, not just provider. The selector keeps the last eight actual encoding outcomes for each bucket. It attempts every eligible PNG until eight consecutive encodes fail the size threshold; only then does it back off to a probe every 32 visits. One successful probe resumes full evaluation. The HTTP server caps parallel encoders at two and sends original bytes immediately when busy. Thus a winning bucket does not arbitrarily skip 25% of its tiles, as the original predictor did in the Bitkine benchmark. Very large PNGs remain eligible even if their bucket generally loses.
 
 For **every** JPEG actually encoded, compare its real size to the real original size. Select JPEG only if it saves at least **10% and 2 KiB** (initial thresholds); otherwise transmit the original. These are *size* decisions, not evidence of acceptable visual quality: keep transparency and provider opt-outs as hard restrictions. Do not use machine learning or image recognition.
 
@@ -107,7 +107,7 @@ Pass either directory separately if needed. The tool recursively reads actual
 cached image files and canonical `.aowterrain` files. Its default adaptive JPEG
 sampling matches the MAP selector; `--exhaustive-jpeg` instead evaluates every
 eligible PNG for an upper-bound comparison. The report includes payload bytes,
-selected JPEG/zstd counts and codec CPU time. It does **not** measure network
+selected JPEG/zstd counts, raster savings by provider and codec CPU time. It does **not** measure network
 latency, HTTP framing, provider-specific lossless-only policy or concurrent
 server load. Representative imagery and terrain from the actual project area
 are needed before making real-world savings claims.
@@ -139,3 +139,10 @@ The tool fails when a requested category has no cached tiles in the region;
 Bitkine in the GUI first to populate the raster/3D terrain cache, with an
 imagery provider whose terms permit such use. A sparse cache is not evidence
 of representative savings. No tile imagery is fetched by the benchmark.
+
+For the initial Bitkine 25 km sample (2,000 raster tiles, JPEG 75), the old
+adaptive policy saved 25.24% versus 43.92% with exhaustive attempts. This
+difference motivated the revised predictor; rerun both modes to verify it
+reduces missed savings. Terrain zstd saved 2.57% on 210 cached tiles. These
+measurements exclude provider-level lossy-transfer opt-outs, HTTP overhead and
+actual WAN latency.

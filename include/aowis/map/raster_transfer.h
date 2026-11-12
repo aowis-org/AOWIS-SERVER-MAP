@@ -58,6 +58,10 @@ private:
         quint64 evaluations = 0;
         quint64 wins = 0;
         quint64 total_saved = 0;
+        // Rolling outcomes of the last eight actual encoding attempts. This
+        // lets a previously poor bucket recover when its geography changes.
+        quint8 recent_results = 0;
+        quint8 recent_count = 0;
     };
 
     static QByteArray cacheKey(const QByteArray &original, int quality);

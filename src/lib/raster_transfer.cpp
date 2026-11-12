@@ -165,20 +165,20 @@ RasterTransferOptimizer::Selection RasterTransferOptimizer::select(
             this->buckets.clear();
         Bucket &bucket = this->buckets[bucket_name];
         ++bucket.visits;
-        if (adaptive && original.size() < 98304)
+        // Bandwidth is the scarce resource in poor-internet mode. The old
+        // policy skipped 25% of tiles even in buckets where JPEG nearly always
+        // won; the Bitkine benchmark showed that those skipped tiles cost real
+        // WAN bytes. Test the first eight eligible tiles, then keep converting
+        // unless the *last eight attempts* all failed the size/quality rule.
+        // A losing bucket gets a periodic probe (1/32 visits) so changes in
+        // geographic content can immediately re-enable JPEG conversion.
+        // The server's two-worker admission limit still bounds CPU use.
+        if (adaptive && original.size() < 98304 &&
+            bucket.recent_count == 8 && bucket.recent_results == 0 &&
+            bucket.visits % 32 != 0)
         {
-            bool evaluate = false;
-            if (bucket.evaluations < 8)
-                evaluate = bucket.visits % (original.size() < 32768 ? 8 : 2) == 1;
-            else if (bucket.wins * 5 >= bucket.evaluations * 3)
-                evaluate = bucket.visits % 4 != 0;
-            else
-                evaluate = bucket.visits % 32 == 0;
-            if (!evaluate)
-            {
-                ++this->counters.skipped_predictor;
-                return unchanged;
-            }
+            ++this->counters.skipped_predictor;
+            return unchanged;
         }
         this->in_progress.insert(key);
     }
@@ -196,6 +196,9 @@ RasterTransferOptimizer::Selection RasterTransferOptimizer::select(
         this->in_progress.remove(key);
         Bucket &bucket = this->buckets[bucket_name];
         ++bucket.evaluations;
+        bucket.recent_results = quint8((unsigned(bucket.recent_results) << 1) |
+                                      (wins ? 1u : 0u));
+        if (bucket.recent_count < 8) ++bucket.recent_count;
         if (wins)
         {
             ++bucket.wins;
