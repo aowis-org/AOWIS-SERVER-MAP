@@ -6,6 +6,7 @@
 
 #include <QByteArray>
 #include <QString>
+#include <QSet>
 #include <QVector>
 
 #include <memory>
@@ -42,7 +43,16 @@ public:
     bool readProviders(QVector<MapProvider> *value, QString *revision = nullptr,
                        QString *error = nullptr) const;
     bool saveProviders(const QVector<MapProvider> &value, const QString &expected_revision,
-                       QString *revision = nullptr, QString *error = nullptr) const;
+                     QString *revision = nullptr, QString *error = nullptr) const;
+    // Local-only availability switches for discovered providers, separate from
+    // the editable local catalog. Unknown UUIDs may be retained for offline
+    // recovery and future upstream refreshes; they never define imagery.
+    bool readDisabledInheritedProviders(QSet<QString> *ids, QString *revision = nullptr,
+                                        QString *error = nullptr) const;
+    bool saveDisabledInheritedProviders(const QSet<QString> &ids,
+                                        const QString &expected_revision,
+                                        QString *revision = nullptr,
+                                        QString *error = nullptr) const;
 
 private:
     struct Impl;

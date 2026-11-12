@@ -74,6 +74,8 @@ public:
         QString provider_state_file; // Legacy import path only; never written by the REST server.
         QString managed_settings_root; // MAP-owned AOWIS-CONFIG owner root, set by main.
         QString provider_revision; // Optimistic concurrency token for provider PUT.
+        QSet<QString> disabled_inherited_providers;
+        QString inherited_provider_revision;
         bool cascade_defined_in_admin_ini = false;
         QString cache_directory;
         QString permanent_data_directory;

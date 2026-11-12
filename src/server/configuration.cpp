@@ -414,6 +414,13 @@ bool MapServerConfiguration::loadManagedSettings(Server::Config *config, bool mi
     }
     if (!cascade_revision.isEmpty() && !config->cascade_defined_in_admin_ini)
         config->cascade = managed_cascade;
+    QSet<QString> disabled_inherited;
+    QString inherited_revision;
+    if (!repository->readDisabledInheritedProviders(&disabled_inherited, &inherited_revision,
+                                                     error_message))
+        return false;
+    config->disabled_inherited_providers = disabled_inherited;
+    config->inherited_provider_revision = inherited_revision;
     config->provider_revision = provider_revision;
     config->managed_settings_root = root;
     if (error_message != nullptr)

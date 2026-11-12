@@ -16,6 +16,7 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QSet>
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QTemporaryDir>
@@ -123,6 +124,30 @@ ReplyData request(QCoreApplication &application, QNetworkAccessManager *manager,
     delete reply;
     return data;
 }
+ReplyData updateProvider(QCoreApplication &application, QNetworkAccessManager *manager,
+                         const QUrl &url, const QByteArray &key, const QString &id, bool enabled)
+{
+    QNetworkRequest query(url);
+    query.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
+    if (!key.isEmpty()) query.setRawHeader("X-API-Key", key);
+    const QByteArray body = QJsonDocument(QJsonObject{
+        {QStringLiteral("id"), id}, {QStringLiteral("enabled"), enabled}
+    }).toJson(QJsonDocument::Compact);
+    QNetworkReply *reply = manager->put(query, body);
+    QElapsedTimer timer;
+    timer.start();
+    while (!reply->isFinished() && timer.elapsed() < 9000)
+    {
+        application.processEvents(QEventLoop::AllEvents, 15);
+        QThread::msleep(1);
+    }
+    if (!reply->isFinished()) reply->abort();
+    ReplyData response;
+    response.status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    response.body = reply->readAll();
+    delete reply;
+    return response;
+}
 }
 
 int main(int argc, char **argv)
@@ -162,6 +187,8 @@ int main(int argc, char **argv)
     config.cascade.allow_direct_fetch = true; // Must NEVER apply to inherited sources.
     config.cascade.upstreams.append({QStringLiteral("root"), root.origin(), root.api_key});
     config.cascade.upstreams.append({QStringLiteral("backup"), backup.origin(), backup.api_key});
+    config.delete_api_key = QByteArrayLiteral("admin-key");
+    config.managed_settings_root = QDir(storage.path()).filePath(QStringLiteral("map-config"));
 
     QNetworkAccessManager network;
     const QString path = QStringLiteral("/%1/6/30/22.png").arg(inherited.id);
@@ -201,11 +228,60 @@ int main(int argc, char **argv)
         if (!check(local.status == 200 && QJsonDocument::fromJson(local.body)
                    .object().value(QStringLiteral("providers")).toArray().isEmpty(),
                    "Keep editable local catalog separate")) return 1;
+        const QUrl override_url(base + QStringLiteral("/map/v1/providers/inherited"));
+        if (!check(updateProvider(application, &network, override_url, {}, inherited.id,
+                                  false).status == 401,
+                   "Inherited provider edits require administrator authentication")) return 1;
+        if (!check(updateProvider(application, &network, override_url,
+                                  config.delete_api_key, inherited.id, false).status == 200,
+                   "Disable inherited provider locally")) return 1;
+        const ReplyData disabled_catalog = request(application, &network, available_url,
+                                                   config.api_key);
+        const QJsonArray disabled_entries = QJsonDocument::fromJson(disabled_catalog.body)
+            .object().value(QStringLiteral("providers")).toArray();
+        if (!check(disabled_entries.size() == 1 &&
+                   !disabled_entries.first().toObject().value(QStringLiteral("enabled")).toBool() &&
+                   disabled_entries.first().toObject().value(QStringLiteral("origin")).toString() ==
+                       QStringLiteral("inherited"),
+                   "Disabled inherited provider remains discoverable")) return 1;
+        std::unique_ptr<Aowis::Map::SettingsRepository> override_repository =
+            Aowis::Map::SettingsRepository::openAtOwnerRoot(
+                QStringLiteral("server-map"), config.managed_settings_root);
+        QSet<QString> stored_disabled;
+        if (!check(override_repository != nullptr &&
+                   override_repository->readDisabledInheritedProviders(&stored_disabled) &&
+                   stored_disabled.contains(inherited.id),
+                   "Inherited disable state saved through MAP CONFIG")) return 1;
+        const int root_tiles_before_disabled = root.tile_count;
+        const ReplyData disabled_tile = request(application, &network, QUrl(base + path),
+                                                config.api_key);
+        if (!check(disabled_tile.status != 200 && root.tile_count == root_tiles_before_disabled,
+                   "Disabled provider cannot retrieve tiles from upstream")) return 1;
+        if (!check(updateProvider(application, &network, override_url,
+                                  config.delete_api_key, inherited.id, true).status == 200,
+                   "Re-enable inherited provider without editing upstream catalog")) return 1;
+        std::unique_ptr<Aowis::Map::SettingsRepository> persisted =
+            Aowis::Map::SettingsRepository::openAtOwnerRoot(
+                QStringLiteral("server-map"), config.managed_settings_root);
+        QSet<QString> disabled_after;
+        if (!check(persisted != nullptr &&
+                   persisted->readDisabledInheritedProviders(&disabled_after) &&
+                   disabled_after.isEmpty(), "Inherited override persists in MAP CONFIG")) return 1;
         const ReplyData tile = request(application, &network, QUrl(base + path),
                                        config.api_key);
         if (!check(tile.status == 200 && tile.body == ValidPng &&
                    root.tile_count > 0 && origin.tile_count == 0,
                    "Fetch inherited provider via MAP only")) return 1;
+        // Cached tiles must also obey local enablement, not just new downloads.
+        if (!check(updateProvider(application, &network, override_url,
+                                  config.delete_api_key, inherited.id, false).status == 200,
+                   "Disable inherited provider with cached tiles")) return 1;
+        if (!check(request(application, &network, QUrl(base + path), config.api_key).status != 200,
+                   "Disabling hides even locally cached inherited tiles")) return 1;
+        if (!check(updateProvider(application, &network, override_url,
+                                  config.delete_api_key, inherited.id, true).status == 200 &&
+                   request(application, &network, QUrl(base + path), config.api_key).status == 200,
+                   "Re-enabling restores cached inherited tiles")) return 1;
         // The primary is now unavailable, but a second advertising MAP server
         // may serve another tile of the same source without direct fetching.
         root.close();

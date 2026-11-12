@@ -84,6 +84,13 @@ void ProviderCatalog::setLocalProviders(const QVector<MapProvider> &local_provid
     rebuild();
 }
 
+void ProviderCatalog::setDisabledInheritedProviders(const QSet<QString> &ids)
+{
+    if (this->disabled_inherited_ids_ == ids) return;
+    this->disabled_inherited_ids_ = ids;
+    rebuild();
+}
+
 void ProviderCatalog::rebuild()
 {
     QVector<AvailableMapProvider> combined;
@@ -118,7 +125,7 @@ void ProviderCatalog::rebuild()
             // An upstream's coverage profile is not necessarily defined on
             // this downstream. Apply the downstream's own default coverage.
             inherited.coverage.clear();
-            inherited.enabled = true;
+            inherited.enabled = !this->disabled_inherited_ids_.contains(inherited.id);
             inherited.remote_fetch_enabled = true;
             positions.insert(inherited.id, combined.size());
             combined.append({inherited, true, {upstream.name}});
@@ -164,7 +171,7 @@ QHash<QString, QSet<QString>> ProviderCatalog::inheritedUpstreams() const
     QHash<QString, QSet<QString>> result;
     for (const AvailableMapProvider &entry : this->available_)
     {
-        if (!entry.inherited) continue;
+        if (!entry.inherited || !entry.provider.enabled) continue;
         QSet<QString> names;
         for (const QString &name : entry.upstream_names)
             names.insert(name);

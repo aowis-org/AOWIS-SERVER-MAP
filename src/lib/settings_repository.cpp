@@ -607,6 +607,66 @@ bool SettingsRepository::saveCascade(const MapCascadeConfig &value,
                            expected_revision, revision, error);
 }
 
+bool SettingsRepository::readDisabledInheritedProviders(QSet<QString> *ids,
+                                                      QString *revision, QString *error) const
+{
+    if (ids == nullptr)
+        return fail(error, QStringLiteral("Missing inherited provider overrides destination"));
+    ids->clear();
+    if (revision != nullptr) revision->clear();
+    Record record;
+    if (!readCollection(this->implementation_->store, "inherited-provider-overrides", &record, error))
+        return false;
+    if (record.revision.isEmpty())
+    {
+        if (error != nullptr) error->clear();
+        return true;
+    }
+    if (!isInteger(record.json.value(QStringLiteral("version")), 1, 1) ||
+        !record.json.value(QStringLiteral("disabled_ids")).isArray())
+        return fail(error, QStringLiteral("Invalid inherited provider overrides record"));
+    const QJsonArray entries = record.json.value(QStringLiteral("disabled_ids")).toArray();
+    if (entries.size() > 4096)
+        return fail(error, QStringLiteral("Too many disabled inherited providers"));
+    QSet<QString> parsed;
+    for (const QJsonValue &item : entries)
+    {
+        if (!item.isString())
+            return fail(error, QStringLiteral("Invalid inherited provider UUID"));
+        const QString id = item.toString();
+        const QUuid uuid(id);
+        if (uuid.isNull() || uuid.toString(QUuid::WithoutBraces) != id || parsed.contains(id))
+            return fail(error, QStringLiteral("Invalid or duplicate inherited provider UUID"));
+        parsed.insert(id);
+    }
+    *ids = parsed;
+    if (revision != nullptr) *revision = record.revision;
+    if (error != nullptr) error->clear();
+    return true;
+}
+
+bool SettingsRepository::saveDisabledInheritedProviders(const QSet<QString> &ids,
+                                                        const QString &expected_revision,
+                                                        QString *revision, QString *error) const
+{
+    if (ids.size() > 4096)
+        return fail(error, QStringLiteral("Too many disabled inherited providers"));
+    QStringList sorted = ids.values();
+    sorted.sort();
+    QJsonArray entries;
+    for (const QString &id : sorted)
+    {
+        const QUuid uuid(id);
+        if (uuid.isNull() || uuid.toString(QUuid::WithoutBraces) != id)
+            return fail(error, QStringLiteral("Invalid inherited provider UUID"));
+        entries.append(id);
+    }
+    return writeCollection(this->implementation_->store, "inherited-provider-overrides",
+                           QJsonObject{{QStringLiteral("version"), 1},
+                                       {QStringLiteral("disabled_ids"), entries}},
+                           expected_revision, revision, error);
+}
+
 bool SettingsRepository::readProviders(QVector<MapProvider> *value, QString *revision,
                                        QString *error) const
 {

@@ -107,6 +107,34 @@ int main(int argc, char **argv)
                  "Server and Standalone have isolated CONFIG roots"))
         return 1;
 
+    // Inherited enablement is independent from provider definitions and uses
+    // revision-checked AOWIS-CONFIG storage.
+    QSet<QString> disabled_ids;
+    QString inherited_revision;
+    const QString inherited_uuid = QStringLiteral("15c2d930-1e4a-4b76-9675-31ea802989fa");
+    if (!require(store->readDisabledInheritedProviders(&disabled_ids, &inherited_revision, &error) &&
+                 disabled_ids.isEmpty() && inherited_revision.isEmpty(),
+                 "Default inherited providers are enabled")) return 1;
+    disabled_ids.insert(inherited_uuid);
+    QString saved_inherited_revision;
+    if (!require(store->saveDisabledInheritedProviders(disabled_ids, inherited_revision,
+                                                       &saved_inherited_revision, &error) &&
+                 !saved_inherited_revision.isEmpty(),
+                 "Persist disabled inherited UUID")) return 1;
+    QSet<QString> restored_ids;
+    QString restored_revision;
+    if (!require(reopened->readDisabledInheritedProviders(&restored_ids, &restored_revision, &error) &&
+                 restored_ids == disabled_ids && restored_revision == saved_inherited_revision,
+                 "Disabled inherited UUID survives reopening")) return 1;
+    if (!require(!store->saveDisabledInheritedProviders({}, inherited_revision, nullptr, &error) &&
+                 error.contains(QStringLiteral("revision conflict")),
+                 "Reject stale inherited override writes")) return 1;
+    if (!require(!store->saveDisabledInheritedProviders({QStringLiteral("bad-uuid")},
+                                                        saved_inherited_revision, nullptr, &error),
+                 "Reject invalid inherited provider identifiers")) return 1;
+    if (!require(reopened->saveDisabledInheritedProviders({}, restored_revision, nullptr, &error),
+                 "Clear inherited provider override")) return 1;
+
     QVector<Aowis::Map::MapProvider> providers;
     QString providers_revision;
     if (!require(store->readProviders(&providers, &providers_revision, &error) &&

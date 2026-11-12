@@ -32,6 +32,7 @@ public:
     void configure(const QVector<MapProvider> &local_providers,
                    const MapCascadeConfig &cascade);
     void setLocalProviders(const QVector<MapProvider> &local_providers);
+    void setDisabledInheritedProviders(const QSet<QString> &ids);
     void refresh(); // Nonblocking; failed refreshes retain validated offline snapshots.
     QVector<AvailableMapProvider> available() const;
     QByteArray encodedAvailable() const;
@@ -49,6 +50,7 @@ private:
     QString cache_directory_;
     QVector<MapProvider> local_providers_;
     MapCascadeConfig cascade_;
+    QSet<QString> disabled_inherited_ids_;
     QHash<QString, QVector<MapProvider>> upstream_catalogs_;
     QVector<AvailableMapProvider> available_;
     QByteArray encoded_;

@@ -14,6 +14,8 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QJsonDocument>
+#include <QJsonParseError>
+#include <QUuid>
 #include <QJsonArray>
 #include <QUrl>
 #include <QRegularExpression>
@@ -439,6 +441,7 @@ Server::Server(const Config &config, QObject *parent)
     connect(this->provider_catalog, &Aowis::Map::ProviderCatalog::catalogChanged,
             this, &Server::applyAvailableProviders);
     this->provider_catalog->configure(config.map_providers, config.cascade);
+    this->provider_catalog->setDisabledInheritedProviders(config.disabled_inherited_providers);
     applyAvailableProviders();
     connect(this->maptiles, &MapTiles::tileReady, this, &Server::onTileReady);
     connect(this->maptiles, &MapTiles::tileFailed, this, &Server::onTileFailed);
@@ -1425,6 +1428,66 @@ void Server::setupRoutes()
             this->provider_catalog->encodedAvailable(), QHttpServerResponse::StatusCode::Ok);
     });
     this->http.route("/map/v1/providers/available", QHttpServerRequest::Method::Options,
+                     []() { return makeOptionsResponse(); });
+
+    // Local enablement override for an inherited provider. Never writes to an
+    // upstream and never creates a local provider definition.
+    this->http.route("/map/v1/providers/inherited", QHttpServerRequest::Method::Put,
+                     [this](const QHttpServerRequest &request)
+    {
+        if (!isDeleteAuthorized(request)) return makeUnauthorizedResponse();
+        QJsonParseError parse_error;
+        const QJsonDocument document = QJsonDocument::fromJson(request.body(), &parse_error);
+        if (request.body().size() > 1024 || parse_error.error != QJsonParseError::NoError ||
+            !document.isObject())
+            return QHttpServerResponse("Invalid provider enablement request",
+                QHttpServerResponse::StatusCode::BadRequest);
+        const QJsonObject object = document.object();
+        const QString id = object.value(QStringLiteral("id")).toString();
+        if (QUuid(id).isNull() || !object.value(QStringLiteral("enabled")).isBool())
+            return QHttpServerResponse("Missing provider ID or enabled boolean",
+                QHttpServerResponse::StatusCode::BadRequest);
+        bool inherited = false;
+        for (const Aowis::Map::AvailableMapProvider &entry : this->provider_catalog->available())
+            if (entry.provider.id == id && entry.inherited)
+                inherited = true;
+        if (!inherited)
+            return QHttpServerResponse("Provider is not inherited or is unavailable",
+                QHttpServerResponse::StatusCode::NotFound);
+        if (this->config.managed_settings_root.isEmpty())
+            return QHttpServerResponse("Managed MAP settings are unavailable",
+                QHttpServerResponse::StatusCode::ServiceUnavailable);
+        QString error_message;
+        std::unique_ptr<Aowis::Map::SettingsRepository> repository =
+            Aowis::Map::SettingsRepository::openAtOwnerRoot(
+                QStringLiteral("server-map"), this->config.managed_settings_root,
+                &error_message);
+        if (!repository)
+            return QHttpServerResponse(error_message,
+                QHttpServerResponse::StatusCode::InternalServerError);
+        QSet<QString> disabled = this->config.disabled_inherited_providers;
+        if (object.value(QStringLiteral("enabled")).toBool()) disabled.remove(id);
+        else disabled.insert(id);
+        if (disabled == this->config.disabled_inherited_providers)
+            return QHttpServerResponse("Inherited provider state unchanged",
+                QHttpServerResponse::StatusCode::Ok);
+        QString revision;
+        if (!repository->saveDisabledInheritedProviders(
+                disabled, this->config.inherited_provider_revision, &revision, &error_message))
+        {
+            const bool conflict = error_message.contains(QStringLiteral("revision conflict"));
+            return QHttpServerResponse(error_message, conflict ?
+                QHttpServerResponse::StatusCode::Conflict :
+                QHttpServerResponse::StatusCode::InternalServerError);
+        }
+        this->config.inherited_provider_revision = revision;
+        this->config.disabled_inherited_providers = disabled;
+        this->maptiles->cancelUpstreamDownloads();
+        this->provider_catalog->setDisabledInheritedProviders(disabled);
+        return QHttpServerResponse("Inherited provider enabled state updated",
+            QHttpServerResponse::StatusCode::Ok);
+    });
+    this->http.route("/map/v1/providers/inherited", QHttpServerRequest::Method::Options,
                      []() { return makeOptionsResponse(); });
 
     // Discoverable catalog of map layers. Only server-configured providers

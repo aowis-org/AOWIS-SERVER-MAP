@@ -16,7 +16,8 @@ Except where noted, successful GETs use HTTP `200`. `OPTIONS` is supported for t
 | GET | `/status` | Plain-text Qt/server and terrain status |
 | GET | `/map/v1/providers` | Local editable raster-provider catalog |
 | GET | `/map/v1/providers/available` | Local + inherited providers, read-only |
-| PUT | `/map/v1/providers` | Replace and persist provider catalog (**unauthenticated**) |
+| PUT | `/map/v1/providers` | Replace and persist local provider catalog (**unauthenticated**) |
+| PUT | `/map/v1/providers/inherited` | Locally enable/disable one inherited provider (delete/admin API key required) |
 | GET | `/<provider-uuid>/<z>/<x>/<y>.png` | `image/png` raster tile |
 | DELETE | `/cache/<provider-uuid>/<z>/<xmin>/<xmax>/<ymin>/<ymax>` | Number of deleted raster cache entries |
 | GET | `/upstream/v1/activity` | Raster and terrain `active`/`queued` counts |
@@ -72,6 +73,24 @@ names). This endpoint requires the ordinary read API key if configured.
 It retains validated, last-known-good inherited providers when an upstream is
 unreachable. Editing via PUT remains **local-only**; it cannot alter inherited
 providers or upstream catalogs.
+
+Inherited providers may be disabled *locally* without copying or changing their
+upstream-owned definitions. The available catalog still includes disabled
+providers with `enabled: false`; tile requests for them are rejected (including
+cache hits). This override persists in MAP's AOWIS-CONFIG repository and
+survives upstream outages. To disable one inherited provider:
+
+```bash
+curl -i -X PUT 'http://127.0.0.1:8122/map/v1/providers/inherited' \
+  -H 'X-API-Key: YOUR_ADMIN_DELETE_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"<provider-uuid>","enabled":false}'
+```
+
+Set `enabled:true` to restore it. This endpoint requires the **delete/admin
+API key** even when read access is public; a missing admin key disables writes.
+It returns `404` for a local or unknown provider and `409` for concurrent
+CONFIG changes. `/map/v1/providers` remains the local-only editable catalog.
 
 A PUT replaces **the entire catalog**, not just selected entries:
 
