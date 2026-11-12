@@ -172,3 +172,12 @@ difference motivated the revised predictor; rerun both modes to verify it
 reduces missed savings. Terrain zstd saved 2.57% on 210 cached tiles. These
 measurements exclude provider-level lossy-transfer opt-outs, HTTP overhead and
 actual WAN latency.
+
+### Per-provider raster acquisition (Stage D)
+
+MAP serves each provider from its local tile cache first. On an uncached tile:
+- **Automatic**: selected MAP upstreams in order, followed by the original imagery provider *only* if the administrator permits direct fetching. Default for local providers.
+- **Cascade**: selected MAP upstreams only. Default for inherited providers.
+- **Direct**: the original imagery provider only; never the MAP upstreams. Available only for locally defined providers when direct fetching is permitted by the administrator.
+
+Provider modes and upstream priorities are persisted in separate MAP-owned AOWIS-CONFIG records, not in the editable provider catalog. They can be changed through the authenticated MAP REST API or the embedded MAP library. Changing a downstream mode never edits upstream configuration. Disabling direct fetching globally always wins; inherited providers never contact an imagery origin. Cached tiles remain usable across mode changes.

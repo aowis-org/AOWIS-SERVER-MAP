@@ -78,6 +78,8 @@ public:
         QString inherited_provider_revision;
         QHash<QString, QStringList> provider_upstream_routes;
         QString provider_upstream_routes_revision;
+        QHash<QString, Aowis::Map::MapProviderAcquisitionMode> provider_acquisition_modes;
+        QString provider_acquisition_modes_revision;
         bool cascade_defined_in_admin_ini = false;
         QString cache_directory;
         QString permanent_data_directory;

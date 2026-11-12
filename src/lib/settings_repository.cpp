@@ -750,6 +750,67 @@ bool SettingsRepository::saveProviderUpstreamRoutes(const QHash<QString, QString
                            expected_revision, revision, error);
 }
 
+bool SettingsRepository::readProviderAcquisitionModes(
+    QHash<QString, MapProviderAcquisitionMode> *modes,
+    QString *revision, QString *error) const
+{
+    if (modes == nullptr)
+        return fail(error, QStringLiteral("Missing provider mode destination"));
+    modes->clear();
+    if (revision != nullptr) revision->clear();
+    Record record;
+    if (!readCollection(this->implementation_->store, "provider-acquisition-modes", &record, error))
+        return false;
+    if (record.revision.isEmpty())
+    {
+        if (error != nullptr) error->clear();
+        return true;
+    }
+    if (!isInteger(record.json.value(QStringLiteral("version")), 1, 1) ||
+        !record.json.value(QStringLiteral("modes")).isObject())
+        return fail(error, QStringLiteral("Invalid provider acquisition mode record"));
+    const QJsonObject entries = record.json.value(QStringLiteral("modes")).toObject();
+    if (entries.size() > 256)
+        return fail(error, QStringLiteral("Too many provider acquisition modes"));
+    QHash<QString, MapProviderAcquisitionMode> parsed;
+    for (QJsonObject::const_iterator it = entries.constBegin(); it != entries.constEnd(); ++it)
+    {
+        const QUuid uuid(it.key());
+        MapProviderAcquisitionMode mode;
+        if (uuid.isNull() || uuid.toString(QUuid::WithoutBraces) != it.key() ||
+            !it.value().isString() ||
+            !parseProviderAcquisitionMode(it.value().toString(), &mode))
+            return fail(error, QStringLiteral("Invalid provider acquisition mode entry"));
+        parsed.insert(it.key(), mode);
+    }
+    *modes = parsed;
+    if (revision != nullptr) *revision = record.revision;
+    if (error != nullptr) error->clear();
+    return true;
+}
+
+bool SettingsRepository::saveProviderAcquisitionModes(
+    const QHash<QString, MapProviderAcquisitionMode> &modes,
+    const QString &expected_revision, QString *revision, QString *error) const
+{
+    if (modes.size() > 256)
+        return fail(error, QStringLiteral("Too many provider acquisition modes"));
+    QJsonObject entries;
+    QStringList ids = modes.keys();
+    ids.sort();
+    for (const QString &id : ids)
+    {
+        const QUuid uuid(id);
+        if (uuid.isNull() || uuid.toString(QUuid::WithoutBraces) != id)
+            return fail(error, QStringLiteral("Invalid provider UUID for acquisition mode"));
+        entries.insert(id, providerAcquisitionModeName(modes.value(id)));
+    }
+    return writeCollection(this->implementation_->store, "provider-acquisition-modes",
+                           QJsonObject{{QStringLiteral("version"), 1},
+                                       {QStringLiteral("modes"), entries}},
+                           expected_revision, revision, error);
+}
+
 bool SettingsRepository::readProviders(QVector<MapProvider> *value, QString *revision,
                                        QString *error) const
 {

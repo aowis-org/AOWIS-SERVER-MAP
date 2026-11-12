@@ -98,6 +98,14 @@ void ProviderCatalog::setUpstreamRoutes(const QHash<QString, QStringList> &route
     rebuild();
 }
 
+void ProviderCatalog::setAcquisitionModes(
+    const QHash<QString, MapProviderAcquisitionMode> &modes)
+{
+    if (this->acquisition_modes_ == modes) return;
+    this->acquisition_modes_ = modes;
+    rebuild();
+}
+
 void ProviderCatalog::rebuild()
 {
     QVector<AvailableMapProvider> combined;
@@ -155,6 +163,15 @@ void ProviderCatalog::rebuild()
     QJsonArray entries;
     for (AvailableMapProvider &entry : combined)
     {
+        entry.acquisition_mode = this->acquisition_modes_.value(entry.provider.id,
+            entry.inherited ? MapProviderAcquisitionMode::Cascade
+                            : MapProviderAcquisitionMode::Automatic);
+        // The administrator policy is the upper bound. Even in a local-source
+        // catalog entry, Direct must never become selectable when disallowed.
+        entry.direct_fetch_allowed = !entry.inherited && this->cascade_.allow_direct_fetch;
+        if (!entry.direct_fetch_allowed &&
+            entry.acquisition_mode == MapProviderAcquisitionMode::Direct)
+            entry.acquisition_mode = MapProviderAcquisitionMode::Cascade;
         const QStringList selection = this->upstream_routes_.value(entry.provider.id);
         if (selection.isEmpty()) entry.selected_upstreams = entry.upstream_names;
         else
@@ -177,6 +194,9 @@ void ProviderCatalog::rebuild()
         for (const QString &name : entry.selected_upstreams)
             selected_json.append(name);
         object.insert(QStringLiteral("selected_upstreams"), selected_json);
+        object.insert(QStringLiteral("acquisition_mode"),
+                      providerAcquisitionModeName(entry.acquisition_mode));
+        object.insert(QStringLiteral("direct_fetch_allowed"), entry.direct_fetch_allowed);
         entries.append(object);
     }
     const QByteArray next = QJsonDocument(QJsonObject{

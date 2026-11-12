@@ -179,11 +179,13 @@ void MapTiles::configureProviders(const QVector<Aowis::Map::MapProvider> &provid
                                   const Aowis::Map::DownloadCoverage &coverage,
                                   const QString &default_coverage,
                                   const QHash<QString, QSet<QString>> &inherited_upstreams,
-                                  const QHash<QString, QStringList> &upstream_routes)
+                                  const QHash<QString, QStringList> &upstream_routes,
+                                  const QHash<QString, Aowis::Map::MapProviderAcquisitionMode> &modes)
 {
     ++this->cache_generation;
     this->inherited_upstreams = inherited_upstreams;
     this->upstream_routes = upstream_routes;
+    this->acquisition_modes = modes;
     this->configured_providers.clear();
     this->permanent_cached_keys.clear();
     this->provider_cache_paths.clear();
@@ -354,12 +356,22 @@ MapTiles::TileRequestResult MapTiles::getTile(const QString &provider, int z, in
     const QString path = QStringLiteral("/%1/%2/%3/%4.png")
         .arg(provider).arg(z).arg(wrapped_x).arg(y);
     const qint64 now_ms = QDateTime::currentMSecsSinceEpoch();
+    const bool inherited = this->inherited_upstreams.contains(provider);
+    Aowis::Map::MapProviderAcquisitionMode mode = this->acquisition_modes.value(
+        provider, inherited ? Aowis::Map::MapProviderAcquisitionMode::Cascade
+                            : Aowis::Map::MapProviderAcquisitionMode::Automatic);
+    // Administrative policy always wins over stale per-provider preferences.
+    // Direct is never permitted for inherited providers.
+    if ((inherited || !this->cascade_config.allow_direct_fetch) &&
+        mode == Aowis::Map::MapProviderAcquisitionMode::Direct)
+        mode = Aowis::Map::MapProviderAcquisitionMode::Cascade;
     // A configured route is an ordered *subset*, never an extra origin.
     // Without an override preserve the globally configured priority.
     QStringList preferred = this->upstream_routes.value(provider);
     if (preferred.isEmpty())
         for (const Aowis::Map::MapCascadeUpstream &upstream : this->cascade_config.upstreams)
             preferred.append(upstream.name);
+    if (mode != Aowis::Map::MapProviderAcquisitionMode::Direct)
     for (const QString &name : preferred)
     {
         for (const Aowis::Map::MapCascadeUpstream &upstream : this->cascade_config.upstreams)
@@ -379,8 +391,8 @@ MapTiles::TileRequestResult MapTiles::getTile(const QString &provider, int z, in
             break;
         }
     }
-    if (this->cascade_config.allow_direct_fetch &&
-        !this->inherited_upstreams.contains(provider))
+    if (this->cascade_config.allow_direct_fetch && !inherited &&
+        mode != Aowis::Map::MapProviderAcquisitionMode::Cascade)
     {
         DownloadSource source;
         source.url = providerUrl(provider, z, wrapped_x, y);

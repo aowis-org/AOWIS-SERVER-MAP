@@ -22,6 +22,8 @@ struct AvailableMapProvider
     bool inherited = false;
     QStringList upstream_names; // Immediate upstreams, in configured priority order.
     QStringList selected_upstreams; // Effective order after per-provider selection.
+    MapProviderAcquisitionMode acquisition_mode = MapProviderAcquisitionMode::Automatic;
+    bool direct_fetch_allowed = false;
 };
 
 class ProviderCatalog final : public QObject
@@ -35,6 +37,9 @@ public:
     void setLocalProviders(const QVector<MapProvider> &local_providers);
     void setDisabledInheritedProviders(const QSet<QString> &ids);
     void setUpstreamRoutes(const QHash<QString, QStringList> &routes);
+    void setAcquisitionModes(const QHash<QString, MapProviderAcquisitionMode> &modes);
+    QHash<QString, MapProviderAcquisitionMode> acquisitionModes() const
+    { return this->acquisition_modes_; }
     QHash<QString, QStringList> upstreamRoutes() const { return this->upstream_routes_; }
     void refresh(); // Nonblocking; failed refreshes retain validated offline snapshots.
     QVector<AvailableMapProvider> available() const;
@@ -55,6 +60,7 @@ private:
     MapCascadeConfig cascade_;
     QSet<QString> disabled_inherited_ids_;
     QHash<QString, QStringList> upstream_routes_;
+    QHash<QString, MapProviderAcquisitionMode> acquisition_modes_;
     QHash<QString, QVector<MapProvider>> upstream_catalogs_;
     QVector<AvailableMapProvider> available_;
     QByteArray encoded_;

@@ -427,6 +427,12 @@ bool MapServerConfiguration::loadManagedSettings(Server::Config *config, bool mi
         return false;
     config->provider_upstream_routes = routes;
     config->provider_upstream_routes_revision = routes_revision;
+    QHash<QString, Aowis::Map::MapProviderAcquisitionMode> modes;
+    QString modes_revision;
+    if (!repository->readProviderAcquisitionModes(&modes, &modes_revision, error_message))
+        return false;
+    config->provider_acquisition_modes = modes;
+    config->provider_acquisition_modes_revision = modes_revision;
     config->provider_revision = provider_revision;
     config->managed_settings_root = root;
     if (error_message != nullptr)

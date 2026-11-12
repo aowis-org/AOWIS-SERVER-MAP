@@ -171,6 +171,30 @@ int main(int argc, char **argv)
     if (!require(independent->readProviderUpstreamRoutes(&restored_routes, nullptr, &error) &&
                  restored_routes.isEmpty(),
                  "Independent MAP server does not see Standalone routes")) return 1;
+    QHash<QString, Aowis::Map::MapProviderAcquisitionMode> modes;
+    QString mode_revision;
+    if (!require(store->readProviderAcquisitionModes(&modes, &mode_revision, &error) &&
+                 modes.isEmpty() && mode_revision.isEmpty(),
+                 "Missing acquisition mode record uses provider defaults")) return 1;
+    modes.insert(inherited_uuid, Aowis::Map::MapProviderAcquisitionMode::Cascade);
+    QString saved_mode_revision;
+    if (!require(store->saveProviderAcquisitionModes(modes, mode_revision,
+                 &saved_mode_revision, &error) && !saved_mode_revision.isEmpty(),
+                 "Save MAP-owned acquisition policy")) return 1;
+    QHash<QString, Aowis::Map::MapProviderAcquisitionMode> restored_modes;
+    QString restored_mode_revision;
+    if (!require(reopened->readProviderAcquisitionModes(&restored_modes,
+                    &restored_mode_revision, &error) && restored_modes == modes &&
+                 restored_mode_revision == saved_mode_revision,
+                 "Read acquisition policy after reopening")) return 1;
+    if (!require(!store->saveProviderAcquisitionModes(modes, mode_revision,
+                    nullptr, &error) && error.contains(QStringLiteral("revision conflict")),
+                 "Reject stale acquisition policy updates")) return 1;
+    modes.insert(QStringLiteral("invalid-id"), Aowis::Map::MapProviderAcquisitionMode::Direct);
+    if (!require(!reopened->saveProviderAcquisitionModes(modes, restored_mode_revision,
+                    nullptr, &error), "Reject invalid mode provider UUID")) return 1;
+    if (!require(independent->readProviderAcquisitionModes(&restored_modes, nullptr, &error) &&
+                 restored_modes.isEmpty(), "Isolate acquisition policy between MAP owners")) return 1;
     QVector<Aowis::Map::MapProvider> providers;
     QString providers_revision;
     if (!require(store->readProviders(&providers, &providers_revision, &error) &&

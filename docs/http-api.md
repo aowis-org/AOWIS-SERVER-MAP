@@ -202,3 +202,19 @@ be advertised for that provider. Changes are local, revision-checked and stored
 in AOWIS-CONFIG; they never modify upstream catalogs. A missing route keeps
 existing behavior. Direct-fetch permission remains governed by the global
 policy until Stage D.
+
+### Provider acquisition policy (Stage D)
+
+`GET /map/v1/providers/available` includes `acquisition_mode` (`automatic`,
+`cascade`, or `direct`) and `direct_fetch_allowed` for each provider.
+Local providers default to `automatic`; inherited providers default to
+`cascade`. The latter can **never** fetch their original provider URL.
+
+`PUT /map/v1/providers/acquisition` requires the administrator/delete API key
+and a JSON body `{"id":"<provider-uuid>","mode":"cascade"}`. This
+updates only the downstream server's AOWIS-CONFIG record and does not change
+any upstream catalog. `direct` is rejected for inherited providers and when
+administrator `allow_direct_fetch=false`. `automatic` tries the provider's
+selected MAP upstreams, then its original URL only if globally permitted;
+`cascade` uses MAP upstreams only; `direct` uses the original URL only.
+Already cached tiles remain available after a mode switch.

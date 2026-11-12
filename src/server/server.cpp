@@ -443,6 +443,7 @@ Server::Server(const Config &config, QObject *parent)
     this->provider_catalog->configure(config.map_providers, config.cascade);
     this->provider_catalog->setDisabledInheritedProviders(config.disabled_inherited_providers);
     this->provider_catalog->setUpstreamRoutes(config.provider_upstream_routes);
+    this->provider_catalog->setAcquisitionModes(config.provider_acquisition_modes);
     applyAvailableProviders();
     connect(this->maptiles, &MapTiles::tileReady, this, &Server::onTileReady);
     connect(this->maptiles, &MapTiles::tileFailed, this, &Server::onTileFailed);
@@ -456,7 +457,8 @@ void Server::applyAvailableProviders()
         active.append(entry.provider);
     this->maptiles->configureProviders(active, this->config.download_coverage,
         this->config.map_coverage, this->provider_catalog->inheritedUpstreams(),
-        this->config.provider_upstream_routes);
+        this->config.provider_upstream_routes,
+        this->config.provider_acquisition_modes);
 }
 
 QString Server::terrainClientKey(const QHostAddress &address, quint16 port)
@@ -1570,6 +1572,85 @@ void Server::setupRoutes()
             QHttpServerResponse::StatusCode::Ok);
     });
     this->http.route("/map/v1/providers/upstreams", QHttpServerRequest::Method::Options,
+                     []() { return makeOptionsResponse(); });
+
+    // Stage D: per-provider acquisition mode, owned and persisted by MAP.
+    this->http.route("/map/v1/providers/acquisition", QHttpServerRequest::Method::Put,
+                     [this](const QHttpServerRequest &request)
+    {
+        if (this->config.delete_api_key.isEmpty() || !isDeleteAuthorized(request))
+            return makeUnauthorizedResponse();
+        if (request.body().size() > 4096)
+            return QHttpServerResponse("Provider mode request too large",
+                QHttpServerResponse::StatusCode::BadRequest);
+        QJsonParseError parse_error;
+        const QJsonDocument doc = QJsonDocument::fromJson(request.body(), &parse_error);
+        if (parse_error.error != QJsonParseError::NoError || !doc.isObject())
+            return QHttpServerResponse("Invalid provider mode JSON",
+                QHttpServerResponse::StatusCode::BadRequest);
+        const QJsonObject body = doc.object();
+        const QString id = body.value(QStringLiteral("id")).toString();
+        const QUuid uuid(id);
+        Aowis::Map::MapProviderAcquisitionMode requested;
+        if (uuid.isNull() || uuid.toString(QUuid::WithoutBraces) != id ||
+            !body.value(QStringLiteral("mode")).isString() ||
+            !Aowis::Map::parseProviderAcquisitionMode(
+                body.value(QStringLiteral("mode")).toString(), &requested))
+            return QHttpServerResponse("Invalid provider acquisition mode",
+                QHttpServerResponse::StatusCode::BadRequest);
+        bool found = false;
+        bool inherited = false;
+        for (const Aowis::Map::AvailableMapProvider &entry : this->provider_catalog->available())
+            if (entry.provider.id == id)
+            {
+                inherited = entry.inherited;
+                found = true;
+                break;
+            }
+        if (!found)
+            return QHttpServerResponse("Unknown provider",
+                QHttpServerResponse::StatusCode::NotFound);
+        if (requested == Aowis::Map::MapProviderAcquisitionMode::Direct &&
+            (inherited || !this->config.cascade.allow_direct_fetch))
+            return QHttpServerResponse("Direct acquisition forbidden by provider or administrator policy",
+                QHttpServerResponse::StatusCode::Forbidden);
+        if (this->config.managed_settings_root.isEmpty())
+            return QHttpServerResponse("Managed MAP settings unavailable",
+                QHttpServerResponse::StatusCode::ServiceUnavailable);
+        QHash<QString, Aowis::Map::MapProviderAcquisitionMode> updated =
+            this->config.provider_acquisition_modes;
+        const Aowis::Map::MapProviderAcquisitionMode default_mode = inherited ?
+            Aowis::Map::MapProviderAcquisitionMode::Cascade :
+            Aowis::Map::MapProviderAcquisitionMode::Automatic;
+        if (requested == default_mode) updated.remove(id);
+        else updated.insert(id, requested);
+        if (updated == this->config.provider_acquisition_modes)
+            return QHttpServerResponse("Provider mode unchanged", QHttpServerResponse::StatusCode::Ok);
+        QString error_message;
+        std::unique_ptr<Aowis::Map::SettingsRepository> repository =
+            Aowis::Map::SettingsRepository::openAtOwnerRoot(
+                QStringLiteral("server-map"), this->config.managed_settings_root, &error_message);
+        if (!repository)
+            return QHttpServerResponse(error_message,
+                QHttpServerResponse::StatusCode::InternalServerError);
+        QString revision;
+        if (!repository->saveProviderAcquisitionModes(updated,
+                this->config.provider_acquisition_modes_revision, &revision, &error_message))
+        {
+            const bool conflict = error_message.contains(QStringLiteral("revision conflict"));
+            return QHttpServerResponse(error_message, conflict ?
+                QHttpServerResponse::StatusCode::Conflict :
+                QHttpServerResponse::StatusCode::InternalServerError);
+        }
+        this->maptiles->cancelUpstreamDownloads();
+        this->config.provider_acquisition_modes = updated;
+        this->config.provider_acquisition_modes_revision = revision;
+        this->provider_catalog->setAcquisitionModes(updated);
+        applyAvailableProviders();
+        return QHttpServerResponse("Provider acquisition mode updated",
+            QHttpServerResponse::StatusCode::Ok);
+    });
+    this->http.route("/map/v1/providers/acquisition", QHttpServerRequest::Method::Options,
                      []() { return makeOptionsResponse(); });
 
     // Discoverable catalog of map layers. Only server-configured providers

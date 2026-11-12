@@ -8,6 +8,37 @@
 
 namespace Aowis::Map
 {
+// Per-raster-provider policy. Inherited providers can never fetch their advertised
+// origin directly, regardless of this setting or global administrator policy.
+enum class MapProviderAcquisitionMode
+{
+    Automatic,
+    Cascade,
+    Direct
+};
+
+inline QString providerAcquisitionModeName(MapProviderAcquisitionMode mode)
+{
+    switch (mode)
+    {
+    case MapProviderAcquisitionMode::Automatic: return QStringLiteral("automatic");
+    case MapProviderAcquisitionMode::Cascade: return QStringLiteral("cascade");
+    case MapProviderAcquisitionMode::Direct: return QStringLiteral("direct");
+    }
+    return QStringLiteral("cascade");
+}
+
+inline bool parseProviderAcquisitionMode(const QString &name,
+                                         MapProviderAcquisitionMode *mode)
+{
+    if (mode == nullptr) return false;
+    if (name == QStringLiteral("automatic")) *mode = MapProviderAcquisitionMode::Automatic;
+    else if (name == QStringLiteral("cascade")) *mode = MapProviderAcquisitionMode::Cascade;
+    else if (name == QStringLiteral("direct")) *mode = MapProviderAcquisitionMode::Direct;
+    else return false;
+    return true;
+}
+
 // Ordered read-only connections to other AOWIS MAP servers. This configuration
 // belongs to the reusable MAP library: HTTP and embedded Standalone consumers
 // must apply exactly the same source-selection policy.

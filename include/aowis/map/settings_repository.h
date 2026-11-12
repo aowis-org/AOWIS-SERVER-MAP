@@ -58,6 +58,15 @@ public:
     // Optional per-provider subset and priority of named MAP upstreams. A
     // missing UUID means use the global order; an empty list resets to default.
     // Stored separately from both local and inherited provider definitions.
+    // Optional per-provider acquisition policy. Missing entries use Automatic
+    // for local providers and Cascade for inherited providers.
+    bool readProviderAcquisitionModes(QHash<QString, MapProviderAcquisitionMode> *modes,
+                                      QString *revision = nullptr,
+                                      QString *error = nullptr) const;
+    bool saveProviderAcquisitionModes(
+        const QHash<QString, MapProviderAcquisitionMode> &modes,
+        const QString &expected_revision, QString *revision = nullptr,
+        QString *error = nullptr) const;
     bool readProviderUpstreamRoutes(QHash<QString, QStringList> *routes,
                                     QString *revision = nullptr,
                                     QString *error = nullptr) const;
