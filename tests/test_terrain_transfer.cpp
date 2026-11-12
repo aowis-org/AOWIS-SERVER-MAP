@@ -68,8 +68,9 @@ int main(int argc, char **argv)
                  "Oversized compressed transfer accepted")) return 1;
     if (!require(!compressTerrainTileForTransfer(huge).has_value(),
                  "Oversized canonical input was compressed")) return 1;
-    std::printf("Terrain zstd: %td -> %td bytes, encode %lld ns\n",
-                canonical.size(), compressed->size(),
+    std::printf("Terrain zstd: %lld -> %lld bytes, encode %lld ns\n",
+                static_cast<long long>(canonical.size()),
+                static_cast<long long>(compressed->size()),
                 static_cast<long long>(encode_nanoseconds));
     return 0;
 }
