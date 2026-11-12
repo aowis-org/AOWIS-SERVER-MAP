@@ -90,3 +90,24 @@ Expose counters for original/transmitted bytes, actual savings, selected JPEGs, 
 6. Repeatable benchmark reports **wire bytes and CPU time** for mixed real raster tiles and Copernicus heightfields; no claim of performance improvement without measurements.
 
 Step 5 implementation uses libpng for opaque-PNG detection/decoding and libjpeg-turbo for JPEG encoding. It admits at most two concurrent encoding jobs; saturated servers return original tiles without queuing. Variant selection applies to both warm-cache and completed async requests.
+
+## Measure transfer savings on an actual cache
+
+Build and run the read-only benchmark (no internet or cache modifications):
+
+```bash
+./compile_linux_tests.sh
+./build-linux-tests/aowis-server-map-transfer-benchmark \
+  --raster /path/to/cache/maptiles \
+  --terrain /path/to/cache/terrain/normalized \
+  --max-files 2000 > map-transfer-benchmark.json
+```
+
+Pass either directory separately if needed. The tool recursively reads actual
+cached image files and canonical `.aowterrain` files. Its default adaptive JPEG
+sampling matches the MAP selector; `--exhaustive-jpeg` instead evaluates every
+eligible PNG for an upper-bound comparison. The report includes payload bytes,
+selected JPEG/zstd counts and codec CPU time. It does **not** measure network
+latency, HTTP framing, provider-specific lossless-only policy or concurrent
+server load. Representative imagery and terrain from the actual project area
+are needed before making real-world savings claims.

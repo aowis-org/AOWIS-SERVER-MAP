@@ -18,6 +18,8 @@ if(NOT TARGET aowis::config)
             "or git submodule update --init -- external/AOWIS-CONFIG")
     endif()
     add_subdirectory(external/AOWIS-CONFIG EXCLUDE_FROM_ALL)
+    # CONFIG is a plain C++ library. Inherit no Qt AUTOMOC from MAP.
+    set_target_properties(aowis-config PROPERTIES AUTOMOC OFF)
 endif()
 
 option(
@@ -99,8 +101,16 @@ target_link_libraries(aowis-server-map
         aowis-server-map-core
 )
 
+
+
 include(CTest)
 if(BUILD_TESTING)
+    # Optional benchmark is available in test builds, not release packages.
+    add_executable(aowis-server-map-transfer-benchmark
+        tools/benchmark_cascade_transfer.cpp)
+    target_link_libraries(aowis-server-map-transfer-benchmark
+        PRIVATE AOWIS::Map PNG::PNG)
+    target_compile_features(aowis-server-map-transfer-benchmark PRIVATE cxx_std_20)
     add_executable(aowis-server-map-legacy-standalone-migration-test
         tests/test_map_legacy_standalone_migration.cpp)
     target_link_libraries(aowis-server-map-legacy-standalone-migration-test PRIVATE AOWIS::Map)
@@ -430,7 +440,12 @@ endif()
 # Aggregate native test target for compile_linux_tests.sh. The labels allow the
 # runner to distinguish this project's tests from any tests in dependencies.
 if(BUILD_TESTING)
+    add_test(NAME aowis-server-map-transfer-benchmark-smoke
+        COMMAND aowis-server-map-transfer-benchmark --self-test)
+    set_tests_properties(aowis-server-map-transfer-benchmark-smoke
+        PROPERTIES LABELS "aowis")
     set(AOWIS_SERVER_MAP_TEST_TARGETS
+        aowis-server-map-transfer-benchmark
         aowis-server-map-settings-repository-test
         aowis-server-map-legacy-standalone-migration-test
         aowis-server-map-provider-limits-test
