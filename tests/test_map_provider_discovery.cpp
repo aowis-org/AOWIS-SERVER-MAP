@@ -540,12 +540,24 @@ int main(int argc, char **argv)
                     config.delete_api_key, inherited.id, QStringLiteral("direct")).status == 403,
                     "Admin ban on direct fetching overrides provider-level preference")) return 1;
         }
+        // Direct-mode coverage above intentionally contacted the origin.
+        // Failover must not make any *additional* origin requests.
+        const int backup_before_failover = backup.tile_count;
+        const int origin_before_failover = origin.tile_count;
         root.close();
         const ReplyData failover = request(application, &network,
             QUrl(base + QStringLiteral("/%1/6/30/23.png").arg(inherited.id)), config.api_key);
         if (!check(failover.status == 200 && failover.body == ValidPng &&
-                   backup.tile_count > 0 && origin.tile_count == 0,
-                   "Fallback uses second advertising upstream")) return 1;
+                   backup.tile_count > backup_before_failover &&
+                   origin.tile_count == origin_before_failover,
+                   "Fallback uses second advertising upstream without direct origin"))
+        {
+            std::fprintf(stderr, "Failover: status=%d, backup requests=%d->%d, "
+                                 "origin requests=%d->%d\n",
+                         failover.status, backup_before_failover, backup.tile_count,
+                         origin_before_failover, origin.tile_count);
+            return 1;
+        }
     }
     backup.close();
     {
@@ -563,9 +575,11 @@ int main(int argc, char **argv)
         if (!check(cached.status == 200 && cached.body == ValidPng,
                    "Serve cached inherited tile offline")) return 1;
         // New tile must not call the origin directly, even with direct fallback on.
+        const int origin_before_offline_miss = origin.tile_count;
         const ReplyData missing = request(application, &network,
             QUrl(base + QStringLiteral("/%1/6/30/24.png").arg(inherited.id)), config.api_key);
-        if (!check(missing.status != 200 && origin.tile_count == 0,
+        if (!check(missing.status != 200 &&
+                   origin.tile_count == origin_before_offline_miss,
                    "Inherited provider cannot bypass MAP upstream")) return 1;
     }
     // A local disabled definition is an explicit mask, not permission to
