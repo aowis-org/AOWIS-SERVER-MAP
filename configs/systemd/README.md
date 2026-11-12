@@ -1,7 +1,7 @@
 # Linux systemd deployment
 
 The system service runs `aowis-server-map` as a dedicated unprivileged account.
-Its administrator-owned configuration is under `/etc`, API-managed provider
+Its administrator-owned configuration is under `/etc`, MAP-owned AOWIS-CONFIG
 state under `/var/lib`, and disposable caches under `/var/cache`. The running
 server never needs to write to `/etc`.
 
@@ -12,7 +12,8 @@ server never needs to write to `/etc`.
 | `/usr/bin/aowis-server-map` | Installed executable |
 | `/usr/share/aowis-server-map/map-server.ini` | Packaged example INI (Debian package) |
 | `/etc/aowis-server-map/map-server.ini` | Administrator INI and API keys |
-| `/var/lib/aowis-server-map/providers.ini` | Optional catalog written by GUI/API provider editor |
+| `/var/lib/aowis-server-map/config/server-map/` | MAP-owned AOWIS-CONFIG settings (cascade and providers) |
+| `/var/lib/aowis-server-map/providers.ini` | Legacy provider catalog, imported once and retained for rollback |
 | `/var/lib/aowis-server-map/data/` | Permanent administrator-supplied data, if configured |
 | `/var/cache/aowis-server-map/maptiles/` | Downloaded raster tiles |
 | `/var/cache/aowis-server-map/terrain/` | Downloaded native and normalized elevation data |
@@ -127,20 +128,43 @@ reference without altering files:
 aowis-server-map --print-default-config
 ```
 
-Check the **service configuration** (including the API-managed provider-state
-file), without starting a listener:
+Validate the **same settings the service uses**, including its MAP-owned
+CONFIG records, without starting a listener or writing a migration:
 
 ```bash
-sudo aowis-server-map --check-config --config /etc/aowis-server-map/map-server.ini
+sudo -u aowis-server-map env \
+  STATE_DIRECTORY=/var/lib/aowis-server-map \
+  CACHE_DIRECTORY=/var/cache/aowis-server-map \
+  /usr/bin/aowis-server-map --check-config \
+    --config /etc/aowis-server-map/map-server.ini \
+    --require-api-key --require-delete-api-key
 ```
 
-GUI provider editing saves **only** raster provider definitions to
-`/var/lib/aowis-server-map/providers.ini`. If present, that catalog replaces
-the provider list in `/etc` but does not change the configured port, keys,
-regional download limits, terrain settings or storage directories. To resume
-using `/etc`'s raster-provider sections, stop the service, back up and remove
-`providers.ini`, then start the service. The file is otherwise persistent
-through restarts and upgrades.
+The environment variables matter: a bare `sudo aowis-server-map --check-config
+--config /etc/...` runs *outside* systemd and may inspect the calling user's
+CONFIG directory instead. `--check-config` does not import `providers.ini`.
+
+**Where edits go:** `PUT /map/v1/providers` updates the MAP-owned records in
+`/var/lib/aowis-server-map/config/server-map/`, not `/etc` and **not**
+`providers.ini`. The legacy `/var/lib/aowis-server-map/providers.ini` is read
+only for one-time migration when no managed provider catalog exists, and kept
+for rollback. After migration, clearing managed records without moving the
+legacy file would cause a re-import on the next start. Do not manually edit or
+remove individual CONFIG record files; use the MAP library/storage API.
+
+Cascading upstreams and slow-link options can be specified in the administrator
+INI or in MAP-managed CONFIG. An explicit INI cascade directive overrides the
+**entire** managed cascade record, not individual fields. Changing the INI or
+out-of-process CONFIG records requires a service restart:
+
+```bash
+sudo systemctl restart aowis-server-map.service
+```
+
+Provider edits through REST apply immediately; see
+[configuration](../../docs/configuration.md#what-goes-where) for details.
+**Security:** `PUT /map/v1/providers` currently has no API-key authorization;
+restrict access to trusted clients at the network/proxy layer.
 
 For office projects in multiple places, the administrator can define several
 `[region.<id>]` bounding rectangles, one `[coverage.<id>]` with progressively

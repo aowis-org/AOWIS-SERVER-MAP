@@ -49,7 +49,7 @@ Generate and validate a configuration **without starting the listener**:
 ./build-linux/aowis-server-map --config ./map-server.ini
 ```
 
-The write command refuses to overwrite an existing file unless explicitly given `--overwrite`. For all settings, CLI options, provider catalog ownership and geographic coverage rules, see [Configuration](docs/configuration.md).
+The write command refuses to overwrite an existing file unless explicitly given `--overwrite`. **Three configuration modes:** embedded Standalone uses MAP's CONFIG library records; manual servers use an optional user INI plus managed CONFIG records; systemd uses `/etc` for administration and `/var/lib` for MAP-managed settings. See the [configuration guide](docs/configuration.md#pick-your-deployment) for exact paths, precedence and migration.
 
 ## What the server provides
 
@@ -149,7 +149,7 @@ The package installs a dedicated `aowis-server-map` systemd service, preserves e
 | [Debian package build](docs/debian-package-build.md) | Docker builds, isolated installation and upgrade qualification |
 | [Configuration](docs/configuration.md) | INI, CLI, providers, region/zoom policies, state-file precedence |
 | [HTTP API](docs/http-api.md) | Requests, responses, authentication, cache and upstream operations |
-| [MAP-to-MAP cascading (planned)](docs/map-cascading.md) | Ordered upstream failover, optional direct fetch, low-bandwidth tile transfer and acceptance criteria; **not implemented yet** |
+| [MAP-to-MAP cascading](docs/map-cascading.md) | Ordered upstreams, optional direct fetch, adaptive JPEG and zstd terrain transfer |
 | [Architecture and resource limits](docs/architecture.md) | Execution model, concurrency, memory, cancellation, test and benchmark tools |
 | [Terrain sources](docs/terrain-providers.md) | Copernicus GLO-30, cache fill, resumable download, data provenance |
 | [Elevation and DEM contract](docs/terrain-elevation-contract.md) | Coordinate/datum rules, sampling, error statuses and analysis data |

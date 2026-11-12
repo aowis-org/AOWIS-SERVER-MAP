@@ -1,6 +1,6 @@
-# MAP-to-MAP cascading (implementation specification)
+# MAP-to-MAP cascading (protocol and test specification)
 
-**Status:** staged implementation. Steps 1–5 (configuration/policy, raster/terrain cascading, zstd terrain, adaptive JPEG raster transfer) implemented; Standalone settings and final acceptance testing are pending. Scope is raster map imagery and normalized 3D globe terrain only. Native Copernicus GeoTIFF replication, point-elevation and hydrology/analysis-grid behavior are out of scope.
+**Status:** MAP-to-MAP raster and normalized-terrain cascading, zstd terrain transfer and adaptive JPEG imagery transfer are implemented. This document records the wire protocol, policy and acceptance criteria; it is not a deployment walkthrough. See [Configuration](configuration.md) for settings, paths and precedence. Real-project bandwidth benchmarks remain to be completed. Native Copernicus GeoTIFF replication and hydrology-specific data are out of scope.
 
 ## Configuration and acquisition order
 
@@ -76,8 +76,8 @@ Expose counters for original/transmitted bytes, actual savings, selected JPEGs, 
 
 ## Deployment and Standalone
 
-- **Systemd / ordinary server:** read the above settings from the administrator-owned MAP INI; no changes to the GUI's ordinary MAP connection contract. Servers may serve clients and downstream servers simultaneously.
-- **Standalone:** expose an ordered, editable list of upstream MAP URLs/keys, `allow_direct_fetch`, poor-internet switch and JPEG quality in GUI Map settings; persist settings via AOWIS-CONFIG. Standalone currently embeds `MapTiles` and `TerrainData` directly rather than running the MAP HTTP listener. Put cascading in the **reusable MAP core**, so standalone and the systemd binary share the same acquisition behavior.
+- **Systemd / ordinary server:** explicit administrator INI cascade settings override the MAP-owned AOWIS-CONFIG cascade record. No changes to the GUI's ordinary MAP connection contract. Servers may serve clients and downstream servers simultaneously.
+- **Standalone:** an ordered list of upstream MAP URLs/keys, direct-fetch fallback and slow-link preferences is managed through GUI Map Settings and persisted by the MAP library through AOWIS-CONFIG. Standalone embeds `MapTiles` and `TerrainData` rather than running a second MAP HTTP server.
 - Cached areas must continue rendering without WAN access. No automatic global prefetch or offline-package mechanism is part of this feature.
 
 ## Required acceptance tests

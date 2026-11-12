@@ -1,23 +1,113 @@
 # Configuration
 
-AOWIS Server Map uses built-in defaults, an optional administrator INI, and a separate persistent catalog for raster-provider edits made through the GUI/API. **Normal startup and configuration validation never rewrite the administrator INI.**
+AOWIS-SERVER-MAP has **two kinds of settings**. The administrator INI controls how a
+server runs (network, access, storage, download limits); MAP-owned
+**AOWIS-CONFIG** records hold the editable raster-provider catalog and cascading
+preferences. Tile caches are data, **not configuration**. Neither startup nor
+REST editing rewrites the administrator INI.
 
-## MAP-owned CONFIG library (staged)
+## Pick your deployment
 
-`Aowis::Map::SettingsRepository` now persists the MAP cascade and raster-provider catalog in **AOWIS-CONFIG** records with separate `server-map` / `standalone-map` owner roots, strict validation and revision-checked writes. The host must access these through MAP's C++ library (or REST), not by editing CONFIG records. A failed/corrupt cascade read fails closed; an empty, valid owner store uses defaults.
+| How MAP runs | Where you manage it | Configuration locations on Linux |
+| --- | --- | --- |
+| **Embedded in AOWIS-Standalone** | GUI → Settings → Map Settings; MAP C++ library underneath | MAP records: `~/.config/aowis/standalone-map/` (or `$XDG_CONFIG_HOME/aowis/standalone-map/`). **No MAP server INI.** |
+| **Separate process, started in a terminal** | Optional INI for server options; MAP REST API for providers | INI: `~/.local/share/aowis-server-map/map-server.ini`; managed records: `~/.local/share/aowis-server-map/config/server-map/`; cache: `~/.local/share/aowis-server-map/` |
+| **Installed systemd service** | Administrator INI in `/etc`; MAP REST API for providers | INI: `/etc/aowis-server-map/map-server.ini`; managed records: `/var/lib/aowis-server-map/config/server-map/`; cache: `/var/cache/aowis-server-map/` |
 
-**Standalone integration:** callers can use `SettingsRepository::openStandaloneForCurrentUser()`. MAP migrates the prior `embedded_map_cascade` and `embedded_map_providers` GUI preference records only when the corresponding MAP CONFIG records are absent. Invalid legacy records fail closed. Imported records remain in place for rollback, and subsequent MAP writes use revision checks. The standalone/systemd server still reads its INI and `providers.ini`; its migration is separate.
+Paths are defaults, not a promise that the directories already exist. For
+Standalone, `XDG_CONFIG_HOME` changes the user configuration base. For manually
+started MAP, `XDG_DATA_HOME` changes the user data base. For systemd, the unit
+supplies `STATE_DIRECTORY` and `CACHE_DIRECTORY`. The INI's
+`storage/managed_settings_directory` can override the independent server's
+managed-record root; explicit cache directories override cache defaults.
 
-## Locate and validate configuration
+**These are separate installations of MAP:** editing Standalone's embedded MAP
+settings does not edit a separate running server. A normal, non-Standalone GUI
+connects to a MAP server over REST; only Standalone uses MAP's in-process C++
+settings API. The GUI must not read or write MAP's configuration files itself.
 
-Configuration is applied in this order:
+## What goes where?
 
-1. Built-in defaults.
-2. An INI file, if available or explicitly supplied.
-3. An API-managed raster-provider catalog, if previously saved. **Only** the raster-provider list is replaced.
-4. Explicit supported command-line overrides.
+| Settings | Owner and change mechanism | When applied |
+| --- | --- | --- |
+| Listen IP/port, API keys, worker limits, cache directories, coverage regions, global raster/terrain download switches | Administrator **INI**, optional CLI overrides | Process start/restart |
+| Raster providers (name, tile URL, zoom bounds, enabled, per-provider restrictions) | **MAP's AOWIS-CONFIG** provider record; `GET/PUT /map/v1/providers` on a separate server, MAP library in Standalone | REST edits apply immediately; Standalone provider edits apply to the embedded engine |
+| Cascading (ordered MAP upstream URLs/read keys, direct-provider fallback, slow-link JPEG/zstd settings) | **MAP's AOWIS-CONFIG** cascade record, or explicit administrator INI entries | Start/restart; Standalone GUI autosaves but restart is required |
+| Raster tiles, Copernicus source data, normalized terrain | **Cache**, kept independently of configuration | Reused on subsequent requests, including offline |
 
-An ordinary user launch reads `~/.local/share/aowis-server-map/map-server.ini` when present; a missing file is normal. The supplied systemd service explicitly supplies `/etc/aowis-server-map/map-server.ini` and requires configured read and delete API keys. An explicit `--config` must name an existing valid INI.
+AOWIS-CONFIG stores versioned, revision-checked JSON records under MAP's owner
+root. It is not another INI and is not intended for hand editing. MAP validates
+and saves it through `Aowis::Map::SettingsRepository`. A stale provider write is
+rejected with HTTP **409** instead of overwriting another editor's changes.
+Provider REST editing currently **does not check API keys**: expose that write
+route only to trusted clients using firewall/reverse-proxy access controls.
+
+### Which value wins?
+
+- Built-in defaults apply first. An available administrator INI defines operating
+  settings and can define raster providers. An existing managed provider record
+  **replaces the complete INI provider list**, not individual entries.
+- A managed cascading record applies **unless the administrator INI explicitly
+  sets any `[upstream]`, `[upstream.NAME]`, or `[bandwidth]` directive**. In that
+  case the **entire** INI cascade configuration wins; fields are not merged.
+- Supported CLI overrides (for example `--listen-address`) apply to that
+  process. Global remote-fetch switches and coverage restrictions remain gates
+  even when cascading is configured.
+- A cache hit can still be served when remote downloads are disabled. For a
+  cache miss, MAP tries its configured upstream servers in order, then contacts
+  original imagery/Copernicus providers **only if** `allow_direct_fetch=true`
+  and the relevant remote-fetch restrictions permit it.
+
+For a restricted branch office, an administrator can pin the cascade in INI:
+
+```ini
+[upstream]
+servers=primary,backup
+allow_direct_fetch=false
+
+[upstream.primary]
+url=https://maps-primary.example.org
+api_key=PRIMARY_READ_KEY
+
+[upstream.backup]
+url=https://maps-backup.example.org
+api_key=BACKUP_READ_KEY
+
+[bandwidth]
+poor_internet_mode=true
+adaptive_compression=true
+jpeg_quality=75
+```
+
+The INI keys above are an *alternative* to managed cascade settings. There is
+currently **no public REST endpoint for editing cascade configuration** on a
+separate MAP server. A slow-link downstream may request adaptive JPEG imagery
+and lossless zstd terrain from an upstream MAP server; ordinary GUI responses
+remain compatible. See [MAP cascading](map-cascading.md) for the transfer rules.
+
+## First-run, migration and recovery
+
+- **Standalone:** MAP owns the `standalone-map` CONFIG root and imports old
+  GUI-stored embedded-MAP preferences only when the corresponding MAP record is
+  absent. Old preferences are left intact for rollback.
+- **Separate/systemd server:** if no managed provider record exists, MAP checks
+  the old `providers.ini`, validates it and imports it **once**. The legacy file
+  stays untouched. On later starts, the managed provider record wins. An
+  invalid managed or legacy record causes an error instead of silently
+  restoring defaults or enabling downloads.
+- **`--check-config`:** validates settings without starting a listener or
+  writing a migration. To inspect the systemd server's *actual* managed records,
+  run it as the service user with its state/cache environment (see
+  [systemd deployment](../configs/systemd/README.md#configuration-management)).
+- **Backups:** stop the owner, then back up its entire CONFIG owner directory
+  (records may contain upstream read keys). Back up the administrator INI
+  separately. Do not treat tile-cache deletion as a settings reset.
+
+## Start and inspect a separate MAP server
+
+A manually started server uses built-in defaults plus any user INI and
+AOWIS-CONFIG records. Without an INI, it normally listens on
+`127.0.0.1:8122`. An explicit `--config` must reference a valid existing file.
 
 ```bash
 ./build-linux/aowis-server-map --print-default-config
@@ -26,7 +116,9 @@ An ordinary user launch reads `~/.local/share/aowis-server-map/map-server.ini` w
 ./build-linux/aowis-server-map --config ./map-server.ini
 ```
 
-`--write-default-config` refuses to overwrite an existing file. Pass `--overwrite` **only when replacing it intentionally**. The generated file is the authoritative example for the binary you have built; it includes the built-in raster providers and their UUIDs.
+`--write-default-config` will not replace an existing file without
+`--overwrite`. The generated INI is a useful reference for the installed
+binary, not a replacement for MAP's managed CONFIG records.
 
 ### Command-line options
 
@@ -98,7 +190,8 @@ Use `ss -ltn | grep ':8122'` locally to confirm the listening socket. From anoth
 | `terrain/cache_directory` | empty | Terrain root; defaults below raster cache root |
 | `terrain/coverage` | empty | Terrain download-coverage profile |
 | `storage/permanent_data_directory` | empty | Optional administrator-owned permanent data root |
-| `storage/provider_state_file` | empty | Optional override for writable GUI-managed provider catalog |
+| `storage/provider_state_file` | empty | Legacy provider catalog path, read only for one-time migration |
+| `storage/managed_settings_directory` | empty | Optional CONFIG `server-map` owner root (defaults under the service state directory) |
 | `regions/geojson_file` | empty | Optional named Polygon/MultiPolygon regions |
 | `authentication/api_key` | empty | Read API key; empty disables read-key checks in user mode |
 | `authentication/delete_api_key` | empty | Cache/delete API key; empty **disables** management DELETE routes |
@@ -133,7 +226,7 @@ remote_fetch_enabled=true
 coverage=
 ```
 
-String values containing a comma must be enclosed in double quotes (`name="Esri, Maxar"`); Qt's INI reader would otherwise split them into a list. The server rejects an unquoted comma in provider `name`, `url` and `coverage` and in `authentication/api_key`/`delete_api_key` instead of silently dropping the value. Inside quotes, write `\"` for a quote and `\\` for a backslash. The API-managed `providers.ini` is always written this way.
+String values containing a comma must be enclosed in double quotes (`name="Esri, Maxar"`); Qt's INI reader would otherwise split them into a list. The server rejects an unquoted comma in provider `name`, `url` and `coverage` and in `authentication/api_key`/`delete_api_key` instead of silently dropping the value. Inside quotes, write `\"` for a quote and `\\` for a backslash. The legacy `providers.ini` writer used this escaping; current edits are stored through AOWIS-CONFIG.
 
 `{z}`, `{x}` and `{y}` placeholders are required, in any order; `{s}` optionally selects subdomains `a`, `b`, `c`. An empty provider `coverage` inherits the raster default. A provider's `remote_fetch_enabled=true` cannot override `downloads/remote_fetch_enabled=false`.
 
@@ -141,16 +234,17 @@ If **any** `[map_provider.*]` sections are present, they form the entire INI pro
 
 ### GUI/API provider editing
 
-`GET /map/v1/providers` returns the configured list, including disabled providers and full upstream URL templates. `PUT /map/v1/providers` replaces that list in memory and atomically saves it to an application-managed `providers.ini` (maximum 100 providers). See the [API reference](http-api.md#raster-provider-management) for the JSON schema.
+`GET /map/v1/providers` returns the configured list, including disabled providers and full upstream URL templates. `PUT /map/v1/providers` validates the list, writes it to MAP-owned AOWIS-CONFIG with revision checking, and applies it in memory (maximum 100 providers). See the [API reference](http-api.md#raster-provider-management) for the JSON schema.
 
 | Service path | Ownership |
 | --- | --- |
 | `/etc/aowis-server-map/map-server.ini` | Administrator; never rewritten by the API |
-| `/var/lib/aowis-server-map/providers.ini` | GUI/API provider state; replaces only the raster provider list |
+| `/var/lib/aowis-server-map/config/server-map/` | MAP-managed AOWIS-CONFIG provider and cascade records |
+| `/var/lib/aowis-server-map/providers.ini` | Read-only legacy provider state, imported once if present |
 | `/var/cache/aowis-server-map/` | Disposable raster/terrain caches |
 | `/var/lib/aowis-server-map/data/` | Optional administrator-supplied permanent data |
 
-To return to the INI-defined raster provider list, stop the service, back up/remove `providers.ini`, and restart. To relocate it, use `storage/provider_state_file` pointing to a **service-writable location outside `/etc`**. Editing providers does not alter region definitions, API keys or terrain configuration. A changed upstream URL gets a separate raster cache variant using its URL fingerprint.
+To return to the INI-defined raster providers, stop the service, back up/remove the managed CONFIG provider record using CONFIG's supported storage API, and restart. The legacy `providers.ini` remains a migration source until it is backed up or removed; move it out of the state directory if you want to restore administrator defaults after clearing CONFIG. Editing providers does not alter region definitions, API keys or terrain configuration. A changed upstream URL gets a separate raster cache variant using its URL fingerprint.
 
 **Security boundary:** `PUT /map/v1/providers` currently **does not validate read or delete API keys**. Provider URLs are metadata, not secret storage. Limit PUT access to trusted users with an actual proxy/network policy; CORS headers are not access control.
 
