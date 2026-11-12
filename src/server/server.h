@@ -50,6 +50,7 @@ class Server : public QObject
     friend class TerrainZstdHttpTestAccess;
     friend class RasterJpegHttpTestAccess;
     friend class MapCascadeChainTestAccess;
+    friend class MapManagedSettingsHttpTestAccess;
 
 public:
     struct Config
@@ -68,7 +69,10 @@ public:
         int maximum_active_downloads = 32;
         bool map_remote_fetch_enabled = true;
         Aowis::Map::MapCascadeConfig cascade;
-        QString provider_state_file;
+        QString provider_state_file; // Legacy import path only; never written by the REST server.
+        QString managed_settings_root; // MAP-owned AOWIS-CONFIG owner root, set by main.
+        QString provider_revision; // Optimistic concurrency token for provider PUT.
+        bool cascade_defined_in_admin_ini = false;
         QString cache_directory;
         QString permanent_data_directory;
         QString map_coverage;

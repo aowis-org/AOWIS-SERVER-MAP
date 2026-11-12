@@ -343,6 +343,17 @@ if(AOWIS_SERVER_MAP_BUILD_SERVER)
         add_test(NAME aowis-server-map-cascade-configuration
                  COMMAND aowis-server-map-cascade-configuration-test)
 
+        add_executable(aowis-server-map-managed-settings-test
+            tests/test_map_server_managed_settings.cpp
+            src/server/server.cpp
+            src/server/server.h
+            src/server/configuration.cpp
+            src/server/configuration.h)
+        target_link_libraries(aowis-server-map-managed-settings-test
+            PRIVATE AOWIS::Map Qt6::HttpServer)
+        add_test(NAME aowis-server-map-managed-settings
+            COMMAND aowis-server-map-managed-settings-test)
+
         add_executable(aowis-server-map-provider-state-test
             tests/test_provider_state.cpp
             src/server/configuration.cpp
@@ -444,6 +455,7 @@ if(BUILD_TESTING)
         # The native test target must compile the production executable too.
         list(APPEND AOWIS_SERVER_MAP_TEST_TARGETS
             aowis-server-map-cascade-configuration-test
+            aowis-server-map-managed-settings-test
             aowis-server-map-provider-state-test
             aowis-server-map-terrain-singleflight-http-test
             aowis-server-map-terrain-zstd-http-test

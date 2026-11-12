@@ -1,3 +1,4 @@
+#include <aowis/map/settings_repository.h>
 #include "server.h"
 
 #include <aowis/map/terrain_data.h>
@@ -14,8 +15,6 @@
 #include <QFileInfo>
 #include <QJsonDocument>
 #include <QJsonArray>
-#include <QUuid>
-#include <QSet>
 #include <QUrl>
 #include <QRegularExpression>
 #include "configuration.h"
@@ -1405,25 +1404,8 @@ void Server::setupRoutes()
                      [this](const QHttpServerRequest &request)
     {
         if (!isReadAuthorized(request)) return makeUnauthorizedResponse();
-        QJsonArray providers;
-        for (const Aowis::Map::MapProvider &provider : this->config.map_providers)
-        {
-            QJsonObject entry;
-            entry.insert(QStringLiteral("id"), provider.id);
-            entry.insert(QStringLiteral("name"), provider.name);
-            entry.insert(QStringLiteral("url"), provider.url_template);
-            entry.insert(QStringLiteral("minimum_zoom"), provider.minimum_zoom);
-            entry.insert(QStringLiteral("maximum_zoom"), provider.maximum_zoom);
-            entry.insert(QStringLiteral("enabled"), provider.enabled);
-            entry.insert(QStringLiteral("remote_fetch_enabled"), provider.remote_fetch_enabled);
-            entry.insert(QStringLiteral("allow_lossy_transfer"), provider.allow_lossy_transfer);
-            entry.insert(QStringLiteral("coverage"), provider.coverage);
-            providers.append(entry);
-        }
-        QJsonObject root;
-        root.insert(QStringLiteral("providers"), providers);
         return QHttpServerResponse(QByteArrayLiteral("application/json"),
-            QJsonDocument(root).toJson(QJsonDocument::Compact),
+            Aowis::Map::encodeProviderCatalog(this->config.map_providers),
             QHttpServerResponse::StatusCode::Ok);
     });
     // As requested, provider editing currently has no authentication. Only
@@ -1431,61 +1413,45 @@ void Server::setupRoutes()
     this->http.route("/map/v1/providers", QHttpServerRequest::Method::Put,
                      [this](const QHttpServerRequest &request)
     {
-        const QJsonDocument document = QJsonDocument::fromJson(request.body());
-        if (!document.isObject() || !document.object().value(QStringLiteral("providers")).isArray())
-            return QHttpServerResponse("Expected {\"providers\": [...]}",
-                                       QHttpServerResponse::StatusCode::BadRequest);
-        const QJsonArray entries = document.object().value(QStringLiteral("providers")).toArray();
-        if (entries.size() > 100)
-            return QHttpServerResponse("Too many map providers",
-                                       QHttpServerResponse::StatusCode::BadRequest);
         QVector<Aowis::Map::MapProvider> proposed;
-        QSet<QString> ids;
-        for (const QJsonValue &value : entries)
-        {
-            if (!value.isObject())
-                return QHttpServerResponse("Provider must be an object",
-                                           QHttpServerResponse::StatusCode::BadRequest);
-            const QJsonObject entry = value.toObject();
-            Aowis::Map::MapProvider provider;
-            provider.id = entry.value(QStringLiteral("id")).toString().trimmed().toLower();
-            provider.name = entry.value(QStringLiteral("name")).toString().trimmed();
-            provider.url_template = entry.value(QStringLiteral("url")).toString().trimmed();
-            provider.coverage = entry.value(QStringLiteral("coverage")).toString().trimmed();
-            provider.minimum_zoom = entry.value(QStringLiteral("minimum_zoom")).toInt(-1);
-            provider.maximum_zoom = entry.value(QStringLiteral("maximum_zoom")).toInt(-1);
-            provider.enabled = entry.value(QStringLiteral("enabled")).toBool(true);
-            provider.remote_fetch_enabled = entry.value(QStringLiteral("remote_fetch_enabled")).toBool(true);
-            provider.allow_lossy_transfer = entry.value(QStringLiteral("allow_lossy_transfer")).toBool(true);
-            const QUrl parsed(provider.url_template);
-            if (QUuid(provider.id).isNull() || provider.id.contains(QLatin1Char('{')) ||
-                ids.contains(provider.id) || provider.name.isEmpty() ||
-                provider.name.contains(QLatin1Char('\n')) || provider.name.contains(QLatin1Char('\r')) ||
-                provider.url_template.contains(QLatin1Char('\n')) ||
-                provider.url_template.contains(QLatin1Char('\r')) ||
-                provider.coverage.contains(QLatin1Char('\n')) ||
-                provider.minimum_zoom < 0 || provider.maximum_zoom > 30 ||
-                provider.minimum_zoom > provider.maximum_zoom ||
-                !this->config.download_coverage.hasProfile(provider.coverage) ||
-                !(parsed.scheme() == QStringLiteral("http") || parsed.scheme() == QStringLiteral("https")) ||
-                parsed.host().isEmpty() ||
-                !provider.url_template.contains(QStringLiteral("{z}")) ||
-                !provider.url_template.contains(QStringLiteral("{x}")) ||
-                !provider.url_template.contains(QStringLiteral("{y}")))
-            {
-                return QHttpServerResponse("Invalid provider UUID, name, URL, coverage or zoom range",
-                                           QHttpServerResponse::StatusCode::BadRequest);
-            }
-            ids.insert(provider.id);
-            proposed.append(provider);
-        }
         QString error_message;
-        if (!MapServerConfiguration::saveMapProvidersToState(
-                this->config.provider_state_file, proposed, &error_message))
+        // Share the exact provider schema and URL-template validation with the
+        // MAP library. In particular, CyclOSM's {s} hostname placeholder must
+        // be expanded before QUrl checks the host. Validating the raw URL here
+        // used to reject an otherwise unchanged, built-in provider catalog.
+        if (!Aowis::Map::decodeProviderCatalog(request.body(), this->config.map_providers,
+                                                &proposed, &error_message))
+            return QHttpServerResponse(error_message.toUtf8(),
+                                       QHttpServerResponse::StatusCode::BadRequest);
+        for (const Aowis::Map::MapProvider &provider : proposed)
         {
+            if (provider.id.contains(QLatin1Char('{')) ||
+                !this->config.download_coverage.hasProfile(provider.coverage))
+                return QHttpServerResponse("Invalid provider UUID or coverage profile",
+                                           QHttpServerResponse::StatusCode::BadRequest);
+        }
+        if (this->config.managed_settings_root.isEmpty())
+            return QHttpServerResponse("Managed MAP settings are unavailable",
+                                       QHttpServerResponse::StatusCode::ServiceUnavailable);
+        std::unique_ptr<Aowis::Map::SettingsRepository> repository =
+            Aowis::Map::SettingsRepository::openAtOwnerRoot(
+                QStringLiteral("server-map"), this->config.managed_settings_root,
+                &error_message);
+        if (!repository)
             return QHttpServerResponse(error_message,
                                        QHttpServerResponse::StatusCode::InternalServerError);
+        QString new_revision;
+        if (!repository->saveProviders(proposed, this->config.provider_revision,
+                                       &new_revision, &error_message))
+        {
+            // Never overwrite another editor's update with an out-of-date
+            // in-memory catalog. Restart/reload before trying again.
+            const bool conflict = error_message.contains(QStringLiteral("revision conflict"));
+            return QHttpServerResponse(error_message, conflict ?
+                QHttpServerResponse::StatusCode::Conflict :
+                QHttpServerResponse::StatusCode::InternalServerError);
         }
+        this->config.provider_revision = new_revision;
         this->maptiles->cancelUpstreamDownloads();
         this->config.map_providers = proposed;
         this->maptiles->configureProviders(this->config.map_providers,

@@ -1,6 +1,7 @@
 #include "configuration.h"
 
 #include <aowis/map/terrain_tile.h>
+#include <aowis/map/settings_repository.h>
 
 #include <QByteArray>
 #include <QDir>
@@ -314,6 +315,112 @@ QString MapServerConfiguration::defaultProviderStateFilePath()
     return QDir(state_directory).filePath(QStringLiteral("providers.ini"));
 }
 
+QString MapServerConfiguration::defaultManagedSettingsRoot(const Server::Config &config)
+{
+    if (!config.managed_settings_root.isEmpty())
+        return QDir::cleanPath(config.managed_settings_root);
+    // CONFIG storage follows the service's state directory, independently of
+    // a relocated legacy providers.ini. An explicit administrator path is
+    // accepted through [storage]/managed_settings_directory instead.
+    const QString state = qEnvironmentVariable("STATE_DIRECTORY").trimmed();
+    const QString state_root = state.isEmpty() ? defaultUserDataDirectory() :
+        state.split(QLatin1Char(':'), Qt::SkipEmptyParts).first();
+    return QDir(state_root).filePath(QStringLiteral("config/server-map"));
+}
+
+bool MapServerConfiguration::loadManagedSettings(Server::Config *config, bool migrate_legacy,
+                                                  QString *error_message)
+{
+    if (config == nullptr)
+    {
+        if (error_message != nullptr)
+            *error_message = QStringLiteral("Missing MAP server configuration");
+        return false;
+    }
+    const QString root = defaultManagedSettingsRoot(*config);
+#if defined(Q_OS_UNIX)
+    // Managed settings must never be written into administrator-owned /etc,
+    // including a symlinked path that resolves into /etc.
+    const QFileInfo root_info(root);
+    const QString root_absolute = QDir::cleanPath(root_info.absoluteFilePath());
+    const QString canonical_parent = root_info.dir().canonicalPath();
+    if (root_absolute == QStringLiteral("/etc") ||
+        root_absolute.startsWith(QStringLiteral("/etc/")) ||
+        canonical_parent == QStringLiteral("/etc") ||
+        canonical_parent.startsWith(QStringLiteral("/etc/")))
+    {
+        if (error_message != nullptr)
+            *error_message = QStringLiteral("Managed MAP settings cannot be stored under /etc: %1").arg(root);
+        return false;
+    }
+#endif
+    std::unique_ptr<Aowis::Map::SettingsRepository> repository =
+        Aowis::Map::SettingsRepository::openAtOwnerRoot(
+            QStringLiteral("server-map"), root, error_message);
+    if (!repository)
+        return false;
+
+    Aowis::Map::MapCascadeConfig managed_cascade;
+    QString cascade_revision;
+    if (!repository->readCascade(&managed_cascade, &cascade_revision, error_message))
+        return false;
+    QVector<Aowis::Map::MapProvider> managed_providers;
+    QString provider_revision;
+    if (!repository->readProviders(&managed_providers, &provider_revision, error_message))
+        return false;
+
+    // Legacy state takes precedence over the admin INI only until the first
+    // CONFIG record is created. Validate the complete legacy file first; never
+    // silently skip a damaged file or silently restore built-in defaults.
+    if (provider_revision.isEmpty() && QFileInfo::exists(config->provider_state_file))
+    {
+        Server::Config legacy = *config;
+        if (!loadProviderStateFile(config->provider_state_file, &legacy, error_message))
+            return false;
+        managed_providers = legacy.map_providers;
+        // Validate coverage before writing the imported record. A failed
+        // migration must not leave an unusable CONFIG record behind.
+        for (const Aowis::Map::MapProvider &provider : managed_providers)
+        {
+            if (!config->download_coverage.hasProfile(provider.coverage))
+            {
+                if (error_message != nullptr)
+                    *error_message = QStringLiteral("Legacy MAP provider '%1' uses unknown coverage '%2'")
+                        .arg(provider.id, provider.coverage);
+                return false;
+            }
+        }
+        if (migrate_legacy)
+        {
+            if (!repository->saveProviders(managed_providers, QString(),
+                                           &provider_revision, error_message))
+                return false;
+        }
+    }
+
+    if (!provider_revision.isEmpty() || QFileInfo::exists(config->provider_state_file))
+    {
+        for (const Aowis::Map::MapProvider &provider : managed_providers)
+        {
+            if (!config->download_coverage.hasProfile(provider.coverage))
+            {
+                if (error_message != nullptr)
+                    *error_message = QStringLiteral("Managed MAP provider '%1' uses unknown coverage '%2'")
+                        .arg(provider.id, provider.coverage);
+                return false;
+            }
+        }
+        config->map_providers = managed_providers;
+    }
+    if (!cascade_revision.isEmpty() && !config->cascade_defined_in_admin_ini)
+        config->cascade = managed_cascade;
+    config->provider_revision = provider_revision;
+    config->managed_settings_root = root;
+    if (error_message != nullptr)
+        error_message->clear();
+    return true;
+}
+
 QString MapServerConfiguration::defaultConfigFilePath()
 {
     return QDir(defaultUserDataDirectory()).filePath(QStringLiteral("map-server.ini"));
@@ -413,6 +520,18 @@ bool MapServerConfiguration::loadConfigFile(const QString &path, Server::Config 
     {
         return false;
     }
+
+    // An explicit administrator cascade section wins over a writable CONFIG
+    // record in its entirety, so a managed edit cannot relax direct-fetch policy.
+    config->cascade_defined_in_admin_ini =
+        settings.contains(QStringLiteral("upstream/servers")) ||
+        settings.contains(QStringLiteral("upstream/allow_direct_fetch")) ||
+        settings.contains(QStringLiteral("bandwidth/poor_internet_mode")) ||
+        settings.contains(QStringLiteral("bandwidth/adaptive_compression")) ||
+        settings.contains(QStringLiteral("bandwidth/jpeg_quality"));
+    for (const QString &group : settings.childGroups())
+        if (group.startsWith(QStringLiteral("upstream.")))
+            config->cascade_defined_in_admin_ini = true;
 
     // Cascading configuration is shared with the embedded MAP core. Parse the
     // named order explicitly instead of relying on QSettings child-group order.
@@ -520,6 +639,14 @@ bool MapServerConfiguration::loadConfigFile(const QString &path, Server::Config 
                                       .toString().trimmed();
         if (!value.isEmpty())
             config->permanent_data_directory = resolveDirectory(file_info, value);
+    }
+
+    if (settings.contains(QStringLiteral("storage/managed_settings_directory")))
+    {
+        const QString value = settings.value(QStringLiteral("storage/managed_settings_directory"))
+                                  .toString().trimmed();
+        if (!value.isEmpty())
+            config->managed_settings_root = resolveDirectory(file_info, value);
     }
 
     if (settings.contains(QStringLiteral("storage/provider_state_file")))

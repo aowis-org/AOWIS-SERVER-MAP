@@ -11,6 +11,12 @@ namespace MapServerConfiguration
 QString defaultUserDataDirectory();
 QString defaultCacheDirectory();
 QString defaultProviderStateFilePath();
+QString defaultManagedSettingsRoot(const Server::Config &config);
+// Load MAP-managed CONFIG records after the administrator INI and before CLI
+// overrides. Only an absent provider record is eligible for one-time legacy
+// providers.ini migration. When migrate_legacy=false, no migration is written.
+bool loadManagedSettings(Server::Config *config, bool migrate_legacy,
+                         QString *error_message);
 QString defaultConfigFilePath();
 bool loadConfigFile(const QString &path, Server::Config *config, QString *error_message);
 QByteArray defaultConfigText();

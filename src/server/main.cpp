@@ -195,12 +195,12 @@ int main(int argc, char *argv[])
         }
     }
 
-    // A GUI-edited provider catalog overrides only providers from the admin
-    // file, never its download permissions, coverage regions, or other keys.
+    // MAP itself owns writable provider/cascade records. Existing providers.ini
+    // is imported once, never rewritten; --check-config only reads/validates.
     {
         QString error_message;
-        if (!MapServerConfiguration::loadProviderStateFile(
-                config.provider_state_file, &config, &error_message))
+        if (!MapServerConfiguration::loadManagedSettings(
+                &config, !parser.isSet(check_config_option), &error_message))
         {
             qCritical().noquote() << error_message;
             return EXIT_FAILURE;
@@ -299,8 +299,11 @@ int main(int argc, char *argv[])
             QStringLiteral("<map cache>/terrain") : config.terrain_cache_directory) << '\n';
         output << "Permanent data: " << (config.permanent_data_directory.isEmpty() ?
             QStringLiteral("<terrain cache>/offline-packages") : config.permanent_data_directory) << '\n';
-        output << "Provider state: " << config.provider_state_file
-               << (QFileInfo::exists(config.provider_state_file) ? " (loaded)\n" : " (not present)\n");
+        output << "Managed MAP settings: " << config.managed_settings_root << '\n';
+        output << "Legacy provider state: " << config.provider_state_file
+               << (QFileInfo::exists(config.provider_state_file) ? " (available for migration)\n" : " (not present)\n");
+        output << "Cascade source: " << (config.cascade_defined_in_admin_ini ?
+            "administrator INI" : "AOWIS-CONFIG or defaults") << '\n';
         output << "Map providers:\n";
         for (const Aowis::Map::MapProvider &provider : config.map_providers)
             output << "  " << provider.id << " (" << (provider.enabled ? "enabled" : "disabled")
