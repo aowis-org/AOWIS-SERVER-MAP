@@ -108,9 +108,23 @@ void ProviderCatalog::rebuild()
         const QVector<MapProvider> catalog = this->upstream_catalogs_.value(upstream.name);
         for (const MapProvider &advertised : catalog)
         {
-            if (!advertised.enabled || !advertised.remote_fetch_enabled ||
-                locally_defined.contains(advertised.id))
+            if (!advertised.enabled || !advertised.remote_fetch_enabled)
                 continue;
+            if (locally_defined.contains(advertised.id))
+            {
+                // A matching local definition remains locally editable, but
+                // it is still useful to advertise which upstreams offer it.
+                // Never associate a different source with the same UUID.
+                const QHash<QString, qsizetype>::const_iterator local =
+                    positions.constFind(advertised.id);
+                if (local != positions.cend())
+                {
+                    AvailableMapProvider &selected = combined[local.value()];
+                    if (selected.provider.url_template == advertised.url_template)
+                        selected.upstream_names.append(upstream.name);
+                }
+                continue;
+            }
             const QHash<QString, qsizetype>::const_iterator existing =
                 positions.constFind(advertised.id);
             if (existing != positions.cend())

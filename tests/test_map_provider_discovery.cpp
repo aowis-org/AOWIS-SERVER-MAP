@@ -224,6 +224,46 @@ int main(int argc, char **argv)
         }
         if (!check(found && root.catalog_count > 0 && backup.catalog_count > 0,
                    "Discover and merge ordered upstream providers")) return 1;
+        // Built-in provider UUIDs commonly exist on both servers. A local
+        // definition keeps ownership but must show its matching upstreams.
+        Aowis::Map::ProviderCatalog overlapping(
+            QDir(storage.path()).filePath(QStringLiteral("overlap-cache")));
+        overlapping.configure({inherited}, config.cascade);
+        overlapping.refresh();
+        bool overlap_found = false;
+        for (int index = 0; index < 150 && !overlap_found; ++index)
+        {
+            application.processEvents(QEventLoop::AllEvents, 15);
+            const QVector<Aowis::Map::AvailableMapProvider> entries = overlapping.available();
+            overlap_found = entries.size() == 1 && !entries.first().inherited &&
+                entries.first().upstream_names ==
+                    QStringList{QStringLiteral("root"), QStringLiteral("backup")};
+            if (!overlap_found) QThread::msleep(5);
+        }
+        if (!check(overlap_found && overlapping.inheritedUpstreams().isEmpty(),
+                   "Advertise matching upstreams without duplicating local provider")) return 1;
+        Aowis::Map::MapProvider different = inherited;
+        different.url_template = QStringLiteral("https://unrelated.example/{z}/{x}/{y}.png");
+        Aowis::Map::ProviderCatalog conflicting(
+            QDir(storage.path()).filePath(QStringLiteral("conflicting-cache")));
+        conflicting.configure({different}, config.cascade);
+        const int root_catalog_before_conflict = root.catalog_count;
+        const int backup_catalog_before_conflict = backup.catalog_count;
+        conflicting.refresh();
+        for (int index = 0; index < 150 &&
+             (root.catalog_count == root_catalog_before_conflict ||
+              backup.catalog_count == backup_catalog_before_conflict); ++index)
+        {
+            application.processEvents(QEventLoop::AllEvents, 15);
+            QThread::msleep(5);
+        }
+        const QVector<Aowis::Map::AvailableMapProvider> different_entries =
+            conflicting.available();
+        if (!check(root.catalog_count > root_catalog_before_conflict &&
+                   backup.catalog_count > backup_catalog_before_conflict &&
+                   different_entries.size() == 1 &&
+                   different_entries.first().upstream_names.isEmpty(),
+                   "Do not advertise conflicting upstream source under local UUID")) return 1;
         const ReplyData local = request(application, &network, local_url, config.api_key);
         if (!check(local.status == 200 && QJsonDocument::fromJson(local.body)
                    .object().value(QStringLiteral("providers")).toArray().isEmpty(),
