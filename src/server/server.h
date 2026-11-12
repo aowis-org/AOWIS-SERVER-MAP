@@ -76,6 +76,8 @@ public:
         QString provider_revision; // Optimistic concurrency token for provider PUT.
         QSet<QString> disabled_inherited_providers;
         QString inherited_provider_revision;
+        QHash<QString, QStringList> provider_upstream_routes;
+        QString provider_upstream_routes_revision;
         bool cascade_defined_in_admin_ini = false;
         QString cache_directory;
         QString permanent_data_directory;

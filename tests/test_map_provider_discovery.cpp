@@ -148,6 +148,33 @@ ReplyData updateProvider(QCoreApplication &application, QNetworkAccessManager *m
     delete reply;
     return response;
 }
+ReplyData updateRoute(QCoreApplication &application, QNetworkAccessManager *manager,
+                      const QUrl &url, const QByteArray &key, const QString &id,
+                      const QStringList &upstreams)
+{
+    QNetworkRequest query(url);
+    query.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
+    if (!key.isEmpty()) query.setRawHeader("X-API-Key", key);
+    QJsonArray selected;
+    for (const QString &name : upstreams) selected.append(name);
+    const QByteArray body = QJsonDocument(QJsonObject{
+        {QStringLiteral("id"), id}, {QStringLiteral("upstreams"), selected}
+    }).toJson(QJsonDocument::Compact);
+    QNetworkReply *reply = manager->put(query, body);
+    QElapsedTimer timer;
+    timer.start();
+    while (!reply->isFinished() && timer.elapsed() < 9000)
+    {
+        application.processEvents(QEventLoop::AllEvents, 15);
+        QThread::msleep(1);
+    }
+    if (!reply->isFinished()) reply->abort();
+    ReplyData response;
+    response.status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    response.body = reply->readAll();
+    delete reply;
+    return response;
+}
 }
 
 int main(int argc, char **argv)
@@ -312,6 +339,54 @@ int main(int argc, char **argv)
         if (!check(tile.status == 200 && tile.body == ValidPng &&
                    root.tile_count > 0 && origin.tile_count == 0,
                    "Fetch inherited provider via MAP only")) return 1;
+        // Routing overrides are local-only, select an ordered subset of the
+        // advertising peers, and never contact a provider's origin directly.
+        const QUrl routes_url(base + QStringLiteral("/map/v1/providers/upstreams"));
+        if (!check(updateRoute(application, &network, routes_url, {}, inherited.id,
+                               {QStringLiteral("backup")}).status == 401,
+                   "Provider route updates require administrator authentication")) return 1;
+        if (!check(updateRoute(application, &network, routes_url, config.delete_api_key,
+                               inherited.id, {QStringLiteral("unknown")}).status == 400,
+                   "Unknown advertising peers cannot be selected")) return 1;
+        if (!check(updateRoute(application, &network, routes_url, config.delete_api_key,
+                               inherited.id, {QStringLiteral("backup"), QStringLiteral("root")})
+                       .status == 200,
+                   "Save preferred MAP upstream order")) return 1;
+        const QJsonArray ordered_entries = QJsonDocument::fromJson(
+            request(application, &network, available_url, config.api_key).body)
+            .object().value(QStringLiteral("providers")).toArray();
+        const QJsonArray selected_upstreams = ordered_entries.first().toObject()
+            .value(QStringLiteral("selected_upstreams")).toArray();
+        if (!check(selected_upstreams.size() == 2 &&
+                   selected_upstreams.at(0).toString() == QStringLiteral("backup") &&
+                   selected_upstreams.at(1).toString() == QStringLiteral("root"),
+                   "Advertise the effective provider-specific route order")) return 1;
+        const int root_before_routing = root.tile_count;
+        const int backup_before_routing = backup.tile_count;
+        const ReplyData preferred = request(application, &network,
+            QUrl(base + QStringLiteral("/%1/6/30/25.png").arg(inherited.id)), config.api_key);
+        if (!check(preferred.status == 200 && preferred.body == ValidPng &&
+                   backup.tile_count > backup_before_routing &&
+                   root.tile_count == root_before_routing && origin.tile_count == 0,
+                   "Preferred upstream wins without contacting origin or global primary")) return 1;
+        std::unique_ptr<Aowis::Map::SettingsRepository> route_repository =
+            Aowis::Map::SettingsRepository::openAtOwnerRoot(
+                QStringLiteral("server-map"), config.managed_settings_root);
+        QHash<QString, QStringList> saved_routes;
+        if (!check(route_repository != nullptr &&
+                   route_repository->readProviderUpstreamRoutes(&saved_routes) &&
+                   saved_routes.value(inherited.id) ==
+                       QStringList({QStringLiteral("backup"), QStringLiteral("root")}),
+                   "Selected MAP upstreams persist in MAP-owned CONFIG")) return 1;
+        if (!check(updateRoute(application, &network, routes_url, config.delete_api_key,
+                               inherited.id, {}).status == 200,
+                   "Reset per-provider order to global priority")) return 1;
+        const QJsonArray reset_entries = QJsonDocument::fromJson(
+            request(application, &network, available_url, config.api_key).body)
+            .object().value(QStringLiteral("providers")).toArray();
+        if (!check(reset_entries.first().toObject().value(QStringLiteral("selected_upstreams"))
+                       .toArray().first().toString() == QStringLiteral("root"),
+                   "Default global upstream priority restored")) return 1;
         // Cached tiles must also obey local enablement, not just new downloads.
         if (!check(updateProvider(application, &network, override_url,
                                   config.delete_api_key, inherited.id, false).status == 200,

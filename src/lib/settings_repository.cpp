@@ -667,6 +667,89 @@ bool SettingsRepository::saveDisabledInheritedProviders(const QSet<QString> &ids
                            expected_revision, revision, error);
 }
 
+bool SettingsRepository::readProviderUpstreamRoutes(QHash<QString, QStringList> *routes,
+                                                    QString *revision, QString *error) const
+{
+    if (routes == nullptr)
+        return fail(error, QStringLiteral("Missing provider upstream routing destination"));
+    routes->clear();
+    if (revision != nullptr) revision->clear();
+    Record record;
+    if (!readCollection(this->implementation_->store, "provider-upstream-routes", &record, error))
+        return false;
+    if (record.revision.isEmpty())
+    {
+        if (error != nullptr) error->clear();
+        return true;
+    }
+    if (!isInteger(record.json.value(QStringLiteral("version")), 1, 1) ||
+        !record.json.value(QStringLiteral("routes")).isObject())
+        return fail(error, QStringLiteral("Invalid provider upstream routing record"));
+    const QJsonObject object = record.json.value(QStringLiteral("routes")).toObject();
+    if (object.size() > 256)
+        return fail(error, QStringLiteral("Too many provider upstream routes"));
+    QHash<QString, QStringList> parsed;
+    const QRegularExpression valid_name(QStringLiteral("^[A-Za-z][A-Za-z0-9_-]{0,63}$"));
+    for (QJsonObject::const_iterator it = object.constBegin(); it != object.constEnd(); ++it)
+    {
+        const QUuid uuid(it.key());
+        if (uuid.isNull() || uuid.toString(QUuid::WithoutBraces) != it.key() ||
+            !it.value().isArray())
+            return fail(error, QStringLiteral("Invalid provider upstream routing entry"));
+        const QJsonArray values = it.value().toArray();
+        if (values.isEmpty() || values.size() > 32)
+            return fail(error, QStringLiteral("Invalid provider upstream routing length"));
+        QStringList names;
+        for (const QJsonValue &value : values)
+        {
+            if (!value.isString() || !valid_name.match(value.toString()).hasMatch() ||
+                names.contains(value.toString()))
+                return fail(error, QStringLiteral("Invalid or duplicate provider upstream name"));
+            names.append(value.toString());
+        }
+        parsed.insert(it.key(), names);
+    }
+    *routes = parsed;
+    if (revision != nullptr) *revision = record.revision;
+    if (error != nullptr) error->clear();
+    return true;
+}
+
+bool SettingsRepository::saveProviderUpstreamRoutes(const QHash<QString, QStringList> &routes,
+                                                    const QString &expected_revision,
+                                                    QString *revision, QString *error) const
+{
+    if (routes.size() > 256)
+        return fail(error, QStringLiteral("Too many provider upstream routes"));
+    const QRegularExpression valid_name(QStringLiteral("^[A-Za-z][A-Za-z0-9_-]{0,63}$"));
+    QJsonObject entries;
+    QStringList ids = routes.keys();
+    ids.sort();
+    for (const QString &id : ids)
+    {
+        const QUuid uuid(id);
+        if (uuid.isNull() || uuid.toString(QUuid::WithoutBraces) != id)
+            return fail(error, QStringLiteral("Invalid provider UUID for upstream route"));
+        const QStringList names = routes.value(id);
+        if (names.isEmpty() || names.size() > 32)
+            return fail(error, QStringLiteral("Provider upstream route must be nonempty"));
+        QJsonArray list;
+        QSet<QString> unique;
+        for (const QString &name : names)
+        {
+            if (!valid_name.match(name).hasMatch() || unique.contains(name))
+                return fail(error, QStringLiteral("Invalid or duplicate provider upstream name"));
+            unique.insert(name);
+            list.append(name);
+        }
+        entries.insert(id, list);
+    }
+    return writeCollection(this->implementation_->store, "provider-upstream-routes",
+                           QJsonObject{{QStringLiteral("version"), 1},
+                                       {QStringLiteral("routes"), entries}},
+                           expected_revision, revision, error);
+}
+
 bool SettingsRepository::readProviders(QVector<MapProvider> *value, QString *revision,
                                        QString *error) const
 {

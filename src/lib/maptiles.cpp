@@ -178,10 +178,12 @@ bool MapTiles::acceptsCascadeTrace(const QByteArray &trace) const
 void MapTiles::configureProviders(const QVector<Aowis::Map::MapProvider> &providers,
                                   const Aowis::Map::DownloadCoverage &coverage,
                                   const QString &default_coverage,
-                                  const QHash<QString, QSet<QString>> &inherited_upstreams)
+                                  const QHash<QString, QSet<QString>> &inherited_upstreams,
+                                  const QHash<QString, QStringList> &upstream_routes)
 {
     ++this->cache_generation;
     this->inherited_upstreams = inherited_upstreams;
+    this->upstream_routes = upstream_routes;
     this->configured_providers.clear();
     this->permanent_cached_keys.clear();
     this->provider_cache_paths.clear();
@@ -240,7 +242,8 @@ QString MapTiles::providerCachePath(const QString &provider) const
 
 QString MapTiles::providerUrl(const QString &provider, int zoom, int x, int y) const
 {
-    const auto it = this->configured_providers.constFind(provider);
+    const QHash<QString, Aowis::Map::MapProvider>::const_iterator it =
+        this->configured_providers.constFind(provider);
     if (it == this->configured_providers.cend()) return {};
     QString url = domainRandomizer(it->url_template);
     url.replace(QStringLiteral("{z}"), QString::number(zoom));
@@ -351,19 +354,30 @@ MapTiles::TileRequestResult MapTiles::getTile(const QString &provider, int z, in
     const QString path = QStringLiteral("/%1/%2/%3/%4.png")
         .arg(provider).arg(z).arg(wrapped_x).arg(y);
     const qint64 now_ms = QDateTime::currentMSecsSinceEpoch();
-    for (const Aowis::Map::MapCascadeUpstream &upstream : this->cascade_config.upstreams)
+    // A configured route is an ordered *subset*, never an extra origin.
+    // Without an override preserve the globally configured priority.
+    QStringList preferred = this->upstream_routes.value(provider);
+    if (preferred.isEmpty())
+        for (const Aowis::Map::MapCascadeUpstream &upstream : this->cascade_config.upstreams)
+            preferred.append(upstream.name);
+    for (const QString &name : preferred)
     {
-        const QString upstream_origin = upstream.url.toString(
-            QUrl::RemovePath | QUrl::RemoveQuery | QUrl::RemoveFragment);
-        if (this->cascade_cooldown_until_ms.value(upstream_origin) > now_ms ||
-            (this->inherited_upstreams.contains(provider) &&
-             !this->inherited_upstreams.value(provider).contains(upstream.name)))
-            continue;
-        DownloadSource source;
-        source.url = upstream_origin + path;
-        source.api_key = upstream.api_key;
-        source.cascade = true;
-        download.sources.append(source);
+        for (const Aowis::Map::MapCascadeUpstream &upstream : this->cascade_config.upstreams)
+        {
+            if (upstream.name != name) continue;
+            const QString upstream_origin = upstream.url.toString(
+                QUrl::RemovePath | QUrl::RemoveQuery | QUrl::RemoveFragment);
+            if (this->cascade_cooldown_until_ms.value(upstream_origin) > now_ms ||
+                (this->inherited_upstreams.contains(provider) &&
+                 !this->inherited_upstreams.value(provider).contains(upstream.name)))
+                break;
+            DownloadSource source;
+            source.url = upstream_origin + path;
+            source.api_key = upstream.api_key;
+            source.cascade = true;
+            download.sources.append(source);
+            break;
+        }
     }
     if (this->cascade_config.allow_direct_fetch &&
         !this->inherited_upstreams.contains(provider))

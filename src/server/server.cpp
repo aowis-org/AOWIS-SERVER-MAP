@@ -442,6 +442,7 @@ Server::Server(const Config &config, QObject *parent)
             this, &Server::applyAvailableProviders);
     this->provider_catalog->configure(config.map_providers, config.cascade);
     this->provider_catalog->setDisabledInheritedProviders(config.disabled_inherited_providers);
+    this->provider_catalog->setUpstreamRoutes(config.provider_upstream_routes);
     applyAvailableProviders();
     connect(this->maptiles, &MapTiles::tileReady, this, &Server::onTileReady);
     connect(this->maptiles, &MapTiles::tileFailed, this, &Server::onTileFailed);
@@ -454,7 +455,8 @@ void Server::applyAvailableProviders()
     for (const Aowis::Map::AvailableMapProvider &entry : this->provider_catalog->available())
         active.append(entry.provider);
     this->maptiles->configureProviders(active, this->config.download_coverage,
-        this->config.map_coverage, this->provider_catalog->inheritedUpstreams());
+        this->config.map_coverage, this->provider_catalog->inheritedUpstreams(),
+        this->config.provider_upstream_routes);
 }
 
 QString Server::terrainClientKey(const QHostAddress &address, quint16 port)
@@ -964,7 +966,7 @@ QFuture<QHttpServerResponse> Server::submitTerrainGrid(
 {
     // Values have already passed HTTP validation. Canonical numeric keys
     // coalesce equivalent query representations without merging distinct grids.
-    const auto number = [](double value)
+    const std::function<QString(double)> number = [](double value)
     {
         return QString::number(value == 0.0 ? 0.0 : value, 'g', 17);
     };
@@ -1488,6 +1490,86 @@ void Server::setupRoutes()
             QHttpServerResponse::StatusCode::Ok);
     });
     this->http.route("/map/v1/providers/inherited", QHttpServerRequest::Method::Options,
+                     []() { return makeOptionsResponse(); });
+
+    // Stage C: per-provider upstream subset and priority. Empty list resets
+    // to the inherited/global order. The definitions themselves stay owned by
+    // their publishing MAP servers; this only changes this server's routing.
+    this->http.route("/map/v1/providers/upstreams", QHttpServerRequest::Method::Put,
+                     [this](const QHttpServerRequest &request)
+    {
+        // Route changes affect every client on this MAP server. Never expose
+        // unauthenticated edits when no administrator key is configured.
+        if (this->config.delete_api_key.isEmpty() || !isDeleteAuthorized(request))
+            return makeUnauthorizedResponse();
+        if (request.body().size() > 4096)
+            return QHttpServerResponse("Provider route request too large",
+                QHttpServerResponse::StatusCode::BadRequest);
+        QJsonParseError parse_error;
+        const QJsonDocument doc = QJsonDocument::fromJson(request.body(), &parse_error);
+        if (parse_error.error != QJsonParseError::NoError || !doc.isObject())
+            return QHttpServerResponse("Invalid provider route JSON",
+                QHttpServerResponse::StatusCode::BadRequest);
+        const QJsonObject object = doc.object();
+        const QString id = object.value(QStringLiteral("id")).toString();
+        const QJsonValue requested = object.value(QStringLiteral("upstreams"));
+        if (QUuid(id).isNull() || !requested.isArray() || requested.toArray().size() > 32)
+            return QHttpServerResponse("Invalid provider route request",
+                QHttpServerResponse::StatusCode::BadRequest);
+        QStringList advertised;
+        bool found = false;
+        for (const Aowis::Map::AvailableMapProvider &entry : this->provider_catalog->available())
+        {
+            if (entry.provider.id != id) continue;
+            advertised = entry.upstream_names;
+            found = true;
+            break;
+        }
+        if (!found)
+            return QHttpServerResponse("Unknown provider",
+                QHttpServerResponse::StatusCode::NotFound);
+        QStringList selected;
+        for (const QJsonValue &value : requested.toArray())
+        {
+            if (!value.isString() || !advertised.contains(value.toString()) ||
+                selected.contains(value.toString()))
+                return QHttpServerResponse("Unknown or duplicate advertising upstream",
+                    QHttpServerResponse::StatusCode::BadRequest);
+            selected.append(value.toString());
+        }
+        if (this->config.managed_settings_root.isEmpty())
+            return QHttpServerResponse("Managed MAP settings unavailable",
+                QHttpServerResponse::StatusCode::ServiceUnavailable);
+        QHash<QString, QStringList> updated = this->config.provider_upstream_routes;
+        if (selected.isEmpty()) updated.remove(id);
+        else updated.insert(id, selected);
+        if (updated == this->config.provider_upstream_routes)
+            return QHttpServerResponse("Provider route unchanged", QHttpServerResponse::StatusCode::Ok);
+        QString error_message;
+        std::unique_ptr<Aowis::Map::SettingsRepository> repository =
+            Aowis::Map::SettingsRepository::openAtOwnerRoot(
+                QStringLiteral("server-map"), this->config.managed_settings_root, &error_message);
+        if (!repository)
+            return QHttpServerResponse(error_message,
+                QHttpServerResponse::StatusCode::InternalServerError);
+        QString revision;
+        if (!repository->saveProviderUpstreamRoutes(updated,
+                this->config.provider_upstream_routes_revision, &revision, &error_message))
+        {
+            const bool conflict = error_message.contains(QStringLiteral("revision conflict"));
+            return QHttpServerResponse(error_message, conflict ?
+                QHttpServerResponse::StatusCode::Conflict :
+                QHttpServerResponse::StatusCode::InternalServerError);
+        }
+        this->maptiles->cancelUpstreamDownloads();
+        this->config.provider_upstream_routes = updated;
+        this->config.provider_upstream_routes_revision = revision;
+        this->provider_catalog->setUpstreamRoutes(updated);
+        applyAvailableProviders();
+        return QHttpServerResponse("Provider upstream route updated",
+            QHttpServerResponse::StatusCode::Ok);
+    });
+    this->http.route("/map/v1/providers/upstreams", QHttpServerRequest::Method::Options,
                      []() { return makeOptionsResponse(); });
 
     // Discoverable catalog of map layers. Only server-configured providers

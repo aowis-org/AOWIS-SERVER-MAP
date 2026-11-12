@@ -421,6 +421,12 @@ bool MapServerConfiguration::loadManagedSettings(Server::Config *config, bool mi
         return false;
     config->disabled_inherited_providers = disabled_inherited;
     config->inherited_provider_revision = inherited_revision;
+    QHash<QString, QStringList> routes;
+    QString routes_revision;
+    if (!repository->readProviderUpstreamRoutes(&routes, &routes_revision, error_message))
+        return false;
+    config->provider_upstream_routes = routes;
+    config->provider_upstream_routes_revision = routes_revision;
     config->provider_revision = provider_revision;
     config->managed_settings_root = root;
     if (error_message != nullptr)
@@ -729,7 +735,7 @@ bool MapServerConfiguration::loadConfigFile(const QString &path, Server::Config 
         for (const QString &key : settings.childKeys())
         {
             const QRegularExpression match_expression(QStringLiteral("^zoom_([0-9]|[12][0-9]|30)$"));
-            const auto match = match_expression.match(key);
+            const QRegularExpressionMatch match = match_expression.match(key);
             if (!match.hasMatch())
             {
                 *error_message = QStringLiteral("Invalid coverage tier '%1/%2'; expected zoom_N")
@@ -755,9 +761,10 @@ bool MapServerConfiguration::loadConfigFile(const QString &path, Server::Config 
             return false;
         }
         Aowis::Map::DownloadCoverage::Profile profile;
-        for (auto it = starts.cbegin(); it != starts.cend(); ++it)
+        for (QMap<int, QStringList>::const_iterator it = starts.cbegin();
+             it != starts.cend(); ++it)
         {
-            auto next = it;
+            QMap<int, QStringList>::const_iterator next = it;
             ++next;
             profile.tiers.append({it.key(), next == starts.cend() ? 30 : next.key() - 1,
                                   it.value()});

@@ -91,6 +91,13 @@ void ProviderCatalog::setDisabledInheritedProviders(const QSet<QString> &ids)
     rebuild();
 }
 
+void ProviderCatalog::setUpstreamRoutes(const QHash<QString, QStringList> &routes)
+{
+    if (this->upstream_routes_ == routes) return;
+    this->upstream_routes_ = routes;
+    rebuild();
+}
+
 void ProviderCatalog::rebuild()
 {
     QVector<AvailableMapProvider> combined;
@@ -146,6 +153,14 @@ void ProviderCatalog::rebuild()
         }
     }
     QJsonArray entries;
+    for (AvailableMapProvider &entry : combined)
+    {
+        const QStringList selection = this->upstream_routes_.value(entry.provider.id);
+        if (selection.isEmpty()) entry.selected_upstreams = entry.upstream_names;
+        else
+            for (const QString &name : selection)
+                if (entry.upstream_names.contains(name)) entry.selected_upstreams.append(name);
+    }
     for (const AvailableMapProvider &entry : combined)
     {
         const QVector<MapProvider> single{entry.provider};
@@ -158,6 +173,10 @@ void ProviderCatalog::rebuild()
         for (const QString &name : entry.upstream_names)
             upstreams.append(name);
         object.insert(QStringLiteral("upstreams"), upstreams);
+        QJsonArray selected_json;
+        for (const QString &name : entry.selected_upstreams)
+            selected_json.append(name);
+        object.insert(QStringLiteral("selected_upstreams"), selected_json);
         entries.append(object);
     }
     const QByteArray next = QJsonDocument(QJsonObject{

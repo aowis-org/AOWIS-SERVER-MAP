@@ -185,3 +185,20 @@ Terrain deletion runs outside the HTTP event loop. Active source file locks and 
 | `503` | Disabled terrain, uninitialized subsystem or admission overload |
 
 Cache hits remain usable in offline mode. Separate `downloads/remote_fetch_enabled` and `terrain/remote_fetch_enabled` switches control **new** upstream acquisition. An explicit geographical coverage policy restricts downloads, not what cached data may be served.
+
+### Per-provider upstream order
+
+`GET /map/v1/providers/available` includes `upstreams` (advertising MAP peers,
+ordered by global priority) and `selected_upstreams` (effective route order).
+To select an ordered subset for one provider, use the administrative/delete
+API key with `PUT /map/v1/providers/upstreams`:
+
+```json
+{"id":"15c2d930-1e4a-4b76-9675-31ea802989fa","upstreams":["backup","root"]}
+```
+
+An empty `upstreams` list resets that provider to the default order. Names must
+be advertised for that provider. Changes are local, revision-checked and stored
+in AOWIS-CONFIG; they never modify upstream catalogs. A missing route keeps
+existing behavior. Direct-fetch permission remains governed by the global
+policy until Stage D.

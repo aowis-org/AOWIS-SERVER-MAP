@@ -70,7 +70,8 @@ public:
     void configureProviders(const QVector<Aowis::Map::MapProvider> &providers,
                             const Aowis::Map::DownloadCoverage &coverage,
                             const QString &default_coverage,
-                            const QHash<QString, QSet<QString>> &inherited_upstreams = {});
+                            const QHash<QString, QSet<QString>> &inherited_upstreams = {},
+                            const QHash<QString, QStringList> &upstream_routes = {});
 
     TileRequestResult getTile(const QString &provider, int z, int x, int y, const QString &key,
                               const QByteArray &cascade_trace = {});
@@ -150,6 +151,7 @@ private:
     QHash<QString, Aowis::Map::MapProvider> configured_providers;
     // Remote-only providers can never use a direct origin URL fallback.
     QHash<QString, QSet<QString>> inherited_upstreams;
+    QHash<QString, QStringList> upstream_routes;
     // First-use URL fingerprint selection. Separates cache contents when an
     // administrator changes the upstream URL without changing the UUID.
     mutable QHash<QString, QString> provider_cache_paths;

@@ -7,6 +7,8 @@
 #include <QByteArray>
 #include <QString>
 #include <QSet>
+#include <QHash>
+#include <QStringList>
 #include <QVector>
 
 #include <memory>
@@ -53,6 +55,16 @@ public:
                                         const QString &expected_revision,
                                         QString *revision = nullptr,
                                         QString *error = nullptr) const;
+    // Optional per-provider subset and priority of named MAP upstreams. A
+    // missing UUID means use the global order; an empty list resets to default.
+    // Stored separately from both local and inherited provider definitions.
+    bool readProviderUpstreamRoutes(QHash<QString, QStringList> *routes,
+                                    QString *revision = nullptr,
+                                    QString *error = nullptr) const;
+    bool saveProviderUpstreamRoutes(const QHash<QString, QStringList> &routes,
+                                    const QString &expected_revision,
+                                    QString *revision = nullptr,
+                                    QString *error = nullptr) const;
 
 private:
     struct Impl;

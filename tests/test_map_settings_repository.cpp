@@ -135,6 +135,42 @@ int main(int argc, char **argv)
     if (!require(reopened->saveDisabledInheritedProviders({}, restored_revision, nullptr, &error),
                  "Clear inherited provider override")) return 1;
 
+    // Routes are neither provider definitions nor global cascade settings.
+    QHash<QString, QStringList> routes;
+    QString route_revision;
+    if (!require(store->readProviderUpstreamRoutes(&routes, &route_revision, &error) &&
+                 routes.isEmpty() && route_revision.isEmpty(),
+                 "Default provider route is the global upstream order")) return 1;
+    routes.insert(inherited_uuid,
+        {QStringLiteral("backup"), QStringLiteral("primary")});
+    QString saved_route_revision;
+    if (!require(store->saveProviderUpstreamRoutes(routes, route_revision,
+                                                  &saved_route_revision, &error) &&
+                 !saved_route_revision.isEmpty(),
+                 "Save per-provider route with revision checking")) return 1;
+    QHash<QString, QStringList> restored_routes;
+    QString restored_route_revision;
+    if (!require(reopened->readProviderUpstreamRoutes(&restored_routes,
+                            &restored_route_revision, &error) &&
+                 restored_routes == routes && restored_route_revision == saved_route_revision,
+                 "Restore routing preferences across process restart")) return 1;
+    if (!require(!store->saveProviderUpstreamRoutes(routes, route_revision, nullptr, &error) &&
+                 error.contains(QStringLiteral("revision conflict")),
+                 "Reject stale provider route changes")) return 1;
+    QHash<QString, QStringList> invalid_routes = routes;
+    invalid_routes.insert(inherited_uuid, {QStringLiteral("primary"),
+                                          QStringLiteral("primary")});
+    if (!require(!reopened->saveProviderUpstreamRoutes(invalid_routes,
+                    restored_route_revision, nullptr, &error),
+                 "Reject duplicate upstream route entries")) return 1;
+    invalid_routes.clear();
+    invalid_routes.insert(QStringLiteral("invalid-uuid"), {QStringLiteral("primary")});
+    if (!require(!reopened->saveProviderUpstreamRoutes(invalid_routes,
+                    restored_route_revision, nullptr, &error),
+                 "Reject invalid route provider identities")) return 1;
+    if (!require(independent->readProviderUpstreamRoutes(&restored_routes, nullptr, &error) &&
+                 restored_routes.isEmpty(),
+                 "Independent MAP server does not see Standalone routes")) return 1;
     QVector<Aowis::Map::MapProvider> providers;
     QString providers_revision;
     if (!require(store->readProviders(&providers, &providers_revision, &error) &&
