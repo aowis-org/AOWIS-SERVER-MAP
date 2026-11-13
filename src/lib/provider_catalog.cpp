@@ -63,6 +63,23 @@ void ProviderCatalog::configure(const QVector<MapProvider> &local_providers,
     ++this->generation_;
     this->local_providers_ = local_providers;
     this->cascade_ = cascade;
+    // Managers of tunnels no longer configured: replies of the previous
+    // generation are ignored, then the manager goes.
+    QSet<QString> current_tunnels;
+    for (const MapCascadeUpstream &upstream : cascade.upstreams)
+        if (hasWireGuardTransport(upstream))
+            current_tunnels.insert(cascadeProxyKey(upstream.proxy));
+    for (QHash<QString, QNetworkAccessManager *>::iterator network = this->tunnel_networks_.begin();
+         network != this->tunnel_networks_.end();)
+    {
+        if (current_tunnels.contains(network.key()))
+        {
+            ++network;
+            continue;
+        }
+        network.value()->deleteLater();
+        network = this->tunnel_networks_.erase(network);
+    }
     if (cascade.upstreams.isEmpty()) this->refresh_timer_.stop();
     else this->refresh_timer_.start();
     this->upstream_catalogs_.clear();
@@ -238,9 +255,9 @@ void ProviderCatalog::refresh()
     const quint64 generation = this->generation_;
     for (const MapCascadeUpstream &upstream : this->cascade_.upstreams)
     {
-        // Never contacted directly; this engine has no WireGuard transport.
-        // Its validated offline snapshot (configure) stays available.
-        if (requiresWireGuardTransport(upstream)) continue;
+        // A WireGuard upstream only through its running tunnel, never
+        // directly. Its validated offline snapshot (configure) stays available.
+        if (!cascadeUpstreamUsable(upstream)) continue;
         fetch(upstream, false, generation);
     }
 }
@@ -257,7 +274,19 @@ void ProviderCatalog::fetch(const MapCascadeUpstream &upstream, bool legacy,
     request.setRawHeader("Accept", "application/json");
     if (!upstream.api_key.isEmpty())
         request.setRawHeader("X-API-Key", upstream.api_key);
-    QNetworkReply *reply = this->network_.get(request);
+    QNetworkAccessManager *network = &this->network_;
+    if (hasWireGuardTransport(upstream))
+    {
+        const QString key = cascadeProxyKey(upstream.proxy);
+        network = this->tunnel_networks_.value(key);
+        if (network == nullptr)
+        {
+            network = new QNetworkAccessManager(this);
+            network->setProxy(upstream.proxy);
+            this->tunnel_networks_.insert(key, network);
+        }
+    }
+    QNetworkReply *reply = network->get(request);
     QTimer::singleShot(CatalogRequestTimeoutMs, reply, [reply]()
     {
         if (!reply->isFinished()) reply->abort();

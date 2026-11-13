@@ -65,6 +65,8 @@ private:
     QVector<AvailableMapProvider> available_;
     QByteArray encoded_;
     QNetworkAccessManager network_;
+    // Per running WireGuard tunnel (cascadeProxyKey) of a WireGuard upstream.
+    QHash<QString, QNetworkAccessManager *> tunnel_networks_;
     QTimer refresh_timer_;
     quint64 generation_ = 0;
 };

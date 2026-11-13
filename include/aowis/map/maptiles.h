@@ -106,6 +106,9 @@ private:
         QString url;
         QByteArray api_key;
         bool cascade = false;
+        // A WireGuard upstream: requested through its tunnel's proxy.
+        bool tunnelled = false;
+        QNetworkProxy proxy;
     };
 
     struct QueuedDownload
@@ -162,6 +165,9 @@ private:
     Aowis::Map::DownloadCoverage download_coverage;
     QString default_coverage;
     QNetworkAccessManager *network_manager;
+    // Per running WireGuard tunnel (cascadeProxyKey), see setCascadeConfig.
+    QHash<QString, QNetworkAccessManager *> tunnel_network_managers;
+    QNetworkAccessManager *tunnelNetworkManager(const QNetworkProxy &proxy);
     QThreadPool cache_write_pool;
     QThreadPool cache_read_pool;
     QHash<QString, QStringList> cache_reads_pending;

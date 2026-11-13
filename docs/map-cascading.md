@@ -91,10 +91,19 @@ than contacting the upstream directly; unknown transport types, and a
 WireGuard transport without a profile, make the record invalid (fail
 closed).
 
-MAP never contacts a WireGuard upstream directly: raster tiles, terrain and
-provider discovery skip it until the host provides that profile's tunnel
-transport; other permitted upstreams are still used in order, and offline
-catalog snapshots stay available. A separately running MAP server has no
+MAP never contacts a WireGuard upstream directly. Its host sets the
+upstream's runtime `proxy` (never persisted) to the local SOCKS5 proxy of
+that profile's running tunnel; raster tiles, terrain and provider discovery
+then reach the upstream only through it (one network manager per tunnel,
+host names resolved inside the tunnel). Without a proxy the upstream is
+skipped: other permitted upstreams are used in order and offline catalog
+snapshots stay available. A changed proxy (tunnel restarted, profile
+changed) cancels downloads in flight like any other upstream change.
+
+Standalone resolves the profiles (`MapUpstreamTunnels`): one lease of each
+profile's shared tunnel, so upstreams, the GUI's MAP server connection and
+DVMDB connections using the same profile share one tunnel, retried with
+backoff while it cannot start. A separately running MAP server has no
 WireGuard transport, so such upstreams are always skipped there.
 
 ## Where a tile comes from

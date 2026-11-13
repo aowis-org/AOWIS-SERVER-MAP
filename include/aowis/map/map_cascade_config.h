@@ -2,6 +2,7 @@
 #define AOWIS_MAP_CASCADE_CONFIG_H
 
 #include <QByteArray>
+#include <QNetworkProxy>
 #include <QString>
 #include <QUrl>
 #include <QVector>
@@ -51,21 +52,45 @@ struct MapCascadeUpstream
     // upstream must be reached through; empty: direct HTTP(S). MAP stores
     // only this reference (never keys or WireGuard configuration). An
     // upstream with a profile is never contacted directly: MAP skips it
-    // unless its host provides that tunnel's transport.
+    // unless its host provides that tunnel's transport in proxy.
     QString wireguard_profile_id;
+    // Runtime only, never persisted: the host's local SOCKS5 proxy of the
+    // running tunnel for wireguard_profile_id (host names are resolved
+    // inside the tunnel). Ignored for direct upstreams.
+    QNetworkProxy proxy;
 };
 
 inline bool operator==(const MapCascadeUpstream &left, const MapCascadeUpstream &right)
 {
     return left.name == right.name && left.url == right.url && left.api_key == right.api_key &&
-           left.wireguard_profile_id == right.wireguard_profile_id;
+           left.wireguard_profile_id == right.wireguard_profile_id &&
+           left.proxy == right.proxy;
 }
 
-// True when the upstream must not be contacted without a host-provided
-// WireGuard transport.
+// True when the upstream must be reached through a WireGuard tunnel.
 inline bool requiresWireGuardTransport(const MapCascadeUpstream &upstream)
 {
     return !upstream.wireguard_profile_id.isEmpty();
+}
+
+// True when the upstream's tunnel transport is available (SOCKS5 proxy).
+inline bool hasWireGuardTransport(const MapCascadeUpstream &upstream)
+{
+    return requiresWireGuardTransport(upstream) &&
+           upstream.proxy.type() == QNetworkProxy::Socks5Proxy;
+}
+
+// True when the upstream may be contacted now: directly, or through its
+// running tunnel. A WireGuard upstream without one is never contacted.
+inline bool cascadeUpstreamUsable(const MapCascadeUpstream &upstream)
+{
+    return !requiresWireGuardTransport(upstream) || hasWireGuardTransport(upstream);
+}
+
+// Identifies one tunnel proxy (for sharing one network manager per tunnel).
+inline QString cascadeProxyKey(const QNetworkProxy &proxy)
+{
+    return QStringLiteral("%1:%2:%3").arg(proxy.hostName()).arg(proxy.port()).arg(proxy.user());
 }
 
 inline bool operator!=(const MapCascadeUpstream &left, const MapCascadeUpstream &right)

@@ -8,6 +8,8 @@
 #include <QFile>
 #include <QEventLoop>
 #include <QHostAddress>
+#include <QNetworkProxy>
+#include <QtEndian>
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QTemporaryDir>
@@ -57,6 +59,118 @@ protected:
                 QByteArrayLiteral(" Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
             socket->write(response);
             socket->disconnectFromHost();
+        });
+    }
+};
+
+// Minimal authenticated SOCKS5 relay standing in for a WireGuard tunnel's
+// local proxy (AOWIS-NETWORK): verifies that a WireGuard upstream is reached
+// only through the proxy given by the host, with its credentials.
+class Socks5Relay final : public QTcpServer
+{
+public:
+    QByteArray user = QByteArrayLiteral("tunnel-user");
+    QByteArray password = QByteArrayLiteral("tunnel-secret");
+    int connections = 0;
+
+    bool start() { return listen(QHostAddress::LocalHost, 0); }
+    QNetworkProxy proxy() const
+    {
+        QNetworkProxy result(QNetworkProxy::Socks5Proxy, QStringLiteral("127.0.0.1"),
+                             serverPort(), QString::fromLatin1(this->user),
+                             QString::fromLatin1(this->password));
+        result.setCapabilities(QNetworkProxy::TunnelingCapability |
+                               QNetworkProxy::HostNameLookupCapability);
+        return result;
+    }
+
+protected:
+    void incomingConnection(qintptr descriptor) override
+    {
+        QTcpSocket *client = new QTcpSocket(this);
+        if (!client->setSocketDescriptor(descriptor))
+        {
+            client->deleteLater();
+            return;
+        }
+        QTcpSocket *target = new QTcpSocket(client);
+        QObject::connect(client, &QTcpSocket::disconnected, client, &QObject::deleteLater);
+        QObject::connect(target, &QTcpSocket::readyRead, client,
+                         [client, target]() { client->write(target->readAll()); });
+        QObject::connect(target, &QTcpSocket::disconnected, client,
+                         [client]() { client->disconnectFromHost(); });
+        QObject::connect(client, &QTcpSocket::readyRead, client,
+            [this, client, target, stage = 0, buffer = QByteArray()]() mutable
+        {
+            buffer += client->readAll();
+            if (stage == 3)
+            {
+                target->write(buffer);
+                buffer.clear();
+                return;
+            }
+            if (stage == 0)
+            {
+                if (buffer.size() < 2 || buffer.size() < 2 + quint8(buffer.at(1))) return;
+                const bool offers_password = buffer.mid(2, quint8(buffer.at(1))).contains('\x02');
+                buffer.remove(0, 2 + quint8(buffer.at(1)));
+                client->write(QByteArray("\x05", 1) + (offers_password ? QByteArray("\x02", 1)
+                                                                       : QByteArray("\xff", 1)));
+                if (!offers_password) { client->disconnectFromHost(); return; }
+                stage = 1;
+            }
+            if (stage == 1)
+            {
+                if (buffer.size() < 2) return;
+                const int user_length = quint8(buffer.at(1));
+                if (buffer.size() < 3 + user_length) return;
+                const int password_length = quint8(buffer.at(2 + user_length));
+                if (buffer.size() < 3 + user_length + password_length) return;
+                const bool authorized = buffer.mid(2, user_length) == this->user &&
+                    buffer.mid(3 + user_length, password_length) == this->password;
+                buffer.remove(0, 3 + user_length + password_length);
+                client->write(authorized ? QByteArray("\x01\x00", 2) : QByteArray("\x01\x01", 2));
+                if (!authorized) { client->disconnectFromHost(); return; }
+                stage = 2;
+            }
+            if (stage == 2)
+            {
+                if (buffer.size() < 5) return;
+                const char type = buffer.at(3);
+                QString host;
+                int length = 0;
+                if (type == 1)
+                {
+                    length = 4 + 4 + 2;
+                    if (buffer.size() < length) return;
+                    host = QHostAddress(qFromBigEndian<quint32>(
+                        reinterpret_cast<const uchar *>(buffer.constData() + 4))).toString();
+                }
+                else if (type == 3)
+                {
+                    length = 4 + 1 + quint8(buffer.at(4)) + 2;
+                    if (buffer.size() < length) return;
+                    host = QString::fromLatin1(buffer.mid(5, quint8(buffer.at(4))));
+                }
+                else
+                {
+                    client->disconnectFromHost();
+                    return;
+                }
+                const quint16 port = qFromBigEndian<quint16>(
+                    reinterpret_cast<const uchar *>(buffer.constData() + length - 2));
+                buffer.remove(0, length);
+                ++this->connections;
+                stage = 3;
+                QObject::connect(target, &QTcpSocket::connected, client,
+                    [client, target, &buffer]()
+                {
+                    client->write(QByteArray("\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00", 10));
+                    if (!buffer.isEmpty()) target->write(buffer);
+                    buffer.clear();
+                });
+                target->connectToHost(host, port);
+            }
         });
     }
 };
@@ -281,5 +395,46 @@ int main(int argc, char **argv)
     settle.exec();
     if (!check(tunnelled.requests.isEmpty(),
                "Terrain or provider discovery contacted a WireGuard upstream directly")) return 1;
+
+    // With the host's tunnel proxy set, raster tiles, terrain and provider
+    // discovery reach the WireGuard upstream through it (and only through it).
+    Socks5Relay relay;
+    if (!check(relay.start(), "Could not start SOCKS5 relay")) return 1;
+    Aowis::Map::MapCascadeConfig tunnel_cascade = wireguard_cascade;
+    tunnel_cascade.upstreams[0].proxy = relay.proxy();
+    wireguard_tiles.setCascadeConfig(tunnel_cascade);
+    wireguard_failed = false;
+    QObject::disconnect(&wireguard_tiles, &MapTiles::tileFailed, nullptr, nullptr);
+    QObject::connect(&wireguard_tiles, &MapTiles::tileFailed, &wireguard_loop,
+                     [&wireguard_failed, &wireguard_loop](const QString &key, MapTiles::TileFailureReason)
+    {
+        if (key != QStringLiteral("wireguard-tunnel")) return;
+        wireguard_failed = true;
+        wireguard_loop.quit();
+    });
+    if (!check(wireguard_tiles.getTile(provider, 1, 1, 0, QStringLiteral("wireguard-tunnel")).status ==
+                   MapTiles::TileRequestStatus::Pending,
+               "WireGuard upstream with tunnel was not queued")) return 1;
+    wireguard_timeout.start(5000);
+    wireguard_loop.exec();
+    if (!check(wireguard_failed && tunnelled.requests.size() == 1 && relay.connections == 1 &&
+               plain.requests.size() == 2,
+               "Raster tiles did not use the tunnel, or did not fail over after it")) return 1;
+
+    Aowis::Map::TerrainData::Config tunnel_terrain_config = wireguard_terrain_config;
+    tunnel_terrain_config.cascade.upstreams[0].proxy = relay.proxy();
+    wireguard_terrain.setCascadeConfig(tunnel_terrain_config.cascade);
+    wireguard_terrain.acquireTileSources(QStringLiteral("copernicus-glo30"), address);
+    if (!check(tunnelled.requests.size() == 2 && relay.connections == 2,
+               "Terrain did not reach the WireGuard upstream through its tunnel")) return 1;
+
+    catalog.configure({}, tunnel_terrain_config.cascade);
+    catalog.refresh();
+    QEventLoop discovered;
+    QTimer::singleShot(1000, &discovered, &QEventLoop::quit);
+    discovered.exec();
+    if (!check(tunnelled.requests.size() == 3 && relay.connections == 3 &&
+               tunnelled.requests.last().startsWith("GET /map/v1/providers/available "),
+               "Provider discovery did not reach the WireGuard upstream through its tunnel")) return 1;
     return 0;
 }

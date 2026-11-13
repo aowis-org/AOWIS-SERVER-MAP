@@ -142,6 +142,36 @@ void MapTiles::setCascadeConfig(const Aowis::Map::MapCascadeConfig &config)
         return;
     this->cascade_cooldown_until_ms.clear();
     cancelUpstreamDownloads();
+    // Managers of tunnels no longer configured (stopped or restarted on
+    // another port) go once the canceled replies are finished.
+    QSet<QString> current_tunnels;
+    for (const Aowis::Map::MapCascadeUpstream &upstream : config.upstreams)
+        if (Aowis::Map::hasWireGuardTransport(upstream))
+            current_tunnels.insert(Aowis::Map::cascadeProxyKey(upstream.proxy));
+    for (QHash<QString, QNetworkAccessManager *>::iterator manager = this->tunnel_network_managers.begin();
+         manager != this->tunnel_network_managers.end();)
+    {
+        if (current_tunnels.contains(manager.key()))
+        {
+            ++manager;
+            continue;
+        }
+        manager.value()->deleteLater();
+        manager = this->tunnel_network_managers.erase(manager);
+    }
+}
+
+QNetworkAccessManager *MapTiles::tunnelNetworkManager(const QNetworkProxy &proxy)
+{
+    const QString key = Aowis::Map::cascadeProxyKey(proxy);
+    QNetworkAccessManager *manager = this->tunnel_network_managers.value(key);
+    if (manager != nullptr)
+        return manager;
+    // One manager per tunnel: the proxy applies to its requests only.
+    manager = new QNetworkAccessManager(this);
+    manager->setProxy(proxy);
+    this->tunnel_network_managers.insert(key, manager);
+    return manager;
 }
 
 QByteArray MapTiles::rasterSourceFingerprint(const QString &provider) const
@@ -389,8 +419,8 @@ MapTiles::TileRequestResult MapTiles::getTile(const QString &provider, int z, in
         for (const Aowis::Map::MapCascadeUpstream &upstream : this->cascade_config.upstreams)
         {
             if (upstream.name != name) continue;
-            // Never contacted directly; this engine has no WireGuard transport.
-            if (Aowis::Map::requiresWireGuardTransport(upstream)) break;
+            // A WireGuard upstream only through its running tunnel, never directly.
+            if (!Aowis::Map::cascadeUpstreamUsable(upstream)) break;
             const QString upstream_origin = upstream.url.toString(
                 QUrl::RemovePath | QUrl::RemoveQuery | QUrl::RemoveFragment);
             if (this->cascade_cooldown_until_ms.value(upstream_origin) > now_ms ||
@@ -401,6 +431,11 @@ MapTiles::TileRequestResult MapTiles::getTile(const QString &provider, int z, in
             source.url = upstream_origin + path;
             source.api_key = upstream.api_key;
             source.cascade = true;
+            if (Aowis::Map::hasWireGuardTransport(upstream))
+            {
+                source.tunnelled = true;
+                source.proxy = upstream.proxy;
+            }
             download.sources.append(source);
             break;
         }
@@ -818,7 +853,9 @@ void MapTiles::startMapTileDownload(const QueuedDownload &download)
 void MapTiles::attemptMapTileDownload(const QueuedDownload &download, int source_index)
 {
     const DownloadSource &source = download.sources.at(source_index);
-    TileHttpClient *rest = new TileHttpClient(this->network_manager, source.url, this);
+    TileHttpClient *rest = new TileHttpClient(
+        source.tunnelled ? tunnelNetworkManager(source.proxy) : this->network_manager,
+        source.url, this);
     if (source.cascade)
         rest->configureCascade(source.api_key, download.source_fingerprint,
                                download.cascade_trace, this->cascade_config.poor_internet_mode,
