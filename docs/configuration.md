@@ -2,8 +2,8 @@
 
 AOWIS-SERVER-MAP has **two kinds of settings**. The administrator INI controls how a
 server runs (network, access, storage, download limits); MAP-owned
-**AOWIS-CONFIG** records hold the editable raster-provider catalog and cascading
-preferences. Tile caches are data, **not configuration**. Neither startup nor
+**AOWIS-CONFIG** records hold the editable raster-provider catalog, cascade
+configuration, inherited-provider enablement and per-provider routing/modes. Tile caches are data, **not configuration**. Neither startup nor
 REST editing rewrites the administrator INI.
 
 ## Pick your deployment
@@ -31,8 +31,9 @@ settings API. The GUI must not read or write MAP's configuration files itself.
 | Settings | Owner and change mechanism | When applied |
 | --- | --- | --- |
 | Listen IP/port, API keys, worker limits, cache directories, coverage regions, global raster/terrain download switches | Administrator **INI**, optional CLI overrides | Process start/restart |
-| Raster providers (name, tile URL, zoom bounds, enabled, per-provider restrictions) | **MAP's AOWIS-CONFIG** provider record; `GET/PUT /map/v1/providers` on a separate server, MAP library in Standalone | REST edits apply immediately; Standalone provider edits apply to the embedded engine |
-| Cascading (ordered MAP upstream URLs/read keys, direct-provider fallback, slow-link JPEG/zstd settings) | **MAP's AOWIS-CONFIG** cascade record, or explicit administrator INI entries | Start/restart; Standalone GUI autosaves but restart is required |
+| Local raster providers (name, tile URL, zoom bounds, enabled, per-provider restrictions) | **MAP-owned AOWIS-CONFIG** provider record; `GET/PUT /map/v1/providers` on a separate server, MAP library in Standalone | REST or embedded-library edits apply immediately |
+| Global cascading (ordered MAP URLs/read keys, direct fallback, slow-link settings) | MAP CONFIG cascade record, or explicit **administrator INI** entries | Separate-server INI changes require restart; Standalone library changes autosave and apply live |
+| Inherited-provider enablement, selected upstream names/order, raster acquisition mode | Separate MAP CONFIG records; authenticated provider REST endpoints or Standalone MAP library | Applied immediately without changing upstream definitions |
 | Raster tiles, Copernicus source data, normalized terrain | **Cache**, kept independently of configuration | Reused on subsequent requests, including offline |
 
 AOWIS-CONFIG stores versioned, revision-checked JSON records under MAP's owner
@@ -53,10 +54,15 @@ route only to trusted clients using firewall/reverse-proxy access controls.
 - Supported CLI overrides (for example `--listen-address`) apply to that
   process. Global remote-fetch switches and coverage restrictions remain gates
   even when cascading is configured.
-- A cache hit can still be served when remote downloads are disabled. For a
-  cache miss, MAP tries its configured upstream servers in order, then contacts
-  original imagery/Copernicus providers **only if** `allow_direct_fetch=true`
-  and the relevant remote-fetch restrictions permit it.
+- Per-provider selected upstreams and acquisition modes are downstream-local
+  MAP CONFIG records; they do not override administrator remote-fetch gates,
+  coverage limits or the global direct-fetch prohibition. Local raster providers
+  default to **Automatic** (MAP upstreams then permitted origin), inherited
+  providers to **Cascade only** (never the original imagery source). **Direct**
+  is allowed only for local providers when global direct fetching is enabled.
+- Cache hits work with remote downloads disabled, but a disabled provider cannot
+  serve even cached raster tiles. Terrain uses global upstream priority and
+  `allow_direct_fetch`, not raster-specific acquisition modes.
 
 For a restricted branch office, an administrator can pin the cascade in INI:
 
@@ -79,11 +85,14 @@ adaptive_compression=true
 jpeg_quality=75
 ```
 
-The INI keys above are an *alternative* to managed cascade settings. There is
-currently **no public REST endpoint for editing cascade configuration** on a
-separate MAP server. A slow-link downstream may request adaptive JPEG imagery
-and lossless zstd terrain from an upstream MAP server; ordinary GUI responses
-remain compatible. See [MAP cascading](map-cascading.md) for the transfer rules.
+These INI keys **replace the whole managed global cascade configuration**;
+they do not merge with it. A separate MAP server has **no public REST endpoint
+for changing its global upstream list**; edit the INI and restart instead.
+The provider-specific REST endpoints can still change local enablement, routing
+priority and acquisition mode at runtime. In Standalone, use the GUI; there is
+no MAP daemon or restart requirement for GUI-managed cascade settings. See
+[Cascading MAP servers](map-cascading.md) for a complete site setup and
+transfer rules.
 
 ## First-run, migration and recovery
 
@@ -234,7 +243,13 @@ If **any** `[map_provider.*]` sections are present, they form the entire INI pro
 
 ### GUI/API provider editing
 
-`GET /map/v1/providers` returns the configured list, including disabled providers and full upstream URL templates. `PUT /map/v1/providers` validates the list, writes it to MAP-owned AOWIS-CONFIG with revision checking, and applies it in memory (maximum 100 providers). See the [API reference](http-api.md#raster-provider-management) for the JSON schema.
+`GET /map/v1/providers` returns **local** definitions, including disabled
+providers and URL templates. `PUT /map/v1/providers` replaces that local list,
+validates it, stores it in MAP-owned AOWIS-CONFIG and applies it immediately
+(maximum 100 providers). Inherited providers and their local routing state
+are visible through `GET /map/v1/providers/available`; they are never written
+into the editable local-provider list. See [provider management](http-api.md#raster-provider-management)
+and [provider routing](http-api.md#provider-routing-and-acquisition).
 
 | Service path | Ownership |
 | --- | --- |

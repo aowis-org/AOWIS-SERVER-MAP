@@ -12,7 +12,7 @@ server never needs to write to `/etc`.
 | `/usr/bin/aowis-server-map` | Installed executable |
 | `/usr/share/aowis-server-map/map-server.ini` | Packaged example INI (Debian package) |
 | `/etc/aowis-server-map/map-server.ini` | Administrator INI and API keys |
-| `/var/lib/aowis-server-map/config/server-map/` | MAP-owned AOWIS-CONFIG settings (cascade and providers) |
+| `/var/lib/aowis-server-map/config/server-map/` | MAP-owned AOWIS-CONFIG providers, cascade, inherited-provider overrides and routing |
 | `/var/lib/aowis-server-map/providers.ini` | Legacy provider catalog, imported once and retained for rollback |
 | `/var/lib/aowis-server-map/data/` | Permanent administrator-supplied data, if configured |
 | `/var/cache/aowis-server-map/maptiles/` | Downloaded raster tiles |
@@ -161,8 +161,10 @@ out-of-process CONFIG records requires a service restart:
 sudo systemctl restart aowis-server-map.service
 ```
 
-Provider edits through REST apply immediately; see
-[configuration](../../docs/configuration.md#what-goes-where) for details.
+Local provider edits and authenticated per-provider enablement, routing and
+acquisition-mode edits apply immediately through REST; see
+[configuration](../../docs/configuration.md#what-goes-where) and
+[cascading](../../docs/map-cascading.md) for details.
 **Security:** `PUT /map/v1/providers` currently has no API-key authorization;
 restrict access to trusted clients at the network/proxy layer.
 

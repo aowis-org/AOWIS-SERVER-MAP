@@ -1,10 +1,30 @@
-# MAP-to-MAP cascading (protocol and test specification)
+# Cascading MAP servers
 
-**Status:** MAP-to-MAP raster and normalized-terrain cascading, zstd terrain transfer and adaptive JPEG imagery transfer are implemented. This document records the wire protocol, policy and acceptance criteria; it is not a deployment walkthrough. See [Configuration](configuration.md) for settings, paths and precedence. Bitkine cached-payload benchmarks are available; real WAN performance remains unmeasured. Native Copernicus GeoTIFF replication and hydrology-specific data are out of scope.
+An AOWIS MAP server can obtain **raster imagery and normalized 3D terrain** from
+other MAP servers, retain the results locally and serve nearby GUI clients from
+its cache. This is intended for branch offices and project sites with slow or
+unreliable internet. Every MAP server can be both an upstream and a downstream.
 
-## Configuration and acquisition order
+```text
+OSM / imagery sources + Copernicus GLO-30
+                 |
+        central MAP (upstream)
+                 |  compressed MAP-to-MAP transfer
+        site MAP (local cache)
+                 |
+          AOWIS GUI clients
+```
 
-Administrator INI schema:
+Cascading transfers raster XYZ tiles and **canonical `.aowterrain` tiles**, not
+entire Copernicus GeoTIFFs. No automatic regional prefetch or offline-package
+mounting is provided. See [Configuration](configuration.md) for setting ownership
+and [HTTP API](http-api.md) for all endpoints.
+
+## Configure a site server
+
+The central MAP server needs to be reachable and to permit the relevant
+provider/dataset and downloads. On the **site** MAP server, add the following to
+its administrator INI (`/etc/aowis-server-map/map-server.ini` for systemd):
 
 ```ini
 [upstream]
@@ -13,137 +33,148 @@ allow_direct_fetch=false
 
 [upstream.primary]
 url=https://maps-primary.example.org
-api_key=
+api_key=PRIMARY_READ_KEY
 
 [upstream.backup]
 url=https://maps-backup.example.org
-api_key=
+api_key=BACKUP_READ_KEY
 
 [bandwidth]
 poor_internet_mode=true
-jpeg_quality=75
 adaptive_compression=true
+jpeg_quality=75
 ```
 
-- `servers` is an ordered list of named AOWIS MAP upstreams, with per-server URL and read API key. Empty list means no MAP upstreams. Validate names, URLs and duplicates at startup; never log credentials.
-- `allow_direct_fetch` independently controls whether original raster providers or Copernicus may be contacted **after all MAP upstreams fail**. Default `true` retains present behavior when no upstream is configured. Setting it `false` also permits an intentionally cache-only server with no upstreams.
-- `poor_internet_mode` defaults to `false`. It optimizes **MAP-to-MAP transfers only**, not GUI-facing tile responses. JPEG quality defaults to 75. Adaptive compression defaults to enabled when poor-internet mode is enabled.
-- Existing `downloads/remote_fetch_enabled`, `terrain/remote_fetch_enabled`, provider-level switches and geographic coverage remain authoritative gates: disabling remote fetching also disables MAP upstream requests for the affected data. `allow_direct_fetch` cannot override these gates.
-- The existing read and delete API-key roles remain separate. Upstream connections use the upstream's **read** key only. Prefer HTTPS across WAN; reject cross-origin redirects and do not silently route requests to public tile services.
+`servers` sets **failover order**. Names are unique identifiers, not hostnames;
+each entry has its own MAP URL and **upstream read key**. Omit a redundant
+upstream if you only have one. Use HTTPS or a protected private tunnel across
+the WAN. Do not place keys in a URL or publish this file.
 
-On a cache miss, for **both** raster XYZ and `.aowterrain` tiles:
+`allow_direct_fetch=false` prevents **all original-provider downloads** on a
+cache miss (raster imagery and Copernicus), even when an upstream is unavailable.
+With `true` (the default), a locally defined raster provider may use its
+original source after MAP upstreams fail, subject to its acquisition mode;
+terrain may download from Copernicus after upstream failure. An inherited raster
+provider **never** downloads from its original imagery provider.
 
-1. Check local permanent/raster/normalized caches first; serve hits even while offline.
-2. If remote fetching is permitted for that tile, request the *same rendering asset* from the first configured MAP upstream, then successive upstreams on failure/miss, in listed order.
-3. Only if every MAP upstream fails, and `allow_direct_fetch=true`, use the existing original-provider/Copernicus acquisition path.
-4. Otherwise return the existing appropriate unavailable/error response; never try an unconfigured origin.
-
-Apply bounded timeouts, retry limits, deduplicated concurrent requests and short per-upstream failure cooldowns. A failed upstream must not stall unrelated cached requests. Detect cascade loops (e.g. A → B → A) with a hop limit **and** propagated visited-server identity; never use direct fetch to escape a loop when disabled. A cascade may have any number of levels within that safety limit.
-
-For Step 3 terrain requests, upstreams exchange `X-AOWIS-Cascade-Visited` and optional `X-API-Key`, and successful `.aowterrain` responses carry `X-AOWIS-Terrain-Revision: 2`; downstreams reject missing or incompatible revisions and invalid or mismatched canonical tile bytes before atomic cache persistence. Terrain acquisition follows the existing remote-worker/CPU-worker split, including the embedded library path.
-
-For Step 2 raster requests, upstreams exchange `X-AOWIS-Raster-Source` (SHA-256 of the effective raster provider URL template), `X-AOWIS-Cascade-Visited` (comma-separated process UUIDs, maximum eight hops), and optional `X-API-Key`. A mismatched or missing response fingerprint is rejected. Redirects are not followed. Cascade-only instances never contact original raster providers.
-
-## Raster provider discovery (Stage A)
-
-With configured MAP upstreams, the server fetches each upstream's read-only
-`GET /map/v1/providers/available` catalog (falling back to the older
-`GET /map/v1/providers` when necessary). It merges local and inherited providers
-**without modifying local AOWIS-CONFIG provider records**. Downstream clients
-read the combined catalog from `/map/v1/providers/available`, where each entry
-includes `origin: local|inherited` and the ordered immediate `upstreams` names.
-The existing `/map/v1/providers` GET/PUT continues to manage **local** providers
-only. Provider edits are never propagated upstream.
-
-- A local definition (including a disabled one) takes precedence over an
-  inherited provider with the same UUID. Upstream UUID collisions with
-  different URL/style templates are not merged; the earlier upstream wins.
-- Inherited raster providers are fetched only through the upstreams that
-  advertise the matching source. They **never** fall back to a direct provider
-  origin, even when global `allow_direct_fetch=true`. They still obey the
-  downstream's raster remote-fetch and geographic coverage restrictions.
-- Validated upstream catalog snapshots are stored under the MAP cache's
-  `provider-catalogs/` directory. They survive restart and upstream outages.
-  A failed refresh never replaces a last-known-good snapshot. No secret
-  upstream API keys are written to these snapshots.
-- Discovery is read-only and asynchronous, refreshing at startup and every 15
-  minutes while upstreams are configured. It does not yet provide GUI-side
-  inherited-provider toggles or per-provider routing controls (later stages).
-
-## Wire representation on slow links
-
-A downstream with `poor_internet_mode=true` requests optimized representations from each MAP upstream. For raster data it sends `X-AOWIS-Raster-Transfer: adaptive-jpeg;quality=75` (using configured quality) alongside a valid `X-AOWIS-Cascade-Visited` trace. The upstream ignores the compression request without a cascade trace. Responses vary on `X-AOWIS-Raster-Transfer`. Upstreams support this opt-in even if their own poor-internet mode is off. Normal GUI endpoints, tile addresses and public API behavior stay compatible.
-
-**Raster imagery:** for an eligible *opaque PNG* tile, the upstream may respond with a libjpeg-turbo JPEG at the requested quality; its actual `Content-Type` must be `image/jpeg` even though the current XYZ URL ends in `.png`. Otherwise send the original bytes and MIME type. Never flatten transparency or re-encode an existing JPEG (including one received from another MAP server). Preserve existing WebP/JPEG unless a later measured, explicitly lossless-safe optimization is introduced. Honor upstream cache restrictions and `allow_lossy_transfer=false` in `[map_provider.UUID]` as a provider-specific hard opt-out. The field is also persisted by the provider-state API.
-
-**Terrain:** losslessly zstd-compress the existing canonical `.aowterrain` bytes if the compressed representation is smaller; otherwise send them unchanged. Use negotiated HTTP content encoding: a MAP-to-MAP request must include both a nonempty, validated `X-AOWIS-Cascade-Visited` trace and `Accept-Encoding: zstd`; only then may the reply carry `Content-Encoding: zstd`. `Accept-Encoding` alone is insufficient because Qt GUI clients may send it automatically. Ordinary GUI responses remain uncompressed. This is **not** a new terrain tile format. The downstream decompresses with strict byte/size limits, validates dataset, XYZ, format/normalization revision and CRC, then atomically caches canonical bytes. Do not mix incompatible normalization revisions or silently accept a different terrain dataset.
-
-The downstream must verify raster provider identity **and effective imagery source/style** before accepting an upstream raster tile; matching UUID alone is not sufficient if provider configurations differ. Keep upstream read authentication distinct from credentials exposed to ordinary GUI clients.
-
-## Adaptive PNG → JPEG decision
-
-Do not blindly encode every raster tile. Evaluate content in strata rather than imposing a single provider-wide decision. **Thresholds and behavior (motivated by Bitkine cache measurements; rerun to validate the new selector):**
-
-| Input | Action |
-| --- | --- |
-| Existing JPEG/WebP; PNG with transparency; provider opt-out | Forward original, no lossy conversion |
-| PNG below 12 KiB | Forward original |
-| Opaque PNG 12–96 KiB | Encode the first eight candidates in each source/zoom/size bucket; continue if JPEG has won recently |
-| Bucket with eight consecutive losing encodes | Probe one in 32 eligible tiles; a winning probe immediately restores full encoding |
-| Opaque PNG above 96 KiB | Always try JPEG, subject to CPU limits |
-
-Buckets are keyed by **provider/source style, zoom band and original byte-size band**, not just provider. The selector keeps the last eight actual encoding outcomes for each bucket. It attempts every eligible PNG until eight consecutive encodes fail the size threshold; only then does it back off to a probe every 32 visits. One successful probe resumes full evaluation. The HTTP server caps parallel encoders at two and sends original bytes immediately when busy. Thus a winning bucket does not arbitrarily skip 25% of its tiles, as the original predictor did in the Bitkine benchmark. Very large PNGs remain eligible even if their bucket generally loses.
-
-For **every** JPEG actually encoded, compare its real size to the real original size. Select JPEG only if it saves at least **10% and 2 KiB** (initial thresholds); otherwise transmit the original. These are *size* decisions, not evidence of acceptable visual quality: keep transparency and provider opt-outs as hard restrictions. Do not use machine learning or image recognition.
-
-Keep a bounded in-memory transfer-variant/decision cache keyed by original content SHA-256 and quality (currently 16 MiB / 4096 entries, reset on restart); never repeatedly decode/encode unchanged tiles. Upstream original caches remain unmodified. A downstream may retain a received JPEG for offline raster rendering and must not apply a further lossy generation at the next cascade hop. A changed source or quality invalidates its old decision. When transcoding workers are saturated, forward original bytes immediately instead of building an unbounded queue. Deduplicate concurrent encodes for the same content.
-
-Expose counters for original/transmitted bytes, actual savings, selected JPEGs, skipped/sampled tiles, terrain zstd savings, encode CPU time, encoding-cache hits and upstream failover. Test with real imagery; savings estimates in discussions are *not* benchmarks.
-
-## Deployment and Standalone
-
-- **Systemd / ordinary server:** explicit administrator INI cascade settings override the MAP-owned AOWIS-CONFIG cascade record. No changes to the GUI's ordinary MAP connection contract. Servers may serve clients and downstream servers simultaneously.
-- **Standalone:** an ordered list of upstream MAP URLs/keys, direct-fetch fallback and slow-link preferences is managed through GUI Map Settings and persisted by the MAP library through AOWIS-CONFIG. Standalone embeds `MapTiles` and `TerrainData` rather than running a second MAP HTTP server.
-- Cached areas must continue rendering without WAN access. No automatic global prefetch or offline-package mechanism is part of this feature.
-
-## Required acceptance tests
-
-1. Two and three MAP instances: cold miss → prioritized upstream → local cache → offline cache hit; second upstream succeeds after first fails; direct origin contacted **only** when explicitly permitted.
-2. Raster and terrain remote-fetch/coverage gates still work. A cyclic cascade fails promptly; upstream timeouts, invalid credentials, wrong provider identity, corrupted data and incompatible terrain revisions do not poison caches.
-3. PNG versus JPEG: small tile, transparent tile, street map, satellite tile, pre-existing JPEG, quality change, variant reuse, saturated transcoding workers and no second JPEG generation across hops.
-4. zstd versus identity terrain: decode/validate/store canonical bytes; corrupt/truncated/oversized payloads rejected; tile bytes match the non-cascaded result exactly.
-5. Existing public GUI endpoints and no-upstream configuration remain backward compatible; standalone and systemd use the same library behavior.
-6. Repeatable benchmark reports **wire bytes and CPU time** for mixed real raster tiles and Copernicus heightfields; no claim of performance improvement without measurements.
-
-Step 5 implementation uses libpng for opaque-PNG detection/decoding and libjpeg-turbo for JPEG encoding. It admits at most two concurrent encoding jobs; saturated servers return original tiles without queuing. Variant selection applies to both warm-cache and completed async requests.
-
-## Measure transfer savings on an actual cache
-
-Build and run the read-only benchmark (no internet or cache modifications):
+Restart a separately running server after **INI** changes:
 
 ```bash
-./compile_linux_tests.sh
-./build-linux-tests/aowis-server-map-transfer-benchmark \
-  --raster /path/to/cache/maptiles \
-  --terrain /path/to/cache/terrain/normalized \
-  --max-files 2000 > map-transfer-benchmark.json
+sudo systemctl restart aowis-server-map
+# Or, when running manually:
+./build-linux/aowis-server-map --config ./map-server.ini
 ```
 
-Pass either directory separately if needed. The tool recursively reads actual
-cached image files and canonical `.aowterrain` files. Its default adaptive JPEG
-sampling matches the MAP selector; `--exhaustive-jpeg` instead evaluates every
-eligible PNG for an upper-bound comparison. The report includes payload bytes,
-selected JPEG/zstd counts, raster savings by provider and codec CPU time. It does **not** measure network
-latency, HTTP framing, provider-specific lossless-only policy or concurrent
-server load. Representative imagery and terrain from the actual project area
-are needed before making real-world savings claims.
+A manually started server can use an optional INI; Standalone has **no MAP INI**.
+In AOWIS Standalone, use **Settings → Map Settings** to configure the ordered
+upstream list, direct-fetch policy and slow-link settings. Changes are autosaved
+through the MAP library's AOWIS-CONFIG repository and applied to the embedded
+MAP engine; no separate MAP daemon or GUI restart is required. On a separate
+server the public REST API does **not** edit the global upstream list: use the
+administrator INI (or MAP-managed CONFIG records if not overridden by INI).
 
-### Geographic benchmark: Bitkine, Chad
+## Where a tile comes from
 
-For a meaningful project-area comparison, sample cached tiles intersecting a
-**25 km radius around Bitkine (11.9801° N, 18.2138° E)** instead of taking the
-first files in lexical order. The following two commands use the *same* regional
-sample, across available providers and zoom levels:
+1. **Local cache first.** Existing raster and normalized-terrain tiles remain
+   available when the WAN is down. Disabled raster providers cannot serve even
+   their cached tiles.
+2. **Permitted upstream MAP servers.** On a miss, contact the selected servers
+   in order, trying the next if one fails. Raster provider discovery identifies
+   which upstreams advertise a compatible provider/source.
+3. **Original provider, only when permitted.** Local raster providers use their
+   per-provider acquisition mode; terrain uses the global `allow_direct_fetch`
+   switch. An inherited raster provider never takes this step.
+
+Both `downloads/remote_fetch_enabled` and `terrain/remote_fetch_enabled`, along
+with geographic coverage and per-provider restrictions, still gate **new remote
+requests**. A cascade cannot override them. Cycle detection uses a propagated
+visited-server trace and an eight-hop limit; provider-source fingerprints and
+terrain format/revision checks prevent mismatched data entering caches.
+
+### Provider inheritance and per-provider routing
+
+`GET /map/v1/providers/available` merges local and upstream-advertised raster
+providers. Local definitions win when UUIDs overlap; matching upstreams remain
+visible as routes. Inherited definitions are **read-only**: editing the local
+provider catalog never changes upstream providers.
+
+On the downstream you can independently:
+
+- Disable/re-enable an inherited provider without deleting its definition.
+- Select an **ordered subset** of upstreams advertising a provider (or reset
+  that provider to the global order).
+- Set a raster provider's acquisition mode:
+
+| Mode | Cache miss | Default / restriction |
+| --- | --- | --- |
+| **Automatic** | Selected MAP upstreams, then original source **only for local providers** when permitted | Local provider default |
+| **Cascade** | Selected MAP upstreams only | Inherited provider default |
+| **Direct** | Original imagery source only | Local provider only; requires global direct-fetch permission |
+
+These overrides are persisted **on the downstream** in MAP-owned AOWIS-CONFIG,
+not forwarded to upstream servers. Administrator download restrictions always
+win. Routing and acquisition changes apply immediately via authenticated
+`PUT /map/v1/providers/upstreams` and `PUT /map/v1/providers/acquisition`.
+The GUI presents these settings in **Map Settings**; full REST examples are in
+[HTTP API — Provider routing](http-api.md#provider-routing-and-acquisition).
+
+A validated provider catalog snapshot survives failed discovery and restarts.
+When the upstream is offline, cached tiles still render, but new uncached areas
+cannot load unless a permitted alternative exists. **Do not confuse cached
+coverage with a complete offline map.**
+
+## Slow-link transfer
+
+`poor_internet_mode=true` on the **downstream** requests optimized representations
+from upstream MAP servers. The upstream does not need to enable this mode to
+honor a valid cascade request. Public GUI responses remain compatible.
+
+| Data | MAP-to-MAP transfer | Local storage |
+| --- | --- | --- |
+| Opaque PNG imagery | Adaptive libjpeg-turbo JPEG at quality 75 when worthwhile | Received image can be cached; avoid repeated lossy encoding across hops |
+| Already JPEG/WebP, transparent PNG, provider lossless-only | Original bytes; no lossy conversion | Original representation |
+| `.aowterrain` | zstd HTTP content encoding only if smaller | Decompressed, validated canonical terrain tile |
+
+Raster JPEG conversion is **not universal**: PNGs below 12 KiB are left alone;
+for larger opaque PNGs the selector compares actual bytes and requires at least
+10% **and** 2 KiB saved. Decisions use recent results per source/style, zoom and
+size band; losing buckets are probed periodically. Conversion uses at most two
+concurrent workers; when busy, the upstream sends the original tile. Cached
+originals are not rewritten. Provider `allow_lossy_transfer=false` is a hard
+opt-out; imagery-provider licensing still applies.
+
+A MAP raster request uses `X-AOWIS-Cascade-Visited` plus
+`X-AOWIS-Raster-Transfer: adaptive-jpeg;quality=75`. The response's actual
+`Content-Type` (possibly `image/jpeg` despite a `.png` URL) is authoritative.
+Normalized terrain uses the cascade trace plus `Accept-Encoding: zstd`; the
+response may have `Content-Encoding: zstd`. Ordinary GUI requests do not receive
+this MAP-only zstd encoding. Downstreams validate both kinds before caching.
+
+## Verify and troubleshoot
+
+```bash
+# On the site MAP server (supply its read key when configured):
+curl -fsS -H 'X-API-Key: SITE_READ_KEY' \
+  http://127.0.0.1:8122/map/v1/providers/available
+curl -fsS -H 'X-API-Key: SITE_READ_KEY' \
+  http://127.0.0.1:8122/upstream/v1/activity
+
+# Run the MAP tests, including cascading, source validation and transfer codecs:
+./compile_linux_tests.sh
+```
+
+If an inherited layer does not appear, check the **upstream read key**, the
+upstream's `/map/v1/providers/available`, and whether the provider is enabled
+and remote-fetchable there. If the catalog appears but tiles are missing, check
+local download/coverage restrictions, the selected upstream names, provider
+fingerprints, and cached versus uncached locations. Cached data should still be
+available after disconnecting the upstream. A local `Direct` provider is the
+only raster case that deliberately bypasses MAP peers.
+
+### Measure bandwidth savings in the project area
+
+The benchmark reads existing caches and **does not download tiles**. For the
+Bitkine, Chad test area (25 km radius, zooms 8–16):
 
 ```bash
 ./build-linux-tests/aowis-server-map-transfer-benchmark \
@@ -151,33 +182,9 @@ sample, across available providers and zoom levels:
   --terrain "$HOME/.local/share/aowis-server-gui/terrain/normalized" \
   --region bitkine --radius-km 25 --min-zoom 8 --max-zoom 16 \
   --max-files 2000 > bitkine-adaptive.json
-
-./build-linux-tests/aowis-server-map-transfer-benchmark \
-  --raster "$HOME/.local/share/aowis-server-gui/maptiles" \
-  --terrain "$HOME/.local/share/aowis-server-gui/terrain/normalized" \
-  --region bitkine --radius-km 25 --min-zoom 8 --max-zoom 16 \
-  --max-files 2000 --exhaustive-jpeg > bitkine-exhaustive.json
 ```
 
-`region_coverage` reports candidate and sampled tiles, split by zoom and source.
-The tool fails when a requested category has no cached tiles in the region;
-**it never substitutes tiles from elsewhere or downloads new data**. Visit
-Bitkine in the GUI first to populate the raster/3D terrain cache, with an
-imagery provider whose terms permit such use. A sparse cache is not evidence
-of representative savings. No tile imagery is fetched by the benchmark.
-
-For the initial Bitkine 25 km sample (2,000 raster tiles, JPEG 75), the old
-adaptive policy saved 25.24% versus 43.92% with exhaustive attempts. This
-difference motivated the revised predictor; rerun both modes to verify it
-reduces missed savings. Terrain zstd saved 2.57% on 210 cached tiles. These
-measurements exclude provider-level lossy-transfer opt-outs, HTTP overhead and
-actual WAN latency.
-
-### Per-provider raster acquisition (Stage D)
-
-MAP serves each provider from its local tile cache first. On an uncached tile:
-- **Automatic**: selected MAP upstreams in order, followed by the original imagery provider *only* if the administrator permits direct fetching. Default for local providers.
-- **Cascade**: selected MAP upstreams only. Default for inherited providers.
-- **Direct**: the original imagery provider only; never the MAP upstreams. Available only for locally defined providers when direct fetching is permitted by the administrator.
-
-Provider modes and upstream priorities are persisted in separate MAP-owned AOWIS-CONFIG records, not in the editable provider catalog. They can be changed through the authenticated MAP REST API or the embedded MAP library. Changing a downstream mode never edits upstream configuration. Disabling direct fetching globally always wins; inherited providers never contact an imagery origin. Cached tiles remain usable across mode changes.
+Add `--exhaustive-jpeg` to compare against encoding every eligible PNG.
+The report separates original/selected payload bytes, codec time, source and
+zoom coverage. These are **payload-size measurements**, not WAN throughput or
+latency measurements; a cache must actually contain tiles from the area.

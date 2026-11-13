@@ -17,8 +17,10 @@ Except where noted, successful GETs use HTTP `200`. `OPTIONS` is supported for t
 | GET | `/map/v1/providers` | Local editable raster-provider catalog |
 | GET | `/map/v1/providers/available` | Local + inherited providers, read-only |
 | PUT | `/map/v1/providers` | Replace and persist local provider catalog (**unauthenticated**) |
-| PUT | `/map/v1/providers/inherited` | Locally enable/disable one inherited provider (delete/admin API key required) |
-| GET | `/<provider-uuid>/<z>/<x>/<y>.png` | `image/png` raster tile |
+| PUT | `/map/v1/providers/inherited` | Locally enable/disable one inherited provider (admin key) |
+| PUT | `/map/v1/providers/upstreams` | Set/reset an ordered subset of MAP upstreams for one provider (admin key) |
+| PUT | `/map/v1/providers/acquisition` | Set Automatic, Cascade or Direct raster acquisition (admin key) |
+| GET | `/<provider-uuid>/<z>/<x>/<y>.png` | Raster image; `Content-Type` reflects PNG/JPEG/WebP bytes (including MAP transfer variants) |
 | DELETE | `/cache/<provider-uuid>/<z>/<xmin>/<xmax>/<ymin>/<ymax>` | Number of deleted raster cache entries |
 | GET | `/upstream/v1/activity` | Raster and terrain `active`/`queued` counts |
 | DELETE | `/upstream/v1/map-tiles` | Cancel outstanding raster downloads |
@@ -68,8 +70,10 @@ The response is a JSON object with a `providers` array; each entry contains `id`
 
 `GET /map/v1/providers/available` provides the combined catalog for downstream
 MAP servers and GUI clients. Each entry has the usual provider fields plus
-`origin` (`local` or `inherited`) and `upstreams` (ordered immediate MAP server
-names). This endpoint requires the ordinary read API key if configured.
+`origin` (`local` or `inherited`), `upstreams` (advertising immediate MAP peers),
+`selected_upstreams` (effective ordered routing subset), `acquisition_mode`
+(`automatic`, `cascade`, `direct`) and `direct_fetch_allowed` (boolean).
+This endpoint requires the ordinary read API key if configured.
 It retains validated, last-known-good inherited providers when an upstream is
 unreachable. Editing via PUT remains **local-only**; it cannot alter inherited
 providers or upstream catalogs.
@@ -114,6 +118,44 @@ curl -i -X PUT 'http://127.0.0.1:8122/map/v1/providers' \
 Up to 100 providers are accepted. The server validates the UUIDs, URL templates and zoom limits before updating the in-memory catalog and atomically saving MAP-owned AOWIS-CONFIG records. It **never rewrites the administrator's `map-server.ini`**. The `providers` array can be intentionally empty. A URL change separates the disk-cache variant so imagery from the previous upstream is not silently reused.
 
 > The PUT endpoint currently has **no read-key or delete-key authentication**. Apply trusted-client restrictions before deploying this feature on any shared network.
+
+### Provider routing and acquisition
+
+These operations change **this downstream only**, not the upstream MAP servers.
+They require the **delete/admin key** (even when read requests are public).
+The server validates upstream names against the advertised provider catalog and
+persists the result through MAP-owned AOWIS-CONFIG.
+
+```bash
+# Prefer backup only for a provider already advertised by backup:
+curl -i -X PUT 'http://127.0.0.1:8122/map/v1/providers/upstreams' \
+  -H 'X-API-Key: YOUR_ADMIN_DELETE_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"0381bc44-67e9-5af9-aeb0-023ccba36658","upstreams":["backup"]}'
+
+# Forbid the original imagery source for this provider:
+curl -i -X PUT 'http://127.0.0.1:8122/map/v1/providers/acquisition' \
+  -H 'X-API-Key: YOUR_ADMIN_DELETE_KEY' \
+  -H 'Content-Type: application/json' \
+  -d '{"id":"0381bc44-67e9-5af9-aeb0-023ccba36658","mode":"cascade"}'
+```
+
+An empty `upstreams` array **resets to the global upstream order**; it does not
+mean "block every upstream". Unknown or repeated names are rejected. Modes:
+
+| `mode` | On an uncached raster tile |
+| --- | --- |
+| `automatic` | Selected MAP upstreams, then origin **only for local providers** when globally permitted; local default |
+| `cascade` | Selected MAP upstreams only; inherited default |
+| `direct` | Original source only; forbidden for inherited providers or when direct fetching is globally disabled |
+
+Raster provider modes **do not apply to terrain**, which follows the global
+cascade configuration. Mode and route changes apply immediately; existing
+cached tiles remain readable for enabled providers. Expected errors include
+`400` (invalid JSON/value), `401` (missing admin key), `403` (forbidden Direct),
+`404` (unknown provider), `409` (stale CONFIG revision), and `503` (managed
+settings unavailable). See [Cascading MAP servers](map-cascading.md) for setup
+and offline semantics.
 
 ## Terrain datasets and normalized tiles
 
@@ -179,42 +221,11 @@ Terrain deletion runs outside the HTTP event loop. Active source file locks and 
 | `202` | Cache-first raster tile still being fetched |
 | `400` | Bad parameters, invalid raster request or unsupported datum conversion |
 | `401` | Invalid/missing required API key |
+| `403` | Requested acquisition mode forbidden by administrator policy |
+| `409` | Concurrent CONFIG edit conflict or cascade-loop rejection |
 | `404` | Requested terrain/source data unavailable |
 | `500` | Local provider, cache or internal failure |
 | `502` | Remote terrain source acquisition failure |
 | `503` | Disabled terrain, uninitialized subsystem or admission overload |
 
 Cache hits remain usable in offline mode. Separate `downloads/remote_fetch_enabled` and `terrain/remote_fetch_enabled` switches control **new** upstream acquisition. An explicit geographical coverage policy restricts downloads, not what cached data may be served.
-
-### Per-provider upstream order
-
-`GET /map/v1/providers/available` includes `upstreams` (advertising MAP peers,
-ordered by global priority) and `selected_upstreams` (effective route order).
-To select an ordered subset for one provider, use the administrative/delete
-API key with `PUT /map/v1/providers/upstreams`:
-
-```json
-{"id":"15c2d930-1e4a-4b76-9675-31ea802989fa","upstreams":["backup","root"]}
-```
-
-An empty `upstreams` list resets that provider to the default order. Names must
-be advertised for that provider. Changes are local, revision-checked and stored
-in AOWIS-CONFIG; they never modify upstream catalogs. A missing route keeps
-existing behavior. Direct-fetch permission remains governed by the global
-policy until Stage D.
-
-### Provider acquisition policy (Stage D)
-
-`GET /map/v1/providers/available` includes `acquisition_mode` (`automatic`,
-`cascade`, or `direct`) and `direct_fetch_allowed` for each provider.
-Local providers default to `automatic`; inherited providers default to
-`cascade`. The latter can **never** fetch their original provider URL.
-
-`PUT /map/v1/providers/acquisition` requires the administrator/delete API key
-and a JSON body `{"id":"<provider-uuid>","mode":"cascade"}`. This
-updates only the downstream server's AOWIS-CONFIG record and does not change
-any upstream catalog. `direct` is rejected for inherited providers and when
-administrator `allow_direct_fetch=false`. `automatic` tries the provider's
-selected MAP upstreams, then its original URL only if globally permitted;
-`cascade` uses MAP upstreams only; `direct` uses the original URL only.
-Already cached tiles remain available after a mode switch.

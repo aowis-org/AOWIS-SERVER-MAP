@@ -56,7 +56,8 @@ The write command refuses to overwrite an existing file unless explicitly given 
 | Capability | Behavior |
 | --- | --- |
 | **Raster XYZ tiles** | Configurable OSM/CyclOSM/OpenTopoMap/ArcGIS providers, 256 MiB RAM cache, persistent disk cache, deduplicated upstream fetching |
-| **Provider catalog** | Stable provider UUIDs, runtime GET/PUT editing, atomic persistence separate from the administrator INI |
+| **Provider catalog** | Stable provider UUIDs, local editing and upstream-advertised providers; downstream enablement and routing do not edit upstream definitions |
+| **MAP cascading** | Ordered upstream MAP servers for raster imagery and 3D terrain, local offline cache, optional direct-source fallback, adaptive JPEG and lossless zstd transfers |
 | **Download controls** | Independent raster and terrain switches; optional named geographic regions and zoom-dependent coverage |
 | **Normalized terrain** | 65 × 65 `.aowterrain` Web-Mercator tiles with versioned metadata and CRC32, on-demand at zooms 8–14 for Copernicus GLO-30; area-averaged below zoom 14, so coarse levels do not alias |
 | **Elevation lookup** | WGS84 point sampling with explicit source and requested vertical-datum semantics |
@@ -75,6 +76,10 @@ All endpoints are relative to the configured host and port. Raster provider IDs 
 | `GET /status` | Server status |
 | `GET /map/v1/providers` | Raster provider catalog |
 | `PUT /map/v1/providers` | Replace raster provider catalog (**no API-key check**) |
+| `GET /map/v1/providers/available` | Combined local and inherited provider catalog, with routing and acquisition mode |
+| `PUT /map/v1/providers/inherited` | Locally enable/disable an inherited provider (admin key) |
+| `PUT /map/v1/providers/upstreams` | Select an ordered subset of MAP upstreams for a provider (admin key) |
+| `PUT /map/v1/providers/acquisition` | Select Automatic, Cascade or Direct for a raster provider (admin key) |
 | `GET /<provider-uuid>/<z>/<x>/<y>.png` | Raster map tile |
 | `GET /terrain/v1/datasets` | Terrain dataset catalog |
 | `GET /terrain/v1/<dataset>/<z>/<x>/<y>.aowterrain` | Normalized terrain tile |
@@ -87,9 +92,24 @@ All endpoints are relative to the configured host and port. Raster provider IDs 
 | `DELETE /terrain/v1/cache/<dataset>/<z>/<xmin>/<xmax>/<ymin>/<ymax>` | Remove normalized terrain tiles |
 | `DELETE /terrain/v1/source/<dataset>/<z>/<xmin>/<xmax>/<ymin>/<ymax>` | Remove corresponding native source cells |
 
-GET endpoints use the **read key** when configured. DELETE endpoints require the separate **delete key**; an empty delete key disables these operations, rather than exposing them anonymously. Either key can be supplied in `X-API-Key` or as a Bearer token, according to the endpoint's role. A successful grid response uses `application/vnd.aowis.dem-f32le` with exactly `rows × columns × 4` bytes.
+GET endpoints use the **read key** when configured. DELETE and the three per-provider cascading PUT endpoints use the separate **delete/admin key**; an empty delete key disables these operations rather than exposing them anonymously. The **local catalog PUT remains unauthenticated** and must be restricted at the network/proxy boundary. Either key can be supplied in `X-API-Key` or as a Bearer token, according to the endpoint's role. A successful grid response uses `application/vnd.aowis.dem-f32le` with exactly `rows × columns × 4` bytes.
 
 See the [HTTP API reference](docs/http-api.md) for concrete requests, content types, response codes, provider editing and deletion semantics.
+
+## Cascading for slow or unreliable internet
+
+A project-site MAP server can cache raster and 3D terrain from an ordered list
+of upstream MAP servers. Set `[upstream]` and `[bandwidth]` in the site's INI,
+or configure them in **Standalone → Settings → Map Settings**. To guarantee
+that the site never fetches directly from OSM, ArcGIS or Copernicus, set
+`allow_direct_fetch=false`. Existing cached areas continue working offline.
+Providers advertised by upstreams appear in the combined provider catalog;
+per-provider upstream priorities and acquisition modes can be changed without
+editing the upstream server. A downstream can request adaptive JPEG imagery
+and lossless zstd terrain transfer to reduce WAN bytes.
+
+See **[Cascading MAP servers](docs/map-cascading.md)** for a working site
+configuration, acquisition rules, offline behavior and the Bitkine benchmark.
 
 ## Data, caching and offline operation
 
