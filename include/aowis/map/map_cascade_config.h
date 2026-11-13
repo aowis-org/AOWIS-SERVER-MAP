@@ -105,8 +105,9 @@ struct MapCascadeConfig
     // this false, missing source assets must never trigger origin downloads.
     bool allow_direct_fetch = true;
     bool poor_internet_mode = false;
+    // MAP-to-MAP raster transfer always uses the benchmarked adaptive
+    // PNG/JPEG selection (RasterTransferOptimizer); it is not configurable.
     int jpeg_quality = 75;
-    bool adaptive_compression = true;
 };
 
 inline bool operator==(const MapCascadeConfig &left, const MapCascadeConfig &right)
@@ -114,8 +115,7 @@ inline bool operator==(const MapCascadeConfig &left, const MapCascadeConfig &rig
     return left.upstreams == right.upstreams &&
            left.allow_direct_fetch == right.allow_direct_fetch &&
            left.poor_internet_mode == right.poor_internet_mode &&
-           left.jpeg_quality == right.jpeg_quality &&
-           left.adaptive_compression == right.adaptive_compression;
+           left.jpeg_quality == right.jpeg_quality;
 }
 
 inline bool operator!=(const MapCascadeConfig &left, const MapCascadeConfig &right)

@@ -54,7 +54,6 @@ int main(int argc, char **argv)
     config.allow_direct_fetch = false;
     config.poor_internet_mode = true;
     config.jpeg_quality = 65;
-    config.adaptive_compression = false;
     QString updated_revision;
     if (!require(store->saveCascade(config, first_revision, &updated_revision, &error) &&
                  !updated_revision.isEmpty(), "Persist first cascade configuration"))
@@ -71,7 +70,7 @@ int main(int argc, char **argv)
                  loaded.upstreams.at(0).name == QStringLiteral("primary") &&
                  loaded.upstreams.at(1).api_key == QByteArrayLiteral("key-2") &&
                  !loaded.allow_direct_fetch && loaded.poor_internet_mode &&
-                 loaded.jpeg_quality == 65 && !loaded.adaptive_compression,
+                 loaded.jpeg_quality == 65,
                  "Restart preserves ordered upstreams and all settings"))
         return 1;
 
@@ -330,6 +329,24 @@ int main(int argc, char **argv)
         if (!require(cascade_records.value().update(stored.info.id, stored.json,
                          current.value().info.revision).hasValue(),
                      "Restore valid cascade record"))
+            return 1;
+
+        // The former adaptive_compression switch is no longer written; a
+        // stored false (older AOWIS) still loads and is ignored.
+        if (!require(!record.contains(QStringLiteral("adaptive_compression")),
+                     "Cascade record still stores adaptive_compression"))
+            return 1;
+        QJsonObject legacy = record;
+        legacy.insert(QStringLiteral("adaptive_compression"), false);
+        const aowis::config::Result<aowis::config::StoredObject> restored =
+            cascade_records.value().read(stored.info.id);
+        Aowis::Map::MapCascadeConfig legacy_loaded;
+        if (!require(cascade_records.value().update(stored.info.id,
+                         QJsonDocument(legacy).toJson(QJsonDocument::Compact).toStdString(),
+                         restored.value().info.revision).hasValue() &&
+                     reopened->readCascade(&legacy_loaded, nullptr, &error) &&
+                     legacy_loaded.upstreams == tunnelled.upstreams,
+                     "Stored adaptive_compression=false no longer loads"))
             return 1;
     }
 

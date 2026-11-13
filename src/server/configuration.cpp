@@ -3,6 +3,7 @@
 #include <aowis/map/terrain_tile.h>
 #include <aowis/map/settings_repository.h>
 
+#include <QDebug>
 #include <QByteArray>
 #include <QDir>
 #include <QFile>
@@ -557,10 +558,17 @@ bool MapServerConfiguration::loadConfigFile(const QString &path, Server::Config 
     if (!readBoolean(&settings, QStringLiteral("upstream/allow_direct_fetch"),
                      &config->cascade.allow_direct_fetch, error_message) ||
         !readBoolean(&settings, QStringLiteral("bandwidth/poor_internet_mode"),
-                     &config->cascade.poor_internet_mode, error_message) ||
-        !readBoolean(&settings, QStringLiteral("bandwidth/adaptive_compression"),
-                     &config->cascade.adaptive_compression, error_message))
+                     &config->cascade.poor_internet_mode, error_message))
         return false;
+    // Former switch: adaptive PNG/JPEG selection is always used now. The key
+    // is still validated so existing INIs load, but its value is ignored.
+    bool ignored_adaptive_compression = true;
+    if (!readBoolean(&settings, QStringLiteral("bandwidth/adaptive_compression"),
+                     &ignored_adaptive_compression, error_message))
+        return false;
+    if (!ignored_adaptive_compression)
+        qWarning().noquote() << "bandwidth/adaptive_compression=false is ignored: "
+                                "adaptive PNG/JPEG selection is always used";
 
     if (settings.contains(QStringLiteral("bandwidth/jpeg_quality")))
     {
@@ -917,7 +925,7 @@ QByteArray MapServerConfiguration::defaultConfigText()
         "; url=https://maps.example.org\n"
         "; api_key=\n\n"
         "[bandwidth]\n"
-        "poor_internet_mode=false\njpeg_quality=75\nadaptive_compression=true\n\n"
+        "poor_internet_mode=false\njpeg_quality=75\n\n"
         "[terrain]\n"
         "enabled=true\nremote_fetch_enabled=true\n"
         "default_dataset=%5\nmaximum_jobs=%6\nmaximum_workers=%7\nmaximum_remote_workers=%8\n"

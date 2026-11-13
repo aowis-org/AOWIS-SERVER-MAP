@@ -87,7 +87,6 @@ int main(int argc, char **argv)
     config.cache_directory = directory.path();
     config.terrain_enabled = false;
     config.map_remote_fetch_enabled = false;
-    config.cascade.adaptive_compression = false; // deterministic compression test
     const QString provider = config.map_providers.first().id;
     const QByteArray original = pngTile();
     if (!require(original.size() > 12 * 1024, "Bad test PNG")) return 1;

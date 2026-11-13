@@ -2084,8 +2084,7 @@ void Server::completeRasterPromises(const PendingPromises &promises, const QByte
     this->raster_encode_pool.start([this, promises, data, source, zoom, requested_quality]()
     {
         const Aowis::Map::RasterTransferOptimizer::Selection choice =
-            this->raster_transfer.select(data, source, zoom, requested_quality,
-                                         this->config.cascade.adaptive_compression);
+            this->raster_transfer.select(data, source, zoom, requested_quality);
         for (const PendingPromise &promise : promises)
         {
             this->raster_transfer.recordTransfer(data.size(), choice.bytes.size());

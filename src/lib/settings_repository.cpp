@@ -79,8 +79,7 @@ QJsonObject encodeCascadeObject(const MapCascadeConfig &value)
         {QStringLiteral("upstreams"), upstreams},
         {QStringLiteral("allow_direct_fetch"), value.allow_direct_fetch},
         {QStringLiteral("poor_internet_mode"), value.poor_internet_mode},
-        {QStringLiteral("jpeg_quality"), value.jpeg_quality},
-        {QStringLiteral("adaptive_compression"), value.adaptive_compression}
+        {QStringLiteral("jpeg_quality"), value.jpeg_quality}
     };
 }
 
@@ -91,7 +90,8 @@ bool decodeCascadeObject(const QJsonObject &stored, MapCascadeConfig *value, QSt
         !stored.value(QStringLiteral("allow_direct_fetch")).isBool() ||
         !stored.value(QStringLiteral("poor_internet_mode")).isBool() ||
         !isInteger(stored.value(QStringLiteral("jpeg_quality")), 1, 100) ||
-        !stored.value(QStringLiteral("adaptive_compression")).isBool())
+        (stored.contains(QStringLiteral("adaptive_compression")) &&
+         !stored.value(QStringLiteral("adaptive_compression")).isBool()))
     {
         return fail(error, QStringLiteral("Invalid MAP cascade record version or fields"));
     }
@@ -99,7 +99,9 @@ bool decodeCascadeObject(const QJsonObject &stored, MapCascadeConfig *value, QSt
     parsed.allow_direct_fetch = stored.value(QStringLiteral("allow_direct_fetch")).toBool();
     parsed.poor_internet_mode = stored.value(QStringLiteral("poor_internet_mode")).toBool();
     parsed.jpeg_quality = stored.value(QStringLiteral("jpeg_quality")).toInt();
-    parsed.adaptive_compression = stored.value(QStringLiteral("adaptive_compression")).toBool();
+    // Former "adaptive_compression" switch: still accepted, ignored (a stored
+    // false must not keep the benchmarked default disabled); the next save
+    // drops it.
     const QJsonArray upstreams = stored.value(QStringLiteral("upstreams")).toArray();
     if (upstreams.size() > MaximumUpstreams)
         return fail(error, QStringLiteral("Too many MAP upstream servers"));

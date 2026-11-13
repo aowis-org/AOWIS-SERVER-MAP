@@ -41,7 +41,6 @@ api_key=BACKUP_READ_KEY
 
 [bandwidth]
 poor_internet_mode=true
-adaptive_compression=true
 jpeg_quality=75
 ```
 
@@ -175,6 +174,13 @@ size band; losing buckets are probed periodically. Conversion uses at most two
 concurrent workers; when busy, the upstream sends the original tile. Cached
 originals are not rewritten. Provider `allow_lossy_transfer=false` is a hard
 opt-out; imagery-provider licensing still applies.
+
+This adaptive selection is always used (it reduced raster payload by about
+44% in the Bitkine, Chad benchmark); there is no switch for it any more.
+The former `adaptive_compression` INI key and cascade-record field are still
+accepted so existing configurations load, but their value is ignored — a
+stored `false` does not disable it — and the field is dropped on the next
+save. Normalized terrain stays lossless (zstd only).
 
 A MAP raster request uses `X-AOWIS-Cascade-Visited` plus
 `X-AOWIS-Raster-Transfer: adaptive-jpeg;quality=75`. The response's actual

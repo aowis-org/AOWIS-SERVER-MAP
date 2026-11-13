@@ -226,8 +226,8 @@ int main(int argc, char **argv)
                config.cascade.upstreams[1].name == QStringLiteral("secondary") &&
                config.cascade.upstreams[0].api_key == QByteArrayLiteral("one") &&
                !config.cascade.allow_direct_fetch &&
-               config.cascade.poor_internet_mode && config.cascade.jpeg_quality == 80 &&
-               !config.cascade.adaptive_compression, "Cascade configuration changed order or values"))
+               config.cascade.poor_internet_mode && config.cascade.jpeg_quality == 80,
+               "Cascade configuration changed order or values (adaptive_compression=false is ignored)"))
         return 1;
 
     // Step 2 should queue configured MAP upstreams (not return Unavailable),

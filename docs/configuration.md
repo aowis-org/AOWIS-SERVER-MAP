@@ -81,7 +81,6 @@ api_key=BACKUP_READ_KEY
 
 [bandwidth]
 poor_internet_mode=true
-adaptive_compression=true
 jpeg_quality=75
 ```
 

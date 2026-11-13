@@ -159,8 +159,6 @@ Server::Config serverConfig(const QString &directory)
     result.cascade.allow_direct_fetch = false;
     result.cascade.poor_internet_mode = true;
     result.cascade.jpeg_quality = 75;
-    // Deterministic choice: actual JPEG byte-count threshold still applies.
-    result.cascade.adaptive_compression = false;
     result.maximum_terrain_remote_workers = 2;
     return result;
 }
