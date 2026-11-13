@@ -77,6 +77,17 @@ validation is not saved and the previous configuration stays in use. On a separa
 server the public REST API does **not** edit the global upstream list: use the
 administrator INI (or MAP-managed CONFIG records if not overridden by INI).
 
+### Where MAP runs, and who owns the tunnel
+
+| Deployment | MAP settings | WireGuard |
+| --- | --- | --- |
+| Embedded MAP in Standalone | Settings → Map Settings, applied live | Per upstream; the GUI process leases the central profile's tunnel and shares it with its other connections |
+| GUI connected to a remote MAP server | Settings → Map Settings → Map Server Settings | The GUI's own connection to that server (same shared tunnels); the remote server's upstreams are its own business |
+| Separately running MAP server (systemd) | Administrator INI / MAP CONFIG records | None: it has no tunnel transport, WireGuard upstreams are skipped. Use a system VPN if it must reach upstreams through one |
+
+Tunnels are shared **within one process** only. A MAP daemon never uses a
+GUI's tunnel, and a GUI never uses a daemon's network path.
+
 ### Upstreams reached through WireGuard
 
 In Standalone each upstream row has a **Connection** choice: *Direct
