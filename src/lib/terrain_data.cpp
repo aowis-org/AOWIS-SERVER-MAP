@@ -279,7 +279,8 @@ QString terrainElevationLookupStatusId(TerrainElevationLookupStatus status)
 
 TerrainData::TerrainData(const Config &config, QObject *parent)
     : QObject(parent),
-      config(config)
+      config(config),
+      cascade_config(config.cascade)
 {
     this->cascade_instance_id = QUuid::createUuid().toString(QUuid::WithoutBraces).toLatin1();
     this->storage_paths.root = resolveCacheDirectory(config);
@@ -299,6 +300,31 @@ TerrainData::~TerrainData() = default;
 void TerrainData::setCascadeInstanceId(const QByteArray &instance_id)
 {
     this->cascade_instance_id = instance_id;
+}
+
+void TerrainData::setCascadeConfig(const MapCascadeConfig &cascade)
+{
+    bool upstreams_changed = false;
+    {
+        QMutexLocker lock(&this->cascade_config_mutex);
+        upstreams_changed = this->cascade_config.upstreams != cascade.upstreams ||
+            this->cascade_config.allow_direct_fetch != cascade.allow_direct_fetch;
+        this->cascade_config = cascade;
+    }
+    if (!upstreams_changed)
+        return;
+    // Downloads in flight follow the previous source policy: cancel them
+    // (callers retry with the new order) and forget cooldowns of upstreams
+    // that may have been replaced or re-credentialed.
+    this->cascade_cancel_generation.fetch_add(1, std::memory_order_acq_rel);
+    QMutexLocker lock(&this->cascade_cooldown_mutex);
+    this->cascade_cooldown_until_ms.clear();
+}
+
+MapCascadeConfig TerrainData::cascadeConfig() const
+{
+    QMutexLocker lock(&this->cascade_config_mutex);
+    return this->cascade_config;
 }
 
 bool TerrainData::initialize(QString *error_message)
@@ -578,6 +604,7 @@ TerrainCacheDeletionResult TerrainData::deleteSourceData(
 TerrainAnalysisGridResult TerrainData::analysisGrid(
     const TerrainAnalysisGridRequest &request, bool allow_remote_fetch) const
 {
+    const MapCascadeConfig cascade = this->cascadeConfig();
     TerrainAnalysisGridResult result;
     if (!this->config.enabled || !this->initialized)
     {
@@ -596,7 +623,7 @@ TerrainAnalysisGridResult TerrainData::analysisGrid(
         if (provider->supportsDataset(request.dataset))
             return provider->fetchAnalysisGrid(request, this->storage_paths.providers,
                                               this->config.remote_fetch_enabled && allow_remote_fetch &&
-                                              this->config.cascade.allow_direct_fetch);
+                                              cascade.allow_direct_fetch);
     }
     result.status = TerrainProviderFetchStatus::UnsupportedDataset;
     result.error_message = QStringLiteral("Unrecognized terrain dataset");
@@ -632,6 +659,7 @@ TerrainProviderFetchResult TerrainData::acquireGridSources(
     const TerrainAnalysisGridRequest &request,
     const std::shared_ptr<std::atomic_bool> &cancel_requested) const
 {
+    const MapCascadeConfig cascade = this->cascadeConfig();
     TerrainProviderFetchResult result;
     result.status = TerrainProviderFetchStatus::Ready;
     // Outside coverage, the CPU stage still serves already cached sources.
@@ -642,7 +670,7 @@ TerrainProviderFetchResult TerrainData::acquireGridSources(
     {
         if (provider->supportsDataset(request.dataset))
             return provider->acquireGridSources(request, this->storage_paths.providers,
-                                                this->config.cascade.allow_direct_fetch,
+                                                cascade.allow_direct_fetch,
                                                 cancel_requested);
     }
     return result;
@@ -656,9 +684,10 @@ TerrainProviderFetchResult TerrainData::fetchNormalizedFromUpstreams(
     const std::shared_ptr<std::atomic_bool> &cancel_requested,
     const QByteArray &cascade_trace) const
 {
+    const MapCascadeConfig cascade = this->cascadeConfig();
     TerrainProviderFetchResult result;
     result.status = TerrainProviderFetchStatus::SourceUnavailable;
-    if (this->config.cascade.upstreams.isEmpty())
+    if (cascade.upstreams.isEmpty())
         return result;
 
     const std::uint64_t generation =
@@ -668,7 +697,7 @@ TerrainProviderFetchResult TerrainData::fetchNormalizedFromUpstreams(
     const QString relative_path = QStringLiteral("/terrain/v1/%1/%2/%3/%4.aowterrain")
         .arg(dataset).arg(address.zoom).arg(address.x).arg(address.y);
 
-    for (const MapCascadeUpstream &upstream : this->config.cascade.upstreams)
+    for (const MapCascadeUpstream &upstream : cascade.upstreams)
     {
         const QString origin = upstream.url.toString(
             QUrl::RemovePath | QUrl::RemoveQuery | QUrl::RemoveFragment |
@@ -694,7 +723,7 @@ TerrainProviderFetchResult TerrainData::fetchNormalizedFromUpstreams(
                              QNetworkRequest::ManualRedirectPolicy);
         request.setTransferTimeout(CascadeRequestTimeoutMs);
         request.setRawHeader("Accept", terrainTileMimeType().toUtf8());
-        if (this->config.cascade.poor_internet_mode)
+        if (cascade.poor_internet_mode)
             request.setRawHeader("Accept-Encoding", "zstd");
         request.setRawHeader("X-AOWIS-Cascade-Visited", visited);
         if (!upstream.api_key.isEmpty())
@@ -786,7 +815,7 @@ TerrainProviderFetchResult TerrainData::fetchNormalizedFromUpstreams(
         if (content_type != terrainTileMimeType() ||
             revision != QByteArray::number(TerrainNormalizationRevision) ||
             (content_encoding != "zstd" && !content_encoding.isEmpty()) ||
-            (content_encoding == "zstd" && !this->config.cascade.poor_internet_mode) ||
+            (content_encoding == "zstd" && !cascade.poor_internet_mode) ||
             wire_bytes.isEmpty() || wire_bytes.size() > maximumCompressedTerrainTileBytes() ||
             (declared_length_valid && declared_length != wire_bytes.size()))
         {
@@ -873,6 +902,7 @@ TerrainProviderFetchResult TerrainData::acquireTileSources(
     const std::shared_ptr<std::atomic_bool> &cancel_requested,
     const QByteArray &cascade_trace) const
 {
+    const MapCascadeConfig cascade = this->cascadeConfig();
     TerrainProviderFetchResult result;
     result.status = TerrainProviderFetchStatus::Ready;
     if (!this->initialized || !this->config.remote_fetch_enabled ||
@@ -893,13 +923,13 @@ TerrainProviderFetchResult TerrainData::acquireTileSources(
             provider->tileSourcesAvailableLocally(dataset, address, this->storage_paths.providers))
             return result;
     }
-    if (!this->config.cascade.upstreams.isEmpty())
+    if (!cascade.upstreams.isEmpty())
     {
         const TerrainProviderFetchResult upstream_result = fetchNormalizedFromUpstreams(
             dataset, address, cancel_requested, cascade_trace);
         if (upstream_result.status == TerrainProviderFetchStatus::Ready ||
             upstream_result.status == TerrainProviderFetchStatus::Cancelled ||
-            !this->config.cascade.allow_direct_fetch)
+            !cascade.allow_direct_fetch)
             return upstream_result;
     }
     for (const std::unique_ptr<TerrainProvider> &provider : this->providers)
@@ -907,7 +937,7 @@ TerrainProviderFetchResult TerrainData::acquireTileSources(
         if (provider->supportsDataset(dataset) && provider->supportsAddress(dataset, address))
             return provider->acquireTileSources(dataset, address,
                                                 this->storage_paths.providers,
-                                                this->config.cascade.allow_direct_fetch,
+                                                cascade.allow_direct_fetch,
                                                 cancel_requested);
     }
     return result;
@@ -916,6 +946,7 @@ TerrainProviderFetchResult TerrainData::acquireTileSources(
 bool TerrainData::tileNeedsRemoteAcquisition(const QString &dataset,
                                              const TerrainTileAddress &address) const
 {
+    const MapCascadeConfig cascade = this->cascadeConfig();
     if (!isRemoteFetchEnabled())
         return false;
     if (isValidTerrainDatasetId(dataset) && isValidTerrainTileAddress(address))
@@ -928,7 +959,7 @@ bool TerrainData::tileNeedsRemoteAcquisition(const QString &dataset,
             // In cascade mode validate even an existing file: an invalid
             // normalized tile must be repaired by the remote worker, not
             // handed to the CPU-only response path with no acquisition.
-            if (this->config.cascade.upstreams.isEmpty() ||
+            if (cascade.upstreams.isEmpty() ||
                 readNormalizedTile(dataset, address).status == TerrainTileLookupStatus::Ready)
                 return false;
         }
@@ -1170,6 +1201,7 @@ TerrainTileLookupResult TerrainData::fetchAndStoreNormalizedTile(
     const QString &dataset, const TerrainTileAddress &address,
     bool allow_remote_fetch) const
 {
+    const MapCascadeConfig cascade = this->cascadeConfig();
     TerrainTileLookupResult result;
     bool dataset_supported = false;
     bool address_supported = false;
@@ -1186,13 +1218,13 @@ TerrainTileLookupResult TerrainData::fetchAndStoreNormalizedTile(
     if (allow_remote_fetch && this->config.remote_fetch_enabled && !native_sources_cached &&
         this->config.download_coverage.permitsTile(
             this->config.coverage_profile, address.zoom, address.x, address.y) &&
-        !this->config.cascade.upstreams.isEmpty())
+        !cascade.upstreams.isEmpty())
     {
         const TerrainProviderFetchResult acquired = fetchNormalizedFromUpstreams(
             dataset, address, {}, {});
         if (acquired.status == TerrainProviderFetchStatus::Ready)
             return readNormalizedTile(dataset, address);
-        if (!this->config.cascade.allow_direct_fetch)
+        if (!cascade.allow_direct_fetch)
         {
             result.status = TerrainTileLookupStatus::RemoteFetchError;
             result.error_message = acquired.error_message;
@@ -1213,7 +1245,7 @@ TerrainTileLookupResult TerrainData::fetchAndStoreNormalizedTile(
         const TerrainProviderFetchResult provider_result =
             provider->fetchTile(dataset, address, this->storage_paths.providers,
                                 allow_remote_fetch && this->config.remote_fetch_enabled &&
-                                this->config.cascade.allow_direct_fetch &&
+                                cascade.allow_direct_fetch &&
                                 this->config.download_coverage.permitsTile(
                                     this->config.coverage_profile, address.zoom,
                                     address.x, address.y));

@@ -49,6 +49,16 @@ struct MapCascadeUpstream
     QByteArray api_key;
 };
 
+inline bool operator==(const MapCascadeUpstream &left, const MapCascadeUpstream &right)
+{
+    return left.name == right.name && left.url == right.url && left.api_key == right.api_key;
+}
+
+inline bool operator!=(const MapCascadeUpstream &left, const MapCascadeUpstream &right)
+{
+    return !(left == right);
+}
+
 struct MapCascadeConfig
 {
     QVector<MapCascadeUpstream> upstreams;
@@ -59,6 +69,20 @@ struct MapCascadeConfig
     int jpeg_quality = 75;
     bool adaptive_compression = true;
 };
+
+inline bool operator==(const MapCascadeConfig &left, const MapCascadeConfig &right)
+{
+    return left.upstreams == right.upstreams &&
+           left.allow_direct_fetch == right.allow_direct_fetch &&
+           left.poor_internet_mode == right.poor_internet_mode &&
+           left.jpeg_quality == right.jpeg_quality &&
+           left.adaptive_compression == right.adaptive_compression;
+}
+
+inline bool operator!=(const MapCascadeConfig &left, const MapCascadeConfig &right)
+{
+    return !(left == right);
+}
 }
 
 #endif // AOWIS_MAP_CASCADE_CONFIG_H

@@ -136,6 +136,13 @@ public:
     bool initialize(QString *error_message);
     // Share the HTTP server identity with raster cascading for loop detection.
     void setCascadeInstanceId(const QByteArray &instance_id);
+    // Live cascade reconfiguration (upstreams, credentials, priority, direct
+    // fetching, transfer options). Thread-safe: every request reads one
+    // consistent snapshot. Changed upstreams or direct-fetch policy cancel
+    // cascade downloads in flight and reset upstream cooldowns; cached tiles
+    // stay valid.
+    void setCascadeConfig(const MapCascadeConfig &cascade);
+    MapCascadeConfig cascadeConfig() const;
 
     bool isEnabled() const;
     bool isInitialized() const;
@@ -235,7 +242,9 @@ private:
                                                         const TerrainTileAddress &address,
                                                         bool allow_remote_fetch) const;
 
-    Config config;
+    Config config; // config.cascade is the initial value only; see cascade_config.
+    mutable QMutex cascade_config_mutex;
+    MapCascadeConfig cascade_config;
     QByteArray cascade_instance_id;
     mutable QMutex cascade_cooldown_mutex;
     mutable QHash<QString, qint64> cascade_cooldown_until_ms;

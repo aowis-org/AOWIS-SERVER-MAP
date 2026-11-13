@@ -65,6 +65,8 @@ public:
     ~MapTiles() override;
 
     void setRemoteFetchEnabled(bool enabled);
+    // May be called at any time on the MapTiles thread (live
+    // reconfiguration); see the definition for downloads in flight.
     void setCascadeConfig(const Aowis::Map::MapCascadeConfig &config);
     void setPermanentDataDirectory(const QString &directory);
     void configureProviders(const QVector<Aowis::Map::MapProvider> &providers,

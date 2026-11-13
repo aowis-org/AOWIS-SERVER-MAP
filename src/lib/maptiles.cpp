@@ -129,7 +129,19 @@ void MapTiles::setRemoteFetchEnabled(bool enabled)
 
 void MapTiles::setCascadeConfig(const Aowis::Map::MapCascadeConfig &config)
 {
+    // Live reconfiguration: later requests use the new upstream order,
+    // credentials and options. When the upstreams or the direct-fetch policy
+    // change, downloads in flight were chosen under the previous policy: they
+    // are canceled (requesters see TileFailureReason::Cancelled and retry)
+    // and the previous upstreams' cooldowns are forgotten. Cached tiles stay
+    // valid.
+    const bool sources_changed = this->cascade_config.upstreams != config.upstreams ||
+        this->cascade_config.allow_direct_fetch != config.allow_direct_fetch;
     this->cascade_config = config;
+    if (!sources_changed)
+        return;
+    this->cascade_cooldown_until_ms.clear();
+    cancelUpstreamDownloads();
 }
 
 QByteArray MapTiles::rasterSourceFingerprint(const QString &provider) const

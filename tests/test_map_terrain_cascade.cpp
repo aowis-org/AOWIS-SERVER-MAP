@@ -14,6 +14,8 @@
 #include <QtConcurrentRun>
 
 #include <cstdio>
+#include <functional>
+#include <utility>
 
 namespace
 {
@@ -268,6 +270,74 @@ int main(int argc, char **argv)
     strictly_offline.acquireTileSources(QStringLiteral("copernicus-glo30"), address);
     if (!require(incompatible.request_count == requests_before,
                  "Remote-fetch gate did not disable MAP terrain upstreams")) return 1;
+
+    // Live reconfiguration: upstreams, credentials and priority change on a
+    // running TerrainData without recreating it (Standalone settings).
+    TerrainUpstream first;
+    TerrainUpstream second;
+    if (!require(first.start() && second.start(), "Could not start live-configuration upstreams"))
+        return 1;
+    second.required_key = QByteArrayLiteral("second-key");
+    TerrainData::Config live_config;
+    live_config.cache_directory = QDir(directory.path()).filePath(QStringLiteral("live"));
+    live_config.cascade.allow_direct_fetch = false;
+    TerrainData live(live_config);
+    if (!require(live.initialize(&error), "Failed to initialize live terrain cache")) return 1;
+    // Each address needs its own canonical tile (identity is verified).
+    TerrainTileAddress live_address = address;
+    const std::function<QByteArray(const TerrainTileAddress &)> serve =
+        [&first, &second](const TerrainTileAddress &tile_address)
+    {
+        const QByteArray tile = encodeTerrainTile(makeTile(tile_address));
+        first.response_body = tile;
+        second.response_body = tile;
+        return tile;
+    };
+    serve(live_address);
+    acquire(live, live_address);
+    if (!require(first.request_count == 0 && second.request_count == 0,
+                 "Terrain without upstreams contacted a server")) return 1;
+
+    MapCascadeConfig added = live_config.cascade;
+    added.upstreams.append(upstream("second", second, QByteArrayLiteral("wrong-key")));
+    added.upstreams.append(upstream("first", first));
+    live.setCascadeConfig(added);
+    live_address.x = 129;
+    serve(live_address);
+    const TerrainProviderFetchResult wrong_key = acquire(live, live_address);
+    if (!require(wrong_key.status == TerrainProviderFetchStatus::Ready &&
+                 second.request_count == 1 && first.request_count == 1,
+                 "Added upstreams were not used in configured order")) return 1;
+
+    MapCascadeConfig reordered = added;
+    reordered.upstreams[0].api_key = second.required_key;
+    std::swap(reordered.upstreams[0], reordered.upstreams[1]);
+    live.setCascadeConfig(reordered);
+    if (!require(live.cascadeConfig().upstreams.first().name == QStringLiteral("first"),
+                 "Live cascade configuration was not stored")) return 1;
+    first.response_status = 503;
+    live_address.x = 130;
+    const QByteArray cached_tile = serve(live_address);
+    const TerrainTileAddress cached_address = live_address;
+    const TerrainProviderFetchResult new_key = acquire(live, live_address);
+    if (!require(new_key.status == TerrainProviderFetchStatus::Ready &&
+                 first.request_count == 2 && second.request_count == 2 &&
+                 second.last_request.toLower().contains("x-api-key: second-key\r\n"),
+                 "Changed priority or credentials were not applied live")) return 1;
+
+    MapCascadeConfig removed = reordered;
+    removed.upstreams.clear();
+    live.setCascadeConfig(removed);
+    live_address.x = 131;
+    serve(live_address);
+    acquire(live, live_address);
+    if (!require(first.request_count == 2 && second.request_count == 2,
+                 "Removed upstreams were still contacted")) return 1;
+    const TerrainTileLookupResult still_cached = live.terrainTile(
+        QStringLiteral("copernicus-glo30"), cached_address, false);
+    if (!require(still_cached.status == TerrainTileLookupStatus::Ready &&
+                 still_cached.data == cached_tile,
+                 "Live reconfiguration dropped cached terrain")) return 1;
 
     return 0;
 }

@@ -68,8 +68,13 @@ sudo systemctl restart aowis-server-map
 A manually started server can use an optional INI; Standalone has **no MAP INI**.
 In AOWIS Standalone, use **Settings → Map Settings** to configure the ordered
 upstream list, direct-fetch policy and slow-link settings. Changes are autosaved
-through the MAP library's AOWIS-CONFIG repository and applied to the embedded
-MAP engine; no separate MAP daemon or GUI restart is required. On a separate
+through the MAP library's AOWIS-CONFIG repository and applied live to the
+embedded MAP engine (`MapTiles::setCascadeConfig`, `TerrainData::setCascadeConfig`)
+and provider discovery; no separate MAP daemon or GUI restart is required.
+Later requests use the new upstreams, read keys, order and options; downloads
+in flight from a changed upstream set are canceled and retried, upstream
+cooldowns are reset, and cached tiles stay valid. A setting that fails
+validation is not saved and the previous configuration stays in use. On a separate
 server the public REST API does **not** edit the global upstream list: use the
 administrator INI (or MAP-managed CONFIG records if not overridden by INI).
 
