@@ -237,7 +237,12 @@ void ProviderCatalog::refresh()
 {
     const quint64 generation = this->generation_;
     for (const MapCascadeUpstream &upstream : this->cascade_.upstreams)
+    {
+        // Never contacted directly; this engine has no WireGuard transport.
+        // Its validated offline snapshot (configure) stays available.
+        if (requiresWireGuardTransport(upstream)) continue;
         fetch(upstream, false, generation);
+    }
 }
 
 void ProviderCatalog::fetch(const MapCascadeUpstream &upstream, bool legacy,

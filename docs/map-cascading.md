@@ -78,6 +78,25 @@ validation is not saved and the previous configuration stays in use. On a separa
 server the public REST API does **not** edit the global upstream list: use the
 administrator INI (or MAP-managed CONFIG records if not overridden by INI).
 
+### Upstreams reached through WireGuard
+
+In Standalone each upstream row has a **Connection** choice: *Direct
+connection* or one of the central WireGuard profiles of **Settings →
+WireGuard VPN** (the same profiles DVMDB and the GUI's MAP server connection
+use). The MAP cascade record stores only the profile's ID, in the upstream's
+`transport` object (`{"type":"wireguard","profile_id":"…"}`); keys and
+WireGuard configuration never enter MAP settings. A record with such an
+upstream is written as `version` 2, so an older MAP release rejects it rather
+than contacting the upstream directly; unknown transport types, and a
+WireGuard transport without a profile, make the record invalid (fail
+closed).
+
+MAP never contacts a WireGuard upstream directly: raster tiles, terrain and
+provider discovery skip it until the host provides that profile's tunnel
+transport; other permitted upstreams are still used in order, and offline
+catalog snapshots stay available. A separately running MAP server has no
+WireGuard transport, so such upstreams are always skipped there.
+
 ## Where a tile comes from
 
 1. **Local cache first.** Existing raster and normalized-terrain tiles remain

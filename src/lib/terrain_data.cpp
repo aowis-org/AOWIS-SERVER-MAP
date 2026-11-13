@@ -699,6 +699,8 @@ TerrainProviderFetchResult TerrainData::fetchNormalizedFromUpstreams(
 
     for (const MapCascadeUpstream &upstream : cascade.upstreams)
     {
+        // Never contacted directly; this engine has no WireGuard transport.
+        if (requiresWireGuardTransport(upstream)) continue;
         const QString origin = upstream.url.toString(
             QUrl::RemovePath | QUrl::RemoveQuery | QUrl::RemoveFragment |
             QUrl::RemoveUserInfo);

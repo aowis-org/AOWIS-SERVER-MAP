@@ -241,6 +241,98 @@ int main(int argc, char **argv)
                  "Invalid provider URLs rejected in MAP library"))
         return 1;
 
+    // A WireGuard upstream stores only its profile reference, in a version 2
+    // record, so an older MAP release rejects the record instead of fetching
+    // from that upstream directly. Unknown or incomplete transports fail.
+    Aowis::Map::MapCascadeConfig tunnelled;
+    QString tunnel_revision;
+    if (!require(reopened->readCascade(&tunnelled, &tunnel_revision, &error),
+                 "Read cascade before WireGuard upstream"))
+        return 1;
+    tunnelled.upstreams.clear();
+    Aowis::Map::MapCascadeUpstream via_tunnel;
+    via_tunnel.name = QStringLiteral("regional");
+    via_tunnel.url = QUrl(QStringLiteral("https://regional.example.invalid"));
+    via_tunnel.api_key = QByteArrayLiteral("regional-read");
+    via_tunnel.wireguard_profile_id = QStringLiteral("019a47b1-2040-7af9-8d1c-2670badb6399");
+    Aowis::Map::MapCascadeUpstream direct_backup;
+    direct_backup.name = QStringLiteral("backup");
+    direct_backup.url = QUrl(QStringLiteral("https://backup.example.invalid"));
+    tunnelled.upstreams.append(via_tunnel);
+    tunnelled.upstreams.append(direct_backup);
+    Aowis::Map::MapCascadeConfig invalid_profile = tunnelled;
+    invalid_profile.upstreams[0].wireguard_profile_id = QStringLiteral("not-a-profile-id");
+    if (!require(!reopened->saveCascade(invalid_profile, tunnel_revision, nullptr, &error),
+                 "Invalid WireGuard profile reference accepted"))
+        return 1;
+    QString tunnel_saved_revision;
+    if (!require(reopened->saveCascade(tunnelled, tunnel_revision, &tunnel_saved_revision, &error),
+                 "Save WireGuard upstream"))
+        return 1;
+    Aowis::Map::MapCascadeConfig tunnelled_loaded;
+    if (!require(reopened->readCascade(&tunnelled_loaded, nullptr, &error) &&
+                 tunnelled_loaded.upstreams == tunnelled.upstreams,
+                 "WireGuard upstream reference did not round-trip"))
+        return 1;
+    {
+        const aowis::config::Result<aowis::config::OwnerId> transport_owner =
+            aowis::config::OwnerId::parse("standalone-map");
+        const aowis::config::Result<aowis::config::ConfigRoot> transport_root =
+            aowis::config::ConfigRoot::fromOwnerRoot(transport_owner.value(),
+                                                    std::filesystem::path(root.toStdString()));
+        const aowis::config::Result<aowis::config::OwnerStore> transport_store =
+            aowis::config::OwnerStore::open(transport_root.value());
+        const aowis::config::Result<aowis::config::ObjectCollection> cascade_records =
+            transport_store.value().collection("cascade");
+        const aowis::config::Result<aowis::config::ObjectSnapshot> snapshot =
+            cascade_records.value().readAll();
+        if (!require(snapshot.hasValue() && snapshot.value().objects.size() == 1,
+                     "Read raw cascade record"))
+            return 1;
+        const aowis::config::StoredObject stored = snapshot.value().objects.front();
+        const QJsonObject record = QJsonDocument::fromJson(
+            QByteArray::fromStdString(stored.json)).object();
+        const QJsonArray stored_upstreams = record.value(QStringLiteral("upstreams")).toArray();
+        const QJsonObject transport = stored_upstreams.at(0).toObject()
+            .value(QStringLiteral("transport")).toObject();
+        if (!require(record.value(QStringLiteral("version")).toInt() == 2 &&
+                     transport.value(QStringLiteral("type")).toString() == QStringLiteral("wireguard") &&
+                     transport.value(QStringLiteral("profile_id")).toString() ==
+                         via_tunnel.wireguard_profile_id &&
+                     !stored_upstreams.at(1).toObject().contains(QStringLiteral("transport")),
+                     "WireGuard upstream not stored as a version 2 profile reference"))
+            return 1;
+        const QJsonObject unusable[] = {
+            QJsonObject{{QStringLiteral("type"), QStringLiteral("carrier-pigeon")}},
+            QJsonObject{{QStringLiteral("type"), QStringLiteral("wireguard")}}};
+        for (const QJsonObject &planted_transport : unusable)
+        {
+            QJsonArray planted_upstreams = stored_upstreams;
+            QJsonObject planted_upstream = planted_upstreams.at(0).toObject();
+            planted_upstream.insert(QStringLiteral("transport"), planted_transport);
+            planted_upstreams.replace(0, planted_upstream);
+            QJsonObject planted = record;
+            planted.insert(QStringLiteral("upstreams"), planted_upstreams);
+            const aowis::config::Result<aowis::config::StoredObject> current =
+                cascade_records.value().read(stored.info.id);
+            const aowis::config::Result<aowis::config::StoredObject> updated =
+                cascade_records.value().update(stored.info.id,
+                    QJsonDocument(planted).toJson(QJsonDocument::Compact).toStdString(),
+                    current.value().info.revision);
+            Aowis::Map::MapCascadeConfig refused;
+            if (!require(updated.hasValue() &&
+                         !reopened->readCascade(&refused, nullptr, &error),
+                         "Unusable upstream transport did not fail closed"))
+                return 1;
+        }
+        const aowis::config::Result<aowis::config::StoredObject> current =
+            cascade_records.value().read(stored.info.id);
+        if (!require(cascade_records.value().update(stored.info.id, stored.json,
+                         current.value().info.revision).hasValue(),
+                     "Restore valid cascade record"))
+            return 1;
+    }
+
     // CONFIG rejects any ambiguous collection, so a second record must not
     // silently become a new default that could re-enable direct fetching.
     const aowis::config::Result<aowis::config::OwnerId> owner =

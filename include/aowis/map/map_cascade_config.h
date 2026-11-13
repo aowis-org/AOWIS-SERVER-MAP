@@ -47,11 +47,25 @@ struct MapCascadeUpstream
     QString name;
     QUrl url;
     QByteArray api_key;
+    // Stable ID of the hosting application's central WireGuard profile this
+    // upstream must be reached through; empty: direct HTTP(S). MAP stores
+    // only this reference (never keys or WireGuard configuration). An
+    // upstream with a profile is never contacted directly: MAP skips it
+    // unless its host provides that tunnel's transport.
+    QString wireguard_profile_id;
 };
 
 inline bool operator==(const MapCascadeUpstream &left, const MapCascadeUpstream &right)
 {
-    return left.name == right.name && left.url == right.url && left.api_key == right.api_key;
+    return left.name == right.name && left.url == right.url && left.api_key == right.api_key &&
+           left.wireguard_profile_id == right.wireguard_profile_id;
+}
+
+// True when the upstream must not be contacted without a host-provided
+// WireGuard transport.
+inline bool requiresWireGuardTransport(const MapCascadeUpstream &upstream)
+{
+    return !upstream.wireguard_profile_id.isEmpty();
 }
 
 inline bool operator!=(const MapCascadeUpstream &left, const MapCascadeUpstream &right)

@@ -389,6 +389,8 @@ MapTiles::TileRequestResult MapTiles::getTile(const QString &provider, int z, in
         for (const Aowis::Map::MapCascadeUpstream &upstream : this->cascade_config.upstreams)
         {
             if (upstream.name != name) continue;
+            // Never contacted directly; this engine has no WireGuard transport.
+            if (Aowis::Map::requiresWireGuardTransport(upstream)) break;
             const QString upstream_origin = upstream.url.toString(
                 QUrl::RemovePath | QUrl::RemoveQuery | QUrl::RemoveFragment);
             if (this->cascade_cooldown_until_ms.value(upstream_origin) > now_ms ||

@@ -1,6 +1,7 @@
 #include "../src/server/configuration.h"
 
 #include <aowis/map/maptiles.h>
+#include <aowis/map/provider_catalog.h>
 #include <aowis/map/terrain_data.h>
 #include <QCoreApplication>
 #include <QDir>
@@ -11,6 +12,7 @@
 #include <QTcpSocket>
 #include <QTemporaryDir>
 #include <QTimer>
+#include <QUrl>
 
 #include <cstdio>
 
@@ -219,5 +221,65 @@ int main(int argc, char **argv)
                defaults.cascade.upstreams.isEmpty() && defaults.cascade.allow_direct_fetch &&
                !defaults.cascade.poor_internet_mode,
                "Default INI breaks existing fetch mode")) return 1;
+
+    // An upstream designated for WireGuard is never contacted directly by
+    // raster tiles, terrain or provider discovery: the next direct upstream
+    // is used instead.
+    StubHttpServer tunnelled;
+    StubHttpServer plain;
+    if (!check(tunnelled.start() && plain.start(), "Could not start WireGuard test servers"))
+        return 1;
+    Aowis::Map::MapCascadeConfig wireguard_cascade;
+    wireguard_cascade.allow_direct_fetch = false;
+    Aowis::Map::MapCascadeUpstream via_tunnel;
+    via_tunnel.name = QStringLiteral("tunnelled");
+    via_tunnel.url = QUrl(QString::fromUtf8(tunnelled.origin()));
+    via_tunnel.wireguard_profile_id = QStringLiteral("019a47b1-2040-7af9-8d1c-2670badb6399");
+    Aowis::Map::MapCascadeUpstream direct_upstream;
+    direct_upstream.name = QStringLiteral("plain");
+    direct_upstream.url = QUrl(QString::fromUtf8(plain.origin()));
+    wireguard_cascade.upstreams.append(via_tunnel);
+    wireguard_cascade.upstreams.append(direct_upstream);
+    MapTiles wireguard_tiles(QDir(directory.path()).filePath(QStringLiteral("wireguard")), 1, 2);
+    wireguard_tiles.configureProviders(providers, {}, {});
+    wireguard_tiles.setCascadeConfig(wireguard_cascade);
+    bool wireguard_failed = false;
+    QEventLoop wireguard_loop;
+    QObject::connect(&wireguard_tiles, &MapTiles::tileFailed, &wireguard_loop,
+                     [&wireguard_failed, &wireguard_loop](const QString &key, MapTiles::TileFailureReason)
+    {
+        if (key != QStringLiteral("wireguard-miss")) return;
+        wireguard_failed = true;
+        wireguard_loop.quit();
+    });
+    QTimer wireguard_timeout;
+    wireguard_timeout.setSingleShot(true);
+    QObject::connect(&wireguard_timeout, &QTimer::timeout, &wireguard_loop, &QEventLoop::quit);
+    if (!check(wireguard_tiles.getTile(provider, 1, 0, 0, QStringLiteral("wireguard-miss")).status ==
+                   MapTiles::TileRequestStatus::Pending,
+               "Direct upstream after a WireGuard upstream was not queued")) return 1;
+    wireguard_timeout.start(5000);
+    wireguard_loop.exec();
+    if (!check(wireguard_failed && plain.requests.size() == 1 && tunnelled.requests.isEmpty(),
+               "Raster tiles contacted a WireGuard upstream directly")) return 1;
+
+    Aowis::Map::TerrainData::Config wireguard_terrain_config;
+    wireguard_terrain_config.cache_base_directory =
+        QDir(directory.path()).filePath(QStringLiteral("wireguard-terrain"));
+    wireguard_terrain_config.cascade = wireguard_cascade;
+    wireguard_terrain_config.cascade.upstreams.removeLast();
+    Aowis::Map::TerrainData wireguard_terrain(wireguard_terrain_config);
+    if (!check(wireguard_terrain.initialize(&terrain_error), "Could not initialize WireGuard terrain"))
+        return 1;
+    wireguard_terrain.acquireTileSources(QStringLiteral("copernicus-glo30"), address);
+
+    Aowis::Map::ProviderCatalog catalog(QDir(directory.path()).filePath(QStringLiteral("catalog")));
+    catalog.configure({}, wireguard_terrain_config.cascade);
+    catalog.refresh();
+    QEventLoop settle;
+    QTimer::singleShot(300, &settle, &QEventLoop::quit);
+    settle.exec();
+    if (!check(tunnelled.requests.isEmpty(),
+               "Terrain or provider discovery contacted a WireGuard upstream directly")) return 1;
     return 0;
 }

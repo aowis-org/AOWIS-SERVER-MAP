@@ -25,6 +25,10 @@ namespace Aowis::Map
 namespace
 {
 constexpr int SettingsVersion = 1;
+// Cascade records with a WireGuard upstream are written as version 2 so a
+// MAP release that does not know transports rejects them instead of
+// contacting such an upstream directly. Version 1 records stay readable.
+constexpr int CascadeTransportVersion = 2;
 constexpr int MaximumUpstreams = 32;
 constexpr int MaximumProviders = 100;
 
@@ -53,16 +57,25 @@ bool isInteger(const QJsonValue &value, int minimum, int maximum)
 QJsonObject encodeCascadeObject(const MapCascadeConfig &value)
 {
     QJsonArray upstreams;
+    bool transports = false;
     for (const MapCascadeUpstream &upstream : value.upstreams)
     {
-        upstreams.append(QJsonObject{
+        QJsonObject object{
             {QStringLiteral("name"), upstream.name},
             {QStringLiteral("url"), upstream.url.toString(QUrl::FullyEncoded)},
             {QStringLiteral("api_key"), QString::fromUtf8(upstream.api_key)}
-        });
+        };
+        if (requiresWireGuardTransport(upstream))
+        {
+            transports = true;
+            object.insert(QStringLiteral("transport"), QJsonObject{
+                {QStringLiteral("type"), QStringLiteral("wireguard")},
+                {QStringLiteral("profile_id"), upstream.wireguard_profile_id}});
+        }
+        upstreams.append(object);
     }
     return QJsonObject{
-        {QStringLiteral("version"), SettingsVersion},
+        {QStringLiteral("version"), transports ? CascadeTransportVersion : SettingsVersion},
         {QStringLiteral("upstreams"), upstreams},
         {QStringLiteral("allow_direct_fetch"), value.allow_direct_fetch},
         {QStringLiteral("poor_internet_mode"), value.poor_internet_mode},
@@ -73,7 +86,7 @@ QJsonObject encodeCascadeObject(const MapCascadeConfig &value)
 
 bool decodeCascadeObject(const QJsonObject &stored, MapCascadeConfig *value, QString *error)
 {
-    if (!isInteger(stored.value(QStringLiteral("version")), SettingsVersion, SettingsVersion) ||
+    if (!isInteger(stored.value(QStringLiteral("version")), SettingsVersion, CascadeTransportVersion) ||
         !stored.value(QStringLiteral("upstreams")).isArray() ||
         !stored.value(QStringLiteral("allow_direct_fetch")).isBool() ||
         !stored.value(QStringLiteral("poor_internet_mode")).isBool() ||
@@ -103,6 +116,19 @@ bool decodeCascadeObject(const QJsonObject &stored, MapCascadeConfig *value, QSt
         upstream.name = object.value(QStringLiteral("name")).toString();
         upstream.url = QUrl(object.value(QStringLiteral("url")).toString(), QUrl::StrictMode);
         upstream.api_key = object.value(QStringLiteral("api_key")).toString().toUtf8();
+        if (object.contains(QStringLiteral("transport")))
+        {
+            // Only "direct" and "wireguard" exist; anything else fails closed.
+            const QJsonObject transport = object.value(QStringLiteral("transport")).toObject();
+            const QString type = transport.value(QStringLiteral("type")).toString();
+            // A WireGuard transport without a profile is not direct either.
+            if (type == QStringLiteral("wireguard") &&
+                !transport.value(QStringLiteral("profile_id")).toString().isEmpty())
+                upstream.wireguard_profile_id =
+                    transport.value(QStringLiteral("profile_id")).toString();
+            else if (type != QStringLiteral("direct"))
+                return fail(error, QStringLiteral("Invalid MAP upstream transport"));
+        }
         parsed.upstreams.append(upstream);
     }
     if (!validateCascadeSettings(parsed, error))
@@ -327,6 +353,9 @@ bool validateCascadeSettings(const MapCascadeConfig &value, QString *error)
         if (!valid_name.match(upstream.name).hasMatch() || names.contains(upstream.name))
             return fail(error, QStringLiteral("Invalid or duplicate MAP upstream name"));
         names.insert(upstream.name);
+        if (requiresWireGuardTransport(upstream) &&
+            QUuid::fromString(upstream.wireguard_profile_id).isNull())
+            return fail(error, QStringLiteral("Invalid MAP upstream WireGuard profile ID"));
         const QUrl &url = upstream.url;
         const QString scheme = url.scheme().toLower();
         if (!url.isValid() || (scheme != QStringLiteral("http") &&
