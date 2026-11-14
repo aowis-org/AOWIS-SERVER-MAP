@@ -489,6 +489,7 @@ if(BUILD_TESTING)
         aowis-server-map-provider-limits-test
         aowis-server-map-cache-reuse-test
         aowis-server-map-raster-cascade-test
+        aowis-server-map-cascade-upstream-health-test
         aowis-server-map-raster-transfer-test
         aowis-server-map-download-coverage-test
         aowis-server-map-terrain-tile-format-test
