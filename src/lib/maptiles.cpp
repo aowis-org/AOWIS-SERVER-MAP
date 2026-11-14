@@ -224,18 +224,36 @@ void MapTiles::configureProviders(const QVector<Aowis::Map::MapProvider> &provid
                                   const QHash<QString, QStringList> &upstream_routes,
                                   const QHash<QString, Aowis::Map::MapProviderAcquisitionMode> &modes)
 {
-    ++this->cache_generation;
+    QHash<QString, Aowis::Map::MapProvider> next;
+    for (const Aowis::Map::MapProvider &provider : providers)
+        if (provider.enabled) next.insert(provider.id, provider);
+    // Cached tiles belong to a provider ID and its source URL (see
+    // providerCachePath). Only a change of that pairing invalidates them.
+    // Provider discovery reapplies the catalog whenever an upstream's
+    // advertisement changes (routes, inherited upstreams, modes); resetting
+    // the caches each time canceled in-flight disk reads (HTTP 503) and
+    // emptied the RAM cache for nothing.
+    bool sources_changed = next.size() != this->configured_providers.size();
+    for (QHash<QString, Aowis::Map::MapProvider>::const_iterator provider = next.constBegin();
+         !sources_changed && provider != next.constEnd(); ++provider)
+    {
+        const QHash<QString, Aowis::Map::MapProvider>::const_iterator current =
+            this->configured_providers.constFind(provider.key());
+        sources_changed = current == this->configured_providers.constEnd() ||
+                          current->url_template != provider->url_template;
+    }
     this->inherited_upstreams = inherited_upstreams;
     this->upstream_routes = upstream_routes;
     this->acquisition_modes = modes;
-    this->configured_providers.clear();
+    this->configured_providers = next;
+    this->download_coverage = coverage;
+    this->default_coverage = default_coverage;
+    if (!sources_changed)
+        return;
+    ++this->cache_generation;
     this->permanent_cached_keys.clear();
     this->provider_cache_paths.clear();
     this->tile_memory_cache.clear();
-    for (const Aowis::Map::MapProvider &provider : providers)
-        if (provider.enabled) this->configured_providers.insert(provider.id, provider);
-    this->download_coverage = coverage;
-    this->default_coverage = default_coverage;
 }
 
 QString MapTiles::domainRandomizer(const QString &url) const
