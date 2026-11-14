@@ -1,5 +1,7 @@
 #include "http_client_tilefetch.h"
 
+#include <aowis/map/cascade_upstream_health.h>
+
 #include <QMetaObject>
 #include <QPointer>
 #include <QThread>
@@ -90,6 +92,14 @@ void TileHttpClient::prepareRequest(QNetworkRequest *request) const
                               "adaptive-jpeg;quality=" + QByteArray::number(this->cascade_jpeg_quality));
 }
 
+void TileHttpClient::recordResponder(QNetworkReply *reply)
+{
+    if (!this->cascade_request) return;
+    const QByteArray instance = reply->rawHeader(Aowis::Map::CascadeInstanceHeader).trimmed();
+    this->upstream_answered = Aowis::Map::isCascadeInstanceId(instance);
+    this->responder_instance = this->upstream_answered ? instance : QByteArray();
+}
+
 void TileHttpClient::get(const QString &endpoint)
 {
     this->cancel_requested = false;
@@ -134,8 +144,11 @@ void TileHttpClient::getAttempt(const QString &endpoint, int attempt)
     request.setRawHeader("User-Agent", "aowis-server-map/1.0 (https://github.com/aowis-org/AOWIS-SERVER-MAP)");
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/octet-stream");
     request.setRawHeader("Accept", "*/*");
-    prepareRequest(&request);
+    // Generic Windows tile timeout first: prepareRequest() then applies the
+    // shorter cascade timeout, so a dead MAP upstream fails over after 10 s
+    // like on the other platforms instead of after 20 s.
     request.setTransferTimeout(transfer_timeout_ms);
+    prepareRequest(&request);
     request.setAttribute(QNetworkRequest::Http2AllowedAttribute, false);
 
     QNetworkReply *reply = this->network_manager->get(request);
@@ -215,6 +228,7 @@ void TileHttpClient::handleReply(QNetworkReply *reply, bool validate_tile_respon
         return;
     }
 
+    recordResponder(reply);
     const bool overall_timeout = reply->property("aowis_overall_timeout").toBool();
     const QNetworkReply::NetworkError network_error = reply->error();
 
@@ -222,7 +236,9 @@ void TileHttpClient::handleReply(QNetworkReply *reply, bool validate_tile_respon
         network_error == QNetworkReply::TimeoutError ||
         network_error == QNetworkReply::OperationCanceledError)
     {
-        if (validate_tile_response && attempt < timeout_retry_count)
+        // A MAP upstream is not retried here: the cascade fails over to the
+        // next source instead, and a retry would double the wait.
+        if (validate_tile_response && attempt < timeout_retry_count && !this->cascade_request)
         {
             reply->deleteLater();
             QTimer::singleShot(timeout_retry_delay_ms, this, [this, endpoint, attempt]()
@@ -250,7 +266,12 @@ void TileHttpClient::handleReply(QNetworkReply *reply, bool validate_tile_respon
         return;
     }
 
-    if (network_error != QNetworkReply::NoError)
+    // Qt also reports HTTP 4xx/5xx statuses as network errors. For a MAP
+    // upstream those are answers and are classified by status below; only
+    // a request that got no HTTP response at all is a transport failure.
+    if (network_error != QNetworkReply::NoError &&
+        !(this->cascade_request &&
+          reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).isValid()))
     {
         emit requestError(this->cascade_request ? RequestFailureReason::TransientError
                                                 : RequestFailureReason::UpstreamError,
@@ -280,6 +301,7 @@ void TileHttpClient::handleReply(QNetworkReply *reply, bool validate_tile_respon
         return;
     }
 
+    recordResponder(reply);
     const bool overall_timeout = reply->property("aowis_overall_timeout").toBool();
     if (overall_timeout || reply->error() == QNetworkReply::TimeoutError)
     {
@@ -291,7 +313,12 @@ void TileHttpClient::handleReply(QNetworkReply *reply, bool validate_tile_respon
         return;
     }
 
-    if (reply->error() != QNetworkReply::NoError)
+    // Qt also reports HTTP 4xx/5xx statuses as network errors. For a MAP
+    // upstream those are answers and are classified by status below; only
+    // a request that got no HTTP response at all is a transport failure.
+    if (reply->error() != QNetworkReply::NoError &&
+        !(this->cascade_request &&
+          reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).isValid()))
     {
         emit requestError(this->cascade_request ? RequestFailureReason::TransientError
                                                 : RequestFailureReason::UpstreamError,
@@ -321,8 +348,13 @@ void TileHttpClient::handleReply(QNetworkReply *reply, bool validate_tile_respon
     // In particular, never treat 202 (still fetching) or 206 as image data.
     if (this->cascade_request && status_code != 200)
     {
-        emit requestError(status_code >= 500 ? RequestFailureReason::TransientError
-                                              : RequestFailureReason::UpstreamError,
+        // An answer from a MAP server (busy, tile unavailable, its own source
+        // failed, loop refused) concerns this tile only. A 5xx without the
+        // MAP instance header came from something in between (e.g. a reverse
+        // proxy that cannot reach MAP) and is an outage of that upstream.
+        emit requestError(status_code >= 500 && !this->upstream_answered
+                              ? RequestFailureReason::TransientError
+                              : RequestFailureReason::UpstreamError,
                           QStringLiteral("MAP upstream returned HTTP %1").arg(status_code));
         reply->deleteLater();
         return;

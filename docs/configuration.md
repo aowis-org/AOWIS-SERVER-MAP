@@ -194,7 +194,7 @@ Use `ss -ltn | grep ':8122'` locally to confirm the listening socket. From anoth
 | `terrain/maximum_remote_workers` | `2` | Remote-capable acquisition worker pool |
 | `terrain/connect_timeout_seconds` | `30` | Copernicus connection/initial response deadline |
 | `terrain/inactivity_timeout_seconds` | `120` | Maximum network inactivity during transfer |
-| `terrain/download_deadline_seconds` | `1800` | Absolute Copernicus transfer deadline |
+| `terrain/download_deadline_seconds` | `1800` | Absolute Copernicus transfer deadline; also how long a downstream polls a MAP upstream for one terrain tile |
 | `terrain/cache_directory` | empty | Terrain root; defaults below raster cache root |
 | `terrain/coverage` | empty | Terrain download-coverage profile |
 | `storage/permanent_data_directory` | empty | Optional administrator-owned permanent data root |

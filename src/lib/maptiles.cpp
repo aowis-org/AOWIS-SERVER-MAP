@@ -140,7 +140,7 @@ void MapTiles::setCascadeConfig(const Aowis::Map::MapCascadeConfig &config)
     this->cascade_config = config;
     if (!sources_changed)
         return;
-    this->cascade_cooldown_until_ms.clear();
+    this->upstream_health.reset();
     cancelUpstreamDownloads();
     // Managers of tunnels no longer configured (stopped or restarted on
     // another port) go once the canceled replies are finished.
@@ -398,6 +398,9 @@ MapTiles::TileRequestResult MapTiles::getTile(const QString &provider, int z, in
     const QString path = QStringLiteral("/%1/%2/%3/%4.png")
         .arg(provider).arg(z).arg(wrapped_x).arg(y);
     const qint64 now_ms = QDateTime::currentMSecsSinceEpoch();
+    // IDs of the MAP servers this request already passed through. An
+    // upstream among them is waiting for us: asking it can only time out.
+    const QList<QByteArray> trace_ids = Aowis::Map::cascadeTraceIds(cascade_trace);
     const bool inherited = this->inherited_upstreams.contains(provider);
     Aowis::Map::MapProviderAcquisitionMode mode = this->acquisition_modes.value(
         provider, inherited ? Aowis::Map::MapProviderAcquisitionMode::Cascade
@@ -423,7 +426,8 @@ MapTiles::TileRequestResult MapTiles::getTile(const QString &provider, int z, in
             if (!Aowis::Map::cascadeUpstreamUsable(upstream)) break;
             const QString upstream_origin = upstream.url.toString(
                 QUrl::RemovePath | QUrl::RemoveQuery | QUrl::RemoveFragment);
-            if (this->cascade_cooldown_until_ms.value(upstream_origin) > now_ms ||
+            if (this->upstream_health.coolingDown(upstream.name, now_ms) ||
+                this->upstream_health.instanceInTrace(upstream.name, trace_ids) ||
                 (this->inherited_upstreams.contains(provider) &&
                  !this->inherited_upstreams.value(provider).contains(upstream.name)))
                 break;
@@ -431,6 +435,7 @@ MapTiles::TileRequestResult MapTiles::getTile(const QString &provider, int z, in
             source.url = upstream_origin + path;
             source.api_key = upstream.api_key;
             source.cascade = true;
+            source.upstream_name = upstream.name;
             if (Aowis::Map::hasWireGuardTransport(upstream))
             {
                 source.tunnelled = true;
@@ -450,8 +455,11 @@ MapTiles::TileRequestResult MapTiles::getTile(const QString &provider, int z, in
     if (download.sources.isEmpty())
         return { TileRequestStatus::Unavailable, {} };
     download.url = download.sources.first().url;
-    if (scheduleMapTileDownload(download) == DownloadScheduleStatus::QueueFull)
+    const DownloadScheduleStatus scheduled = scheduleMapTileDownload(download);
+    if (scheduled == DownloadScheduleStatus::QueueFull)
         return { TileRequestStatus::ServerBusy, {} };
+    if (scheduled == DownloadScheduleStatus::LoopRefused)
+        return { TileRequestStatus::Unavailable, {} };
 
     return { TileRequestStatus::Pending, {} };
 }
@@ -722,6 +730,11 @@ int MapTiles::deleteTiles(const QString &provider, int zoom, int tile_x_min, int
     return deleted_count;
 }
 
+QHash<QString, Aowis::Map::CascadeUpstreamState> MapTiles::upstreamHealth() const
+{
+    return this->upstream_health.snapshot();
+}
+
 MapTiles::UpstreamActivity MapTiles::upstreamActivity() const
 {
     QMutexLocker locker(&this->downloads_mutex);
@@ -741,6 +754,7 @@ void MapTiles::cancelUpstreamDownloads()
         while (!this->downloads_queued.isEmpty())
         {
             const QueuedDownload download = this->downloads_queued.dequeue();
+            this->downloads_current_upstream.remove(download.canonical_key);
             queued_response_keys.append(takeResponseKeysLocked(download));
             this->downloads_invalidated.remove(download.canonical_key);
         }
@@ -768,6 +782,19 @@ MapTiles::DownloadScheduleStatus MapTiles::scheduleMapTileDownload(const QueuedD
         if (this->downloads_active.contains(download.canonical_key) ||
             this->downloads_queued_keys.contains(download.canonical_key))
         {
+            // A, B upstreams of each other, both missing the same tile: A's
+            // download asks B, and B's download asks A. Joining each other's
+            // request would make both wait until the transfer timeout. The
+            // one with the higher instance ID refuses: the other gets a fast,
+            // answered "unavailable", tries its next source, and its result
+            // then also completes the download waiting for it.
+            // download.cascade_trace is the incoming trace plus our own ID.
+            const QString asked = this->downloads_current_upstream.value(download.canonical_key);
+            if (!asked.isEmpty() &&
+                this->upstream_health.refusesJoin(
+                    asked, Aowis::Map::cascadeTraceIds(download.cascade_trace),
+                    this->cascade_instance_id))
+                return DownloadScheduleStatus::LoopRefused;
             // Join the running or queued download. Without this, a request
             // with a different response key would never receive a result.
             if (!download.response_key.isEmpty())
@@ -792,6 +819,8 @@ MapTiles::DownloadScheduleStatus MapTiles::scheduleMapTileDownload(const QueuedD
             this->downloads_queued.enqueue(download);
             this->downloads_queued_keys.insert(download.canonical_key);
         }
+        this->downloads_current_upstream.insert(download.canonical_key,
+                                                download.sources.first().upstream_name);
     }
 
     if (start_immediately)
@@ -822,6 +851,7 @@ void MapTiles::markDownloadStartedLocked(const QueuedDownload &download)
 void MapTiles::markDownloadFinishedLocked(const QueuedDownload &download)
 {
     this->downloads_active.remove(download.canonical_key);
+    this->downloads_current_upstream.remove(download.canonical_key);
 
     const QString origin = downloadOrigin(download.url);
     const int remaining = this->downloads_active_per_origin.value(origin, 0) - 1;
@@ -829,6 +859,21 @@ void MapTiles::markDownloadFinishedLocked(const QueuedDownload &download)
         this->downloads_active_per_origin.insert(origin, remaining);
     else
         this->downloads_active_per_origin.remove(origin);
+}
+
+void MapTiles::moveDownloadOriginLocked(const QString &from_url, const QString &to_url)
+{
+    const QString from = downloadOrigin(from_url);
+    const QString to = downloadOrigin(to_url);
+    if (from == to) return;
+    const int remaining = this->downloads_active_per_origin.value(from, 0) - 1;
+    if (remaining > 0)
+        this->downloads_active_per_origin.insert(from, remaining);
+    else
+        this->downloads_active_per_origin.remove(from);
+    // May briefly exceed MaximumActiveDownloadsPerOrigin: the slot is
+    // already held, and a failover must not wait behind new requests.
+    this->downloads_active_per_origin.insert(to, this->downloads_active_per_origin.value(to, 0) + 1);
 }
 
 QStringList MapTiles::takeResponseKeysLocked(const QueuedDownload &download)
@@ -863,10 +908,16 @@ void MapTiles::attemptMapTileDownload(const QueuedDownload &download, int source
     {
         QMutexLocker locker(&this->downloads_mutex);
         this->downloads_active_clients.insert(download.canonical_key, rest);
+        this->downloads_current_upstream.insert(download.canonical_key, source.upstream_name);
     }
     connect(rest, &TileHttpClient::requestFinished, this,
-            [this, rest, download](const QByteArray &data, bool may_store)
+            [this, rest, download, source_index](const QByteArray &data, bool may_store)
     {
+        const DownloadSource &succeeded_source = download.sources.at(source_index);
+        if (succeeded_source.cascade)
+            this->upstream_health.recordAnswered(succeeded_source.upstream_name,
+                                                 rest->responderInstance(),
+                                                 QDateTime::currentMSecsSinceEpoch());
         bool invalidated = false;
         QStringList response_keys;
         {
@@ -948,18 +999,19 @@ void MapTiles::attemptMapTileDownload(const QueuedDownload &download, int source
         else if (reason != TileHttpClient::RequestFailureReason::Cancelled)
             qWarning() << "Tile request failed:" << download.response_key << error;
 
-        // Temporarily skip unreachable origins for new tile requests. Do not
-        // quarantine 404, authentication or source-mismatch responses: they
-        // describe a particular request, not a transient server outage.
-        if (download.sources.at(source_index).cascade &&
-            (reason == TileHttpClient::RequestFailureReason::TransientError ||
-             reason == TileHttpClient::RequestFailureReason::Timeout))
+        // Temporarily skip unreachable upstreams for new tile requests (with
+        // an exponential cooldown). Answered failures (404, busy, source
+        // failed, mismatch) describe this tile only and end any cooldown.
+        const DownloadSource &failed_source = download.sources.at(source_index);
+        if (failed_source.cascade && reason != TileHttpClient::RequestFailureReason::Cancelled)
         {
-            const QUrl upstream_url(download.sources.at(source_index).url);
-            const QString upstream_origin = upstream_url.toString(
-                QUrl::RemovePath | QUrl::RemoveQuery | QUrl::RemoveFragment);
-            this->cascade_cooldown_until_ms.insert(
-                upstream_origin, QDateTime::currentMSecsSinceEpoch() + 5000);
+            const qint64 now_ms = QDateTime::currentMSecsSinceEpoch();
+            if (rest->upstreamAnswered())
+                this->upstream_health.recordAnswered(failed_source.upstream_name,
+                                                     rest->responderInstance(), now_ms);
+            else if (reason == TileHttpClient::RequestFailureReason::TransientError ||
+                     reason == TileHttpClient::RequestFailureReason::Timeout)
+                this->upstream_health.recordUnreachable(failed_source.upstream_name, error, now_ms);
         }
 
         // A failed attempt still owns the same active slot and joined waiters.
@@ -975,7 +1027,13 @@ void MapTiles::attemptMapTileDownload(const QueuedDownload &download, int source
             source_index + 1 < download.sources.size())
         {
             rest->deleteLater();
-            attemptMapTileDownload(download, source_index + 1);
+            QueuedDownload next = download;
+            next.url = download.sources.at(source_index + 1).url;
+            {
+                QMutexLocker locker(&this->downloads_mutex);
+                moveDownloadOriginLocked(download.url, next.url);
+            }
+            attemptMapTileDownload(next, source_index + 1);
             return;
         }
 

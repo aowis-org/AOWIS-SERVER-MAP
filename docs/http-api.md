@@ -43,6 +43,8 @@ curl -fsS http://127.0.0.1:8122/upstream/v1/activity
 
 Activity is JSON with `map_tiles` and `terrain` objects, each containing `active` and `queued` integer counts. These are upstream activity counters, not a complete dump of every admitted terrain job or a memory usage metric.
 
+It also has this server's cascade `instance` ID and an `upstreams` array, one entry per configured MAP upstream: `name`, `transport` (`direct` or `wireguard`), `usable` (`false` when a WireGuard upstream has no tunnel in this process, so it is skipped) and, separately for `map_tiles` and `terrain`, `consecutive_failures`, `cooldown_remaining_ms`, `last_answer_unix_ms`, `last_failure_unix_ms`, `last_error` and the learned upstream `instance`. Only unreachable attempts count as failures; see [Cascading — reachability](map-cascading.md#reachability-cooldown-and-loops).
+
 ## Raster map tiles
 
 ```bash
@@ -72,7 +74,10 @@ The response is a JSON object with a `providers` array; each entry contains `id`
 MAP servers and GUI clients. Each entry has the usual provider fields plus
 `origin` (`local` or `inherited`), `upstreams` (advertising immediate MAP peers),
 `selected_upstreams` (effective ordered routing subset), `acquisition_mode`
-(`automatic`, `cascade`, `direct`) and `direct_fetch_allowed` (boolean).
+(`automatic`, `cascade`, `direct`), `direct_fetch_allowed` (boolean) and
+`via` (cascade instance IDs of the MAP servers the definition passed through,
+this server first; an entry whose `via` already contains the downstream's own
+ID, or has 8 entries, is not inherited).
 This endpoint requires the ordinary read API key if configured.
 It retains validated, last-known-good inherited providers when an upstream is
 unreachable. Editing via PUT remains **local-only**; it cannot alter inherited
@@ -169,6 +174,8 @@ The dataset catalog describes supported terrain sources, zoom ranges, nominal re
 
 A tile missing from the normalized cache can be generated from cached native COGs or newly downloaded source data when permitted. An unavailable tile returns `404`, an upstream fetch failure `502`, and a malformed dataset/address `400`. Corrupt tiles or local provider errors use `500`; disabled/uninitialized terrain uses `503`. **Don't mistake a valid route returning 404 for a successful cache benchmark.**
 
+With `X-AOWIS-Tile-Delivery: cache-first` (or `?delivery=cache-first`), a tile that still needs remote source acquisition is **not** waited for: the server starts (or joins) the acquisition and answers **`202 Accepted`** with `Retry-After: 2`. The acquisition continues when the client disconnects; poll again until `200`. If that acquisition failed, the next poll receives its error once (e.g. `502`), and the poll after that starts a new attempt. Downstream MAP servers always request terrain this way.
+
 ## Point elevations
 
 ```bash
@@ -218,7 +225,7 @@ Terrain deletion runs outside the HTTP event loop. Active source file locks and 
 | Status | Typical meaning |
 | --- | --- |
 | `200` | Requested response completed |
-| `202` | Cache-first raster tile still being fetched |
+| `202` | Cache-first raster tile still being fetched, or cache-first terrain tile being acquired |
 | `400` | Bad parameters, invalid raster request or unsupported datum conversion |
 | `401` | Invalid/missing required API key |
 | `403` | Requested acquisition mode forbidden by administrator policy |
@@ -227,5 +234,8 @@ Terrain deletion runs outside the HTTP event loop. Active source file locks and 
 | `500` | Local provider, cache or internal failure |
 | `502` | Remote terrain source acquisition failure |
 | `503` | Disabled terrain, uninitialized subsystem or admission overload |
+| `508` | Raster request with a cyclic MAP cascade trace |
+
+Raster tile, terrain tile and provider-catalog responses carry `X-AOWIS-Instance` (this server's cascade instance ID), whatever their status. Admission-overload `503` responses additionally carry `X-AOWIS-Upstream-Status: busy`. Downstream MAP servers use both to tell an answer about one tile from an unreachable upstream.
 
 Cache hits remain usable in offline mode. Separate `downloads/remote_fetch_enabled` and `terrain/remote_fetch_enabled` switches control **new** upstream acquisition. An explicit geographical coverage policy restricts downloads, not what cached data may be served.

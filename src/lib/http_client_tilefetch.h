@@ -36,6 +36,12 @@ public:
     void get(const QString &endpoint);
     void post(const QString &endpoint, const QJsonObject &payload);
     void cancel();
+    // Cascade requests only, valid once requestFinished/requestError was
+    // emitted: whether a MAP server answered (its X-AOWIS-Instance header
+    // was present, whatever the HTTP status), and its instance ID. An
+    // answered failure concerns one tile, not the upstream's reachability.
+    bool upstreamAnswered() const { return this->upstream_answered; }
+    QByteArray responderInstance() const { return this->responder_instance; }
 
 private:
 #ifdef Q_OS_WIN
@@ -45,6 +51,7 @@ private:
 #else
     void handleReply(QNetworkReply *reply, bool validate_tile_response);
 #endif
+    void recordResponder(QNetworkReply *reply);
 
     QNetworkAccessManager *network_manager;
     QString url_base;
@@ -56,6 +63,8 @@ private:
     QByteArray cascade_visited;
     bool cascade_poor_internet = false;
     int cascade_jpeg_quality = 75;
+    bool upstream_answered = false;
+    QByteArray responder_instance;
     void prepareRequest(QNetworkRequest *request) const;
 
 signals:

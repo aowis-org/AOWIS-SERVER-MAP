@@ -134,6 +134,57 @@ requests**. A cascade cannot override them. Cycle detection uses a propagated
 visited-server trace and an eight-hop limit; provider-source fingerprints and
 terrain format/revision checks prevent mismatched data entering caches.
 
+### Reachability, cooldown and loops
+
+Every raster tile, terrain tile and provider-catalog response of a MAP server
+carries its cascade instance ID (`X-AOWIS-Instance`). A downstream uses it to
+tell two kinds of failure apart:
+
+- **Answered** (the header is present, any HTTP status): "tile not available",
+  "my own source failed", "busy" or a loop refusal. This concerns that tile
+  only. The upstream stays in use for all other tiles, and any cooldown ends.
+- **Unreachable** (connection failure, timeout, or a 5xx without the header,
+  e.g. from a reverse proxy that cannot reach MAP): the upstream is skipped
+  for new requests for 5 s, doubling with each further outage up to 60 s, and
+  reset by the next answer. Failures of requests that were already in flight
+  during a cooldown count as the same outage.
+
+A **busy** upstream (`X-AOWIS-Upstream-Status: busy`, its admission limits are
+full) never causes a direct Copernicus download: the terrain attempt fails and
+is retried later. Raster tiles may still use the next source, including the
+original provider when permitted, because a single tile is cheap.
+
+Servers may be upstreams of each other (for example two hubs backing each
+other up). The downstream learns each upstream's instance ID and:
+
+- never asks an upstream whose ID is already in the request's visited trace
+  (that upstream is waiting for this very request);
+- when two servers acquire the same tile and ask each other, the one with
+  the higher instance ID refuses the other's request with a fast answered
+  `503` instead of letting both wait until a timeout; the other tries its next
+  source, and its result then also completes the first server's download.
+  This covers servers that are directly each other's upstreams; a longer ring
+  (A → B → C → A) is still only broken by the request timeout;
+- ignores catalog entries whose `via` provenance already contains its own ID,
+  so a provider removed at its origin does not live on by being re-advertised
+  back and forth.
+
+`GET /upstream/v1/activity` shows per upstream whether it is usable, its
+cooldown, the last error and the learned instance ID.
+
+### Terrain through a cascade: cache-first polling
+
+A normalized terrain tile the hub does not have yet can require a long source
+download there (Copernicus allows up to 30 minutes). A downstream therefore
+requests terrain with `X-AOWIS-Tile-Delivery: cache-first`: the upstream
+starts (or joins) the acquisition, answers `202` with `Retry-After` at once,
+and keeps working even though nobody waits on the connection. The downstream
+polls every 1–5 s until the tile arrives, its own `terrain/download_deadline_seconds`
+passes, or its job is canceled. A failed upstream acquisition is reported to
+the next poll once. Each request is limited only by 10 s of **inactivity**, not
+by an overall deadline. Raster tiles are small and are still fetched in one
+request.
+
 ### Provider inheritance and per-provider routing
 
 `GET /map/v1/providers/available` merges local and upstream-advertised raster

@@ -51,6 +51,8 @@ endif()
 
 add_library(aowis-server-map-core STATIC
     src/lib/maptiles.cpp
+    src/lib/cascade_upstream_health.cpp
+    include/aowis/map/cascade_upstream_health.h
     src/lib/download_coverage.cpp
     src/lib/map_provider.cpp
     src/lib/provider_catalog.cpp
@@ -157,6 +159,13 @@ if(BUILD_TESTING)
     target_link_libraries(aowis-server-map-raster-cascade-test PRIVATE AOWIS::Map)
     add_test(NAME aowis-server-map-raster-cascade
              COMMAND aowis-server-map-raster-cascade-test)
+
+    add_executable(aowis-server-map-cascade-upstream-health-test
+        tests/test_map_cascade_upstream_health.cpp
+    )
+    target_link_libraries(aowis-server-map-cascade-upstream-health-test PRIVATE AOWIS::Map)
+    add_test(NAME aowis-server-map-cascade-upstream-health
+             COMMAND aowis-server-map-cascade-upstream-health-test)
 
     add_executable(aowis-server-map-cache-reuse-test
         tests/test_map_cache_reuse.cpp

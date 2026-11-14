@@ -1,5 +1,6 @@
 #include <aowis/map/provider_catalog.h>
 #include <aowis/map/settings_repository.h>
+#include <aowis/map/cascade_upstream_health.h>
 
 #include <QCryptographicHash>
 #include <QDir>
@@ -23,6 +24,30 @@ constexpr int CatalogRequestTimeoutMs = 6000;
 QString origin(const QUrl &url)
 {
     return url.toString(QUrl::RemovePath | QUrl::RemoveQuery | QUrl::RemoveFragment);
+}
+
+// The "via" provenance of each advertised provider. Malformed lists are
+// ignored entry by entry (an older upstream simply has none); they only
+// ever cause an entry to be dropped, never accepted.
+QHash<QString, QStringList> decodeVia(const QByteArray &payload)
+{
+    QHash<QString, QStringList> result;
+    const QJsonDocument document = QJsonDocument::fromJson(payload);
+    const QJsonArray providers = document.object().value(QStringLiteral("providers")).toArray();
+    for (const QJsonValue &value : providers)
+    {
+        const QJsonObject object = value.toObject();
+        // Same normalization as decodeProviderArray() applies to the ID.
+        const QString id = object.value(QStringLiteral("id")).toString().trimmed().toLower();
+        if (id.isEmpty() || !object.value(QStringLiteral("via")).isArray()) continue;
+        QStringList via;
+        const QJsonArray entries = object.value(QStringLiteral("via")).toArray();
+        for (const QJsonValue &entry : entries)
+            if (entry.isString() && Aowis::Map::isCascadeInstanceId(entry.toString().toLatin1()))
+                via.append(entry.toString());
+        result.insert(id, via);
+    }
+    return result;
 }
 }
 
@@ -57,6 +82,11 @@ bool ProviderCatalog::decode(const QByteArray &payload, QVector<MapProvider> *pr
     return decodeProviderCatalog(payload, {}, providers, &error);
 }
 
+void ProviderCatalog::setInstanceId(const QByteArray &instance_id)
+{
+    this->instance_id_ = instance_id;
+}
+
 void ProviderCatalog::configure(const QVector<MapProvider> &local_providers,
                                 const MapCascadeConfig &cascade)
 {
@@ -83,14 +113,19 @@ void ProviderCatalog::configure(const QVector<MapProvider> &local_providers,
     if (cascade.upstreams.isEmpty()) this->refresh_timer_.stop();
     else this->refresh_timer_.start();
     this->upstream_catalogs_.clear();
+    this->upstream_via_.clear();
     for (const MapCascadeUpstream &upstream : this->cascade_.upstreams)
     {
         QFile snapshot(cachePath(upstream));
         if (!snapshot.open(QIODevice::ReadOnly) || snapshot.size() > MaximumCatalogBytes)
             continue;
+        const QByteArray payload = snapshot.readAll();
         QVector<MapProvider> providers;
-        if (decode(snapshot.readAll(), &providers))
+        if (decode(payload, &providers))
+        {
             this->upstream_catalogs_.insert(upstream.name, providers);
+            this->upstream_via_.insert(upstream.name, decodeVia(payload));
+        }
     }
     rebuild();
 }
@@ -138,9 +173,17 @@ void ProviderCatalog::rebuild()
     for (const MapCascadeUpstream &upstream : this->cascade_.upstreams)
     {
         const QVector<MapProvider> catalog = this->upstream_catalogs_.value(upstream.name);
+        const QHash<QString, QStringList> catalog_via = this->upstream_via_.value(upstream.name);
+        const QString self = QString::fromLatin1(this->instance_id_);
         for (const MapProvider &advertised : catalog)
         {
             if (!advertised.enabled || !advertised.remote_fetch_enabled)
+                continue;
+            // Our own advertisement coming back (servers that are upstreams
+            // of each other), or a definition beyond the hop limit: tiles
+            // could only ever be requested in a circle. Ignore it entirely.
+            const QStringList via = catalog_via.value(advertised.id);
+            if ((!self.isEmpty() && via.contains(self)) || via.size() >= MaximumProviderViaHops)
                 continue;
             if (locally_defined.contains(advertised.id))
             {
@@ -174,7 +217,12 @@ void ProviderCatalog::rebuild()
             inherited.enabled = !this->disabled_inherited_ids_.contains(inherited.id);
             inherited.remote_fetch_enabled = true;
             positions.insert(inherited.id, combined.size());
-            combined.append({inherited, true, {upstream.name}});
+            AvailableMapProvider entry;
+            entry.provider = inherited;
+            entry.inherited = true;
+            entry.upstream_names = QStringList{upstream.name};
+            entry.via = via;
+            combined.append(entry);
         }
     }
     QJsonArray entries;
@@ -214,6 +262,12 @@ void ProviderCatalog::rebuild()
         object.insert(QStringLiteral("acquisition_mode"),
                       providerAcquisitionModeName(entry.acquisition_mode));
         object.insert(QStringLiteral("direct_fetch_allowed"), entry.direct_fetch_allowed);
+        QJsonArray via_json;
+        if (!this->instance_id_.isEmpty())
+            via_json.append(QString::fromLatin1(this->instance_id_));
+        for (const QString &id : entry.via)
+            via_json.append(id);
+        object.insert(QStringLiteral("via"), via_json);
         entries.append(object);
     }
     const QByteArray next = QJsonDocument(QJsonObject{
@@ -274,6 +328,9 @@ void ProviderCatalog::fetch(const MapCascadeUpstream &upstream, bool legacy,
     request.setRawHeader("Accept", "application/json");
     if (!upstream.api_key.isEmpty())
         request.setRawHeader("X-API-Key", upstream.api_key);
+    // An upstream that is this very server (misconfiguration) refuses it.
+    if (!this->instance_id_.isEmpty())
+        request.setRawHeader("X-AOWIS-Cascade-Visited", this->instance_id_);
     QNetworkAccessManager *network = &this->network_;
     if (hasWireGuardTransport(upstream))
     {
@@ -328,6 +385,7 @@ void ProviderCatalog::fetch(const MapCascadeUpstream &upstream, bool legacy,
             }
         }
         this->upstream_catalogs_.insert(upstream.name, providers);
+        this->upstream_via_.insert(upstream.name, decodeVia(payload));
         rebuild();
     });
 }

@@ -4,8 +4,10 @@
 #include <aowis/map/terrain_data.h>
 #include <aowis/map/terrain_dataset.h>
 #include <aowis/map/terrain_transfer.h>
+#include <aowis/map/cascade_upstream_health.h>
 
 #include <QDebug>
+#include <QDateTime>
 #if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
 #include <QHttpHeaders>
 #endif
@@ -70,6 +72,29 @@ QFuture<QHttpServerResponse> makeReadyResponse(QHttpServerResponse response)
     promise.addResult(std::move(response));
     promise.finish();
     return future;
+}
+
+void setResponseHeader(QHttpServerResponse &response, const QByteArray &name,
+                       const QByteArray &value)
+{
+#if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
+    QHttpHeaders headers = response.headers();
+    headers.replaceOrAppend(name, value);
+    response.setHeaders(std::move(headers));
+#else
+    response.setHeader(name, value);
+#endif
+}
+
+// A downstream MAP server asks for cache-first delivery when it can poll:
+// header (MAP-to-MAP) or query parameter (same switch as raster tiles).
+bool requestWantsCacheFirst(const QHttpServerRequest &request)
+{
+    const QUrlQuery query(request.url());
+    return query.queryItemValue(QStringLiteral("delivery")).compare(
+               QStringLiteral("cache-first"), Qt::CaseInsensitive) == 0 ||
+           request.value("x-aowis-tile-delivery").compare(
+               QByteArrayLiteral("cache-first"), Qt::CaseInsensitive) == 0;
 }
 
 // Preserve Content-Type while adding the source identity required by downstream
@@ -435,11 +460,20 @@ Server::Server(const Config &config, QObject *parent)
     this->raster_encode_pool.setMaxThreadCount(2);
     this->maptiles->setRemoteFetchEnabled(config.map_remote_fetch_enabled);
     this->maptiles->setCascadeConfig(config.cascade);
-    this->terrain_data->setCascadeInstanceId(this->maptiles->cascadeInstanceId());
+    this->cascade_instance_id = this->maptiles->cascadeInstanceId();
+    this->terrain_data->setCascadeInstanceId(this->cascade_instance_id);
+    // A separately running MAP server has no tunnel transport: say so once
+    // instead of skipping such upstreams silently.
+    for (const Aowis::Map::MapCascadeUpstream &upstream : config.cascade.upstreams)
+        if (!Aowis::Map::cascadeUpstreamUsable(upstream))
+            qWarning().noquote() << QStringLiteral(
+                "MAP upstream '%1' requires a WireGuard tunnel, which this MAP server "
+                "cannot provide; it is skipped (use a system VPN instead)").arg(upstream.name);
     this->maptiles->setPermanentDataDirectory(config.permanent_data_directory);
     this->provider_catalog = new Aowis::Map::ProviderCatalog(config.cache_directory, this);
     connect(this->provider_catalog, &Aowis::Map::ProviderCatalog::catalogChanged,
             this, &Server::applyAvailableProviders);
+    this->provider_catalog->setInstanceId(this->cascade_instance_id);
     this->provider_catalog->configure(config.map_providers, config.cascade);
     this->provider_catalog->setDisabledInheritedProviders(config.disabled_inherited_providers);
     this->provider_catalog->setUpstreamRoutes(config.provider_upstream_routes);
@@ -547,7 +581,11 @@ void Server::abandonTerrainWaiters(QTcpSocket *socket)
                     QHttpServerResponse::StatusCode::ServiceUnavailable));
                 promise->finish();
             }
-            if (promises.isEmpty())
+            // A detached (cache-first) tile job keeps running without
+            // clients: a downstream MAP server is polling for its result.
+            if (promises.isEmpty() &&
+                !(registry == &this->pending_terrain_tiles &&
+                  this->detached_terrain_tiles.contains(it.key())))
                 orphans.append(it.key());
         }
         for (const QString &key : orphans)
@@ -556,6 +594,8 @@ void Server::abandonTerrainWaiters(QTcpSocket *socket)
             if (cancellation)
                 cancellation->store(true, std::memory_order_release);
             registry->remove(key);
+            if (registry == &this->pending_terrain_tiles)
+                this->terrain_job_upstreams.remove(key);
         }
     }
 }
@@ -577,6 +617,14 @@ Server::~Server()
     disconnect(this->maptiles, nullptr, this, nullptr);
     this->maptiles->cancelUpstreamDownloads();
     this->terrain_data->cancelUpstreamDownloads();
+    // Detached cache-first jobs have no client whose disconnect would cancel
+    // them, so a long source download would otherwise hold up shutdown.
+    for (const TerrainCancellation &cancellation : std::as_const(this->tile_cancellations))
+        if (cancellation) cancellation->store(true, std::memory_order_release);
+    for (const TerrainCancellation &cancellation : std::as_const(this->elevation_cancellations))
+        if (cancellation) cancellation->store(true, std::memory_order_release);
+    for (const TerrainCancellation &cancellation : std::as_const(this->grid_cancellations))
+        if (cancellation) cancellation->store(true, std::memory_order_release);
     // Worker lambdas capture this and access terrain_data. Finish all of them
     // before QObject child destruction starts; no new requests are accepted.
     this->terrain_remote_pool.waitForDone();
@@ -622,6 +670,8 @@ Server::~Server()
     this->pending_terrain_grids.clear();
     this->pending_terrain_tile_count = 0;
     this->tile_cancellations.clear();
+    this->detached_terrain_tiles.clear();
+    this->terrain_job_upstreams.clear();
     this->elevation_cancellations.clear();
     this->grid_cancellations.clear();
     this->terrain_waiter_sockets.clear();
@@ -681,6 +731,18 @@ QFuture<QHttpServerResponse> Server::submitTerrainTile(
         QLatin1Char('/') + QString::number(tile_x) + QLatin1Char('/') +
         QString::number(tile_y);
     const bool existing = this->pending_terrain_tiles.contains(key);
+    // A, B upstreams of each other, both acquiring the same tile: A's job
+    // asks B and B's job asks A. One of them (the higher instance ID) refuses
+    // the other's request with an answered "unavailable"; the requester moves
+    // on to its next source, and its result then completes the job here.
+    if (existing && !cascade_trace.isEmpty() &&
+        this->terrain_data->cascadeJoinConflicts(this->terrain_job_upstreams.value(key),
+                                                 cascade_trace))
+    {
+        return makeReadyResponse(cascadeResponse(QHttpServerResponse(
+            "Terrain tile is being acquired from the requesting MAP server",
+            QHttpServerResponse::StatusCode::ServiceUnavailable)));
+    }
     Aowis::Map::TerrainTileAddress address;
     address.zoom = zoom;
     address.x = quint32(tile_x);
@@ -688,6 +750,27 @@ QFuture<QHttpServerResponse> Server::submitTerrainTile(
     // Only requests that may download take a remote slot; cached sources
     // and normalized tiles go straight to the CPU pool.
     const bool remote_job = this->terrain_data->tileNeedsRemoteAcquisition(dataset, address);
+    // Cache-first (a polling downstream MAP server): never hold the request
+    // while sources are downloaded. Start or join the acquisition and answer
+    // 202 at once; a cached tile is still delivered directly below.
+    const bool detached = client_request != nullptr && remote_job &&
+        requestWantsCacheFirst(*client_request);
+    if (detached && existing)
+        return makeReadyResponse(terrainAcceptedResponse());
+    if (detached)
+    {
+        const QHash<QString, DetachedTerrainFailure>::iterator failure =
+            this->detached_terrain_failures.find(key);
+        if (failure != this->detached_terrain_failures.end())
+        {
+            const Aowis::Map::TerrainTileLookupResult failed = failure->result;
+            const bool recent =
+                QDateTime::currentMSecsSinceEpoch() - failure->failed_at_ms < 60000;
+            this->detached_terrain_failures.erase(failure);
+            if (recent)
+                return makeReadyResponse(cascadeResponse(makeTerrainTileErrorResponse(failed)));
+        }
+    }
     const bool remote_admitted = existing || (!this->shutting_down &&
         this->pending_terrain_tile_count < this->config.maximum_pending_requests &&
         (!remote_job ||
@@ -710,21 +793,32 @@ QFuture<QHttpServerResponse> Server::submitTerrainTile(
 #else
         response.setHeader("Retry-After", "1");
 #endif
-        return makeReadyResponse(std::move(response));
+        return makeReadyResponse(cascadeResponse(std::move(response), true));
     }
 
-    PendingPromise promise = PendingPromise::create();
-    promise->start();
-    QFuture<QHttpServerResponse> future = promise->future();
-    this->pending_terrain_tiles[key].append(promise);
-    if (requestAcceptsTerrainZstd(client_request))
-        this->terrain_zstd_waiters.insert(promise.data());
-    attachTerrainWaiter(promise, client_request);
-    ++this->pending_terrain_tile_count;
-    if (existing)
-        return future;
+    QFuture<QHttpServerResponse> future;
+    if (detached)
+    {
+        // No waiter: the job's result goes to the normalized cache only.
+        this->pending_terrain_tiles[key];
+        this->detached_terrain_tiles.insert(key);
+    }
+    else
+    {
+        PendingPromise promise = PendingPromise::create();
+        promise->start();
+        future = promise->future();
+        this->pending_terrain_tiles[key].append(promise);
+        if (requestAcceptsTerrainZstd(client_request))
+            this->terrain_zstd_waiters.insert(promise.data());
+        attachTerrainWaiter(promise, client_request);
+        ++this->pending_terrain_tile_count;
+        if (existing)
+            return future;
+    }
     const TerrainCancellation cancellation = std::make_shared<std::atomic_bool>(false);
     this->tile_cancellations.insert(key, cancellation);
+    this->terrain_job_upstreams.insert(key, this->terrain_data->cascadeCandidates(cascade_trace));
 
     // Split missing-source acquisition from CPU normalization. The remote
     // worker *enqueues* CPU processing and returns; it never waits on it.
@@ -749,6 +843,10 @@ QFuture<QHttpServerResponse> Server::submitTerrainTile(
             if (this->tile_cancellations.value(key) != cancellation)
                 return;
             this->tile_cancellations.remove(key);
+            if (this->detached_terrain_tiles.remove(key) &&
+                result.status != Aowis::Map::TerrainTileLookupStatus::Ready)
+                recordDetachedTerrainFailure(key, result);
+            this->terrain_job_upstreams.remove(key);
             const PendingPromises waiters = this->pending_terrain_tiles.take(key);
             this->pending_terrain_tile_count -= waiters.size();
             bool compression_attempted = false;
@@ -770,10 +868,10 @@ QFuture<QHttpServerResponse> Server::submitTerrainTile(
                         use_zstd ? compressed.value() : result.data);
                     setTerrainRevisionHeader(response);
                     setTerrainTransferHeaders(response, use_zstd);
-                    waiter->addResult(std::move(response));
+                    waiter->addResult(cascadeResponse(std::move(response)));
                 }
                 else
-                    waiter->addResult(makeTerrainTileErrorResponse(result));
+                    waiter->addResult(cascadeResponse(makeTerrainTileErrorResponse(result)));
                 waiter->finish();
             }
         }, Qt::QueuedConnection);
@@ -814,17 +912,20 @@ QFuture<QHttpServerResponse> Server::submitTerrainTile(
             if (this->tile_cancellations.value(key) != cancellation)
                 return;
             this->tile_cancellations.remove(key);
+            if (this->detached_terrain_tiles.remove(key))
+                recordDetachedTerrainFailure(key, result);
+            this->terrain_job_upstreams.remove(key);
             const PendingPromises waiters = this->pending_terrain_tiles.take(key);
             this->pending_terrain_tile_count -= waiters.size();
             for (const PendingPromise &waiter : waiters)
             {
                 forgetTerrainWaiter(waiter);
-                waiter->addResult(makeTerrainTileErrorResponse(result));
+                waiter->addResult(cascadeResponse(makeTerrainTileErrorResponse(result)));
                 waiter->finish();
             }
         }, Qt::QueuedConnection);
     });
-    return future;
+    return detached ? makeReadyResponse(terrainAcceptedResponse()) : future;
 }
 
 QFuture<QHttpServerResponse> Server::submitTerrainElevation(
@@ -1286,9 +1387,48 @@ void Server::setupRoutes()
         terrain.insert(QStringLiteral("active"), terrain_activity.active);
         terrain.insert(QStringLiteral("queued"), terrain_activity.queued);
 
+        // Per upstream: whether it can be contacted at all (a WireGuard
+        // upstream needs a tunnel this process may not have), and for raster
+        // and terrain separately its reachability and cooldown.
+        const QHash<QString, Aowis::Map::CascadeUpstreamState> raster_health =
+            this->maptiles->upstreamHealth();
+        const QHash<QString, Aowis::Map::CascadeUpstreamState> terrain_health =
+            this->terrain_data->upstreamHealth();
+        const qint64 now_ms = QDateTime::currentMSecsSinceEpoch();
+        const std::function<QJsonObject(const Aowis::Map::CascadeUpstreamState &)> health_json =
+            [now_ms](const Aowis::Map::CascadeUpstreamState &state) -> QJsonObject
+        {
+            QJsonObject object;
+            object.insert(QStringLiteral("consecutive_failures"), state.consecutive_failures);
+            object.insert(QStringLiteral("cooldown_remaining_ms"),
+                          double(qMax<qint64>(0, state.cooldown_until_ms - now_ms)));
+            object.insert(QStringLiteral("last_answer_unix_ms"), double(state.last_answer_ms));
+            object.insert(QStringLiteral("last_failure_unix_ms"), double(state.last_failure_ms));
+            object.insert(QStringLiteral("last_error"), state.last_error);
+            object.insert(QStringLiteral("instance"), QString::fromLatin1(state.instance_id));
+            return object;
+        };
+        QJsonArray upstreams;
+        for (const Aowis::Map::MapCascadeUpstream &upstream : this->config.cascade.upstreams)
+        {
+            QJsonObject entry;
+            entry.insert(QStringLiteral("name"), upstream.name);
+            entry.insert(QStringLiteral("transport"),
+                         Aowis::Map::requiresWireGuardTransport(upstream)
+                             ? QStringLiteral("wireguard") : QStringLiteral("direct"));
+            entry.insert(QStringLiteral("usable"), Aowis::Map::cascadeUpstreamUsable(upstream));
+            entry.insert(QStringLiteral("map_tiles"),
+                         health_json(raster_health.value(upstream.name)));
+            entry.insert(QStringLiteral("terrain"),
+                         health_json(terrain_health.value(upstream.name)));
+            upstreams.append(entry);
+        }
+
         QJsonObject root;
         root.insert(QStringLiteral("map_tiles"), map_tiles);
         root.insert(QStringLiteral("terrain"), terrain);
+        root.insert(QStringLiteral("instance"), QString::fromLatin1(this->cascade_instance_id));
+        root.insert(QStringLiteral("upstreams"), upstreams);
         return QHttpServerResponse(
             QByteArrayLiteral("application/json"),
             QJsonDocument(root).toJson(QJsonDocument::Compact),
@@ -1426,10 +1566,10 @@ void Server::setupRoutes()
         if (!isReadAuthorized(request)) return makeUnauthorizedResponse();
         if (!this->maptiles->acceptsCascadeTrace(
                 request.value("x-aowis-cascade-visited")))
-            return QHttpServerResponse("Cascade loop detected",
-                QHttpServerResponse::StatusCode::Conflict);
-        return QHttpServerResponse(QByteArrayLiteral("application/json"),
-            this->provider_catalog->encodedAvailable(), QHttpServerResponse::StatusCode::Ok);
+            return cascadeResponse(QHttpServerResponse("Cascade loop detected",
+                QHttpServerResponse::StatusCode::Conflict));
+        return cascadeResponse(QHttpServerResponse(QByteArrayLiteral("application/json"),
+            this->provider_catalog->encodedAvailable(), QHttpServerResponse::StatusCode::Ok));
     });
     this->http.route("/map/v1/providers/available", QHttpServerRequest::Method::Options,
                      []() { return makeOptionsResponse(); });
@@ -1875,15 +2015,15 @@ void Server::setupRoutes()
             Aowis::Map::TerrainTileLookupResult invalid_result;
             invalid_result.status = Aowis::Map::TerrainTileLookupStatus::InvalidAddress;
             invalid_result.error_message = QStringLiteral("Terrain tile X and Y must be non-negative");
-            return makeReadyResponse(makeTerrainTileErrorResponse(invalid_result));
+            return makeReadyResponse(cascadeResponse(makeTerrainTileErrorResponse(invalid_result)));
         }
 
         if (!this->maptiles->acceptsCascadeTrace(
                 request.value("x-aowis-cascade-visited")))
         {
-            return makeReadyResponse(QHttpServerResponse(
+            return makeReadyResponse(cascadeResponse(QHttpServerResponse(
                 "Invalid or cyclic MAP cascade",
-                QHttpServerResponse::StatusCode::BadRequest));
+                QHttpServerResponse::StatusCode::BadRequest)));
         }
         return submitTerrainTile(dataset, zoom, tile_x, tile_y, &request);
     });
@@ -1905,14 +2045,14 @@ void Server::setupRoutes()
         const QByteArray expected_source = this->maptiles->rasterSourceFingerprint(provider);
         const QByteArray claimed_source = request.value("x-aowis-raster-source");
         if (!claimed_source.isEmpty() && claimed_source != expected_source)
-            return makeReadyResponse(QHttpServerResponse(
+            return makeReadyResponse(cascadeResponse(QHttpServerResponse(
                 "Raster provider source/style mismatch",
-                QHttpServerResponse::StatusCode::Conflict));
+                QHttpServerResponse::StatusCode::Conflict)));
         const QByteArray cascade_trace = request.value("x-aowis-cascade-visited");
         if (!this->maptiles->acceptsCascadeTrace(cascade_trace))
-            return makeReadyResponse(QHttpServerResponse(
+            return makeReadyResponse(cascadeResponse(QHttpServerResponse(
                 "Invalid or cyclic MAP cascade",
-                QHttpServerResponse::StatusCode::LoopDetected));
+                QHttpServerResponse::StatusCode::LoopDetected)));
 
         const QString key = QString("%1_%2_%3_%4").arg(provider).arg(z).arg(x).arg(y);
         const QUrlQuery tile_query(request.url());
@@ -1928,7 +2068,8 @@ void Server::setupRoutes()
         if (tile_result.status == MapTiles::TileRequestStatus::Ready)
         {
             if (raster_quality == 0)
-                return makeReadyResponse(makeRasterResponse(tile_result.data, expected_source));
+                return makeReadyResponse(cascadeResponse(
+                    makeRasterResponse(tile_result.data, expected_source)));
             PendingPromise promise = PendingPromise::create();
             promise->start();
             QFuture<QHttpServerResponse> future = promise->future();
@@ -1938,30 +2079,30 @@ void Server::setupRoutes()
 
         if (tile_result.status == MapTiles::TileRequestStatus::InvalidRequest)
         {
-            return makeReadyResponse(QHttpServerResponse(
+            return makeReadyResponse(cascadeResponse(QHttpServerResponse(
                 "Invalid map tile request",
-                QHttpServerResponse::StatusCode::BadRequest));
+                QHttpServerResponse::StatusCode::BadRequest)));
         }
 
         if (tile_result.status == MapTiles::TileRequestStatus::Unavailable)
         {
-            return makeReadyResponse(QHttpServerResponse(
+            return makeReadyResponse(cascadeResponse(QHttpServerResponse(
                 "Map tile is unavailable from the configured sources",
-                QHttpServerResponse::StatusCode::ServiceUnavailable));
+                QHttpServerResponse::StatusCode::ServiceUnavailable)));
         }
 
         if (tile_result.status == MapTiles::TileRequestStatus::ServerBusy)
         {
-            return makeReadyResponse(QHttpServerResponse(
+            return makeReadyResponse(cascadeResponse(QHttpServerResponse(
                 "Map tile download queue is full",
-                QHttpServerResponse::StatusCode::ServiceUnavailable));
+                QHttpServerResponse::StatusCode::ServiceUnavailable), true));
         }
 
         if (cache_first_delivery)
         {
-            return makeReadyResponse(QHttpServerResponse(
+            return makeReadyResponse(cascadeResponse(QHttpServerResponse(
                 "Map tile is being fetched",
-                QHttpServerResponse::StatusCode::Accepted));
+                QHttpServerResponse::StatusCode::Accepted)));
         }
 
         PendingPromise promise = PendingPromise::create();
@@ -1969,9 +2110,9 @@ void Server::setupRoutes()
         QFuture<QHttpServerResponse> future = promise->future();
         if (!appendPendingPromise(key, promise))
         {
-            promise->addResult(QHttpServerResponse(
+            promise->addResult(cascadeResponse(QHttpServerResponse(
                 "Too many pending map tile requests",
-                QHttpServerResponse::StatusCode::ServiceUnavailable));
+                QHttpServerResponse::StatusCode::ServiceUnavailable), true));
             promise->finish();
         }
         else if (raster_quality != 0)
@@ -2048,7 +2189,7 @@ void Server::completeRasterPromises(const PendingPromises &promises, const QByte
     {
         for (const PendingPromise &promise : promises)
         {
-            promise->addResult(makeRasterResponse(data, source));
+            promise->addResult(cascadeResponse(makeRasterResponse(data, source)));
             promise->finish();
         }
         return;
@@ -2061,7 +2202,7 @@ void Server::completeRasterPromises(const PendingPromises &promises, const QByte
         for (const PendingPromise &promise : promises)
         {
             this->raster_transfer.recordTransfer(data.size(), cached->bytes.size());
-            promise->addResult(makeRasterResponse(cached->bytes, source));
+            promise->addResult(cascadeResponse(makeRasterResponse(cached->bytes, source)));
             promise->finish();
         }
         return;
@@ -2075,7 +2216,7 @@ void Server::completeRasterPromises(const PendingPromises &promises, const QByte
         for (const PendingPromise &promise : promises)
         {
             this->raster_transfer.recordTransfer(data.size(), data.size());
-            promise->addResult(makeRasterResponse(data, source));
+            promise->addResult(cascadeResponse(makeRasterResponse(data, source)));
             promise->finish();
         }
         return;
@@ -2088,11 +2229,52 @@ void Server::completeRasterPromises(const PendingPromises &promises, const QByte
         for (const PendingPromise &promise : promises)
         {
             this->raster_transfer.recordTransfer(data.size(), choice.bytes.size());
-            promise->addResult(makeRasterResponse(choice.bytes, source));
+            promise->addResult(cascadeResponse(makeRasterResponse(choice.bytes, source)));
             promise->finish();
         }
         this->raster_encode_admission.release();
     });
+}
+
+QHttpServerResponse Server::cascadeResponse(QHttpServerResponse response, bool busy) const
+{
+    setResponseHeader(response, QByteArray(Aowis::Map::CascadeInstanceHeader),
+                      this->cascade_instance_id);
+    if (busy)
+        setResponseHeader(response, QByteArray(Aowis::Map::CascadeUpstreamStatusHeader),
+                          QByteArray(Aowis::Map::CascadeUpstreamStatusBusy));
+    return response;
+}
+
+void Server::recordDetachedTerrainFailure(const QString &key,
+                                          const Aowis::Map::TerrainTileLookupResult &result)
+{
+    const qint64 now_ms = QDateTime::currentMSecsSinceEpoch();
+    // Bounded: entries nobody polled for within a few minutes are dropped.
+    for (QHash<QString, DetachedTerrainFailure>::iterator entry =
+             this->detached_terrain_failures.begin();
+         entry != this->detached_terrain_failures.end();)
+    {
+        if (now_ms - entry->failed_at_ms > 300000)
+            entry = this->detached_terrain_failures.erase(entry);
+        else
+            ++entry;
+    }
+    DetachedTerrainFailure failure;
+    failure.failed_at_ms = now_ms;
+    failure.result = result;
+    // Keep the data-free error only; a failed lookup carries no tile bytes.
+    failure.result.data.clear();
+    this->detached_terrain_failures.insert(key, failure);
+}
+
+QHttpServerResponse Server::terrainAcceptedResponse() const
+{
+    // The downstream polls again after Retry-After; the acquisition runs on.
+    QHttpServerResponse response("Terrain tile is being acquired",
+                                 QHttpServerResponse::StatusCode::Accepted);
+    setResponseHeader(response, QByteArrayLiteral("Retry-After"), QByteArrayLiteral("2"));
+    return cascadeResponse(std::move(response));
 }
 
 void Server::onTileReady(QString key, QByteArray data)
@@ -2131,7 +2313,7 @@ void Server::onTileFailed(const QString &key, MapTiles::TileFailureReason reason
     for (const PendingPromise &promise : promises)
     {
         this->raster_transfer_waiters.remove(promise.data());
-        promise->addResult(QHttpServerResponse(message, status));
+        promise->addResult(cascadeResponse(QHttpServerResponse(message, status)));
         promise->finish();
     }
 }

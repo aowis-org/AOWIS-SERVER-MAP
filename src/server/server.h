@@ -27,6 +27,7 @@
 #include <optional>
 #include <aowis/map/terrain_elevation.h>
 #include <aowis/map/terrain_provider.h>
+#include <aowis/map/terrain_data.h>
 #include "terrain_admission.h"
 #include "terrain_byte_admission.h"
 
@@ -133,6 +134,11 @@ private:
     PendingPromises takePendingPromises(const QString &key);
     void completeRasterPromises(const PendingPromises &promises, const QByteArray &data,
                                 const QByteArray &source, int zoom, int requested_quality);
+    // Marks a tile/catalog response as answered by this MAP server (see
+    // aowis/map/cascade_upstream_health.h); busy adds the admission marker.
+    QHttpServerResponse cascadeResponse(QHttpServerResponse response, bool busy = false) const;
+    // 202 for a cache-first terrain request whose acquisition is running.
+    QHttpServerResponse terrainAcceptedResponse() const;
 
     void applyAvailableProviders();
 
@@ -152,6 +158,8 @@ private:
     TerrainByteAdmission terrain_grid_bytes;
     MapTiles *maptiles;
     Aowis::Map::TerrainData *terrain_data;
+    // Copy of maptiles->cascadeInstanceId(): immutable, read from any thread.
+    QByteArray cascade_instance_id;
 
     // Socket identity is used only on the HTTP thread. Empty single-flight
     // entries are retained until their running job finishes, allowing a new
@@ -168,6 +176,23 @@ private:
     QHash<QString, TerrainCancellation> tile_cancellations;
     QHash<QString, TerrainCancellation> elevation_cancellations;
     QHash<QString, TerrainCancellation> grid_cancellations;
+    // Terrain tile jobs started by a cache-first (MAP-to-MAP) request: they
+    // run without any waiting client and are not canceled when clients
+    // disconnect; the downstream polls until the tile is cached.
+    QSet<QString> detached_terrain_tiles;
+    // Outcome of a failed detached job, handed to the next cache-first poll
+    // for that tile (then the next poll starts a new attempt). Without it a
+    // polling downstream would only ever see 202 while every attempt fails.
+    struct DetachedTerrainFailure
+    {
+        qint64 failed_at_ms = 0;
+        Aowis::Map::TerrainTileLookupResult result;
+    };
+    QHash<QString, DetachedTerrainFailure> detached_terrain_failures;
+    void recordDetachedTerrainFailure(const QString &key,
+                                      const Aowis::Map::TerrainTileLookupResult &result);
+    // Upstreams each running terrain tile job may ask (loop-safe joins).
+    QHash<QString, QStringList> terrain_job_upstreams;
     int pending_terrain_tile_count = 0;
     QMutex mutex_pending;
     QHash<QString, PendingPromises> connections_pending;

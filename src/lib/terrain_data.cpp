@@ -1,9 +1,11 @@
 #include <aowis/map/terrain_data.h>
 #include <aowis/map/terrain_provider.h>
 #include <aowis/map/terrain_transfer.h>
+#include <aowis/map/cascade_upstream_health.h>
 
 #include "copernicus_terrain_provider.h"
 
+#include <QCoreApplication>
 #include <QDir>
 #include <QDateTime>
 #include <QFile>
@@ -14,6 +16,8 @@
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QElapsedTimer>
+#include <QThread>
 #include <QTimer>
 #include <QUuid>
 #include <QSaveFile>
@@ -21,6 +25,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
+#include <map>
+#include <memory>
 #include <limits>
 #include <numbers>
 
@@ -33,6 +40,52 @@ constexpr int NormalizedTileLockTimeoutMs = 180000;
 constexpr int NormalizedTileStaleLockMs = 10 * 60 * 1000;
 constexpr qint64 MaximumCascadeTerrainTileBytes = MaximumCanonicalTerrainTileBytes;
 constexpr int CascadeRequestTimeoutMs = 10000;
+
+// One network manager per worker thread and transport (direct, or one per
+// tunnel proxy), reused across terrain tiles so connections to an upstream
+// are kept alive: a fresh manager per tile cost a new TCP (and TLS, and
+// SOCKS5 CONNECT through the tunnel) handshake for every tile on links with
+// a long round trip. QNetworkAccessManager is bound to its creating thread,
+// hence thread_local; managers of a previous cascade generation (changed
+// upstreams, restarted tunnels) are dropped on the next use. They are
+// destroyed with the pool thread at the latest.
+struct CascadeNetworkManagerDeleter
+{
+    void operator()(QNetworkAccessManager *manager) const
+    {
+        // A thread ending after the application object is gone (process
+        // exit) leaves its manager to the operating system: Qt's network
+        // internals must not be torn down without QCoreApplication.
+        if (QCoreApplication::instance() != nullptr)
+            delete manager;
+    }
+};
+using CascadeNetworkManagerPointer =
+    std::unique_ptr<QNetworkAccessManager, CascadeNetworkManagerDeleter>;
+
+QNetworkAccessManager *cascadeNetworkManager(const MapCascadeUpstream &upstream,
+                                             std::uint64_t generation)
+{
+    thread_local std::map<QString, CascadeNetworkManagerPointer> managers;
+    thread_local std::uint64_t managers_generation = 0;
+    if (managers_generation != generation)
+    {
+        managers.clear();
+        managers_generation = generation;
+    }
+    const bool tunnelled = hasWireGuardTransport(upstream);
+    const QString key = tunnelled ? cascadeProxyKey(upstream.proxy) : QStringLiteral("direct");
+    CascadeNetworkManagerPointer &manager = managers[key];
+    if (!manager)
+    {
+        manager.reset(new QNetworkAccessManager());
+        // Tunnelled upstreams only through their tunnel; direct ones keep
+        // Qt's default proxy behavior, exactly as before.
+        if (tunnelled)
+            manager->setProxy(upstream.proxy);
+    }
+    return manager.get();
+}
 
 struct TerrainGridPosition
 {
@@ -314,11 +367,37 @@ void TerrainData::setCascadeConfig(const MapCascadeConfig &cascade)
     if (!upstreams_changed)
         return;
     // Downloads in flight follow the previous source policy: cancel them
-    // (callers retry with the new order) and forget cooldowns of upstreams
-    // that may have been replaced or re-credentialed.
+    // (callers retry with the new order) and forget cooldowns and learned
+    // instances of upstreams that may have been replaced or re-credentialed.
     this->cascade_cancel_generation.fetch_add(1, std::memory_order_acq_rel);
-    QMutexLocker lock(&this->cascade_cooldown_mutex);
-    this->cascade_cooldown_until_ms.clear();
+    this->upstream_health.reset();
+}
+
+QHash<QString, CascadeUpstreamState> TerrainData::upstreamHealth() const
+{
+    return this->upstream_health.snapshot();
+}
+
+QStringList TerrainData::cascadeCandidates(const QByteArray &cascade_trace) const
+{
+    const MapCascadeConfig cascade = this->cascadeConfig();
+    const QList<QByteArray> trace_ids = cascadeTraceIds(cascade_trace);
+    QStringList names;
+    for (const MapCascadeUpstream &upstream : cascade.upstreams)
+        if (cascadeUpstreamUsable(upstream) &&
+            !this->upstream_health.instanceInTrace(upstream.name, trace_ids))
+            names.append(upstream.name);
+    return names;
+}
+
+bool TerrainData::cascadeJoinConflicts(const QStringList &upstream_names,
+                                       const QByteArray &incoming_trace) const
+{
+    const QList<QByteArray> trace_ids = cascadeTraceIds(incoming_trace);
+    for (const QString &name : upstream_names)
+        if (this->upstream_health.refusesJoin(name, trace_ids, this->cascade_instance_id))
+            return true;
+    return false;
 }
 
 MapCascadeConfig TerrainData::cascadeConfig() const
@@ -679,11 +758,21 @@ TerrainProviderFetchResult TerrainData::acquireGridSources(
 // Executed on the remote-acquisition worker (or an embedded MAP caller),
 // never on the HTTP event-loop thread. Fetch exactly one canonical normalized
 // tile and publish only after complete format, CRC, identity and revision checks.
+//
+// Requests ask for cache-first delivery: an upstream that does not have the
+// tile yet starts acquiring it (possibly a long Copernicus download, or its
+// own upstreams) and answers 202 at once; this worker polls it until the tile
+// is ready, the download deadline passes, or the job is canceled. The
+// upstream keeps working while nobody is connected, so a slow acquisition at
+// the hub is no longer cut off by this side's request timeout. An upstream
+// release without cache-first support simply answers when it has the tile,
+// as before; the per-request timeout below is an inactivity limit for both.
 TerrainProviderFetchResult TerrainData::fetchNormalizedFromUpstreams(
     const QString &dataset, const TerrainTileAddress &address,
     const std::shared_ptr<std::atomic_bool> &cancel_requested,
-    const QByteArray &cascade_trace) const
+    const QByteArray &cascade_trace, bool *upstream_busy) const
 {
+    if (upstream_busy != nullptr) *upstream_busy = false;
     const MapCascadeConfig cascade = this->cascadeConfig();
     TerrainProviderFetchResult result;
     result.status = TerrainProviderFetchStatus::SourceUnavailable;
@@ -694,24 +783,26 @@ TerrainProviderFetchResult TerrainData::fetchNormalizedFromUpstreams(
         this->cascade_cancel_generation.load(std::memory_order_acquire);
     const QByteArray visited = cascade_trace.isEmpty()
         ? this->cascade_instance_id : cascade_trace + ',' + this->cascade_instance_id;
+    // An upstream whose instance already handled this request is waiting
+    // for us: asking it could only end in its loop refusal or a timeout.
+    const QList<QByteArray> trace_ids = cascadeTraceIds(cascade_trace);
     const QString relative_path = QStringLiteral("/terrain/v1/%1/%2/%3/%4.aowterrain")
         .arg(dataset).arg(address.zoom).arg(address.x).arg(address.y);
+    const std::function<bool()> canceled = [this, generation, &cancel_requested]() -> bool
+    {
+        return generation != this->cascade_cancel_generation.load(std::memory_order_acquire) ||
+               (cancel_requested && cancel_requested->load(std::memory_order_acquire));
+    };
+    const qint64 poll_budget_ms = qint64(qMax(1, this->config.download_deadline_seconds)) * 1000;
 
     for (const MapCascadeUpstream &upstream : cascade.upstreams)
     {
         // A WireGuard upstream only through its running tunnel, never directly.
         if (!cascadeUpstreamUsable(upstream)) continue;
-        const QString origin = upstream.url.toString(
-            QUrl::RemovePath | QUrl::RemoveQuery | QUrl::RemoveFragment |
-            QUrl::RemoveUserInfo);
-        {
-            QMutexLocker lock(&this->cascade_cooldown_mutex);
-            if (this->cascade_cooldown_until_ms.value(origin) >
-                QDateTime::currentMSecsSinceEpoch())
-                continue;
-        }
-        if (generation != this->cascade_cancel_generation.load(std::memory_order_acquire) ||
-            (cancel_requested && cancel_requested->load(std::memory_order_acquire)))
+        if (this->upstream_health.coolingDown(upstream.name, QDateTime::currentMSecsSinceEpoch()) ||
+            this->upstream_health.instanceInTrace(upstream.name, trace_ids))
+            continue;
+        if (canceled())
         {
             result.status = TerrainProviderFetchStatus::Cancelled;
             result.error_message = QStringLiteral("Terrain cascade canceled");
@@ -723,180 +814,217 @@ TerrainProviderFetchResult TerrainData::fetchNormalizedFromUpstreams(
         QNetworkRequest request(url);
         request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
                              QNetworkRequest::ManualRedirectPolicy);
+        // Inactivity limit: no bytes for this long ends the attempt. A 202
+        // arrives at once, so an upstream that is still working never hits it.
         request.setTransferTimeout(CascadeRequestTimeoutMs);
         request.setRawHeader("Accept", terrainTileMimeType().toUtf8());
         if (cascade.poor_internet_mode)
             request.setRawHeader("Accept-Encoding", "zstd");
         request.setRawHeader("X-AOWIS-Cascade-Visited", visited);
+        request.setRawHeader(CascadeTileDeliveryHeader, CascadeTileDeliveryCacheFirst);
         if (!upstream.api_key.isEmpty())
             request.setRawHeader("X-API-Key", upstream.api_key);
 
-        QNetworkAccessManager network;
-        if (hasWireGuardTransport(upstream))
-            network.setProxy(upstream.proxy); // This request only.
-        this->cascade_active.fetch_add(1, std::memory_order_relaxed);
-        QNetworkReply *reply = network.get(request);
-        QEventLoop loop;
-        QTimer deadline;
-        deadline.setSingleShot(true);
-        QObject::connect(&deadline, &QTimer::timeout, reply, [reply]()
+        QNetworkAccessManager *network = cascadeNetworkManager(upstream, generation);
+        QElapsedTimer polling;
+        polling.start();
+        bool next_upstream = false;
+        while (!next_upstream)
         {
-            if (!reply->isFinished()) reply->abort();
-        });
-        QObject::connect(reply, &QNetworkReply::downloadProgress, reply,
-                         [reply](qint64 received, qint64 total)
-        {
-            if (received > maximumCompressedTerrainTileBytes() ||
-                total > maximumCompressedTerrainTileBytes())
-                reply->abort();
-        });
-        QTimer cancel_poll;
-        if (cancel_requested)
-        {
-            cancel_poll.setInterval(50);
-            QObject::connect(&cancel_poll, &QTimer::timeout, reply,
-                [reply, cancel_requested, this, generation]()
+            this->cascade_active.fetch_add(1, std::memory_order_relaxed);
+            QNetworkReply *reply = network->get(request);
+            QEventLoop loop;
+            QObject::connect(reply, &QNetworkReply::downloadProgress, reply,
+                             [reply](qint64 received, qint64 total)
             {
-                if ((cancel_requested->load(std::memory_order_acquire) ||
-                     generation != this->cascade_cancel_generation.load(std::memory_order_acquire)) &&
-                    !reply->isFinished())
+                if (received > maximumCompressedTerrainTileBytes() ||
+                    total > maximumCompressedTerrainTileBytes())
                     reply->abort();
             });
-        }
-        else
-        {
+            QTimer cancel_poll;
             cancel_poll.setInterval(50);
-            QObject::connect(&cancel_poll, &QTimer::timeout, reply,
-                [reply, this, generation]()
+            QObject::connect(&cancel_poll, &QTimer::timeout, reply, [reply, &canceled]()
             {
-                if (generation != this->cascade_cancel_generation.load(std::memory_order_acquire) &&
-                    !reply->isFinished())
+                if (canceled() && !reply->isFinished())
                     reply->abort();
             });
-        }
-        cancel_poll.start();
-        QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
-        deadline.start(CascadeRequestTimeoutMs);
-        if (!reply->isFinished()) loop.exec();
-        deadline.stop();
-        cancel_poll.stop();
-        this->cascade_active.fetch_sub(1, std::memory_order_relaxed);
+            cancel_poll.start();
+            QObject::connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+            if (!reply->isFinished()) loop.exec();
+            cancel_poll.stop();
+            this->cascade_active.fetch_sub(1, std::memory_order_relaxed);
 
-        const int http_status = reply->attribute(
-            QNetworkRequest::HttpStatusCodeAttribute).toInt();
-        const bool succeeded = reply->error() == QNetworkReply::NoError &&
-            http_status == 200;
-        const QByteArray revision = reply->rawHeader("X-AOWIS-Terrain-Revision").trimmed();
-        const QString content_type = reply->header(QNetworkRequest::ContentTypeHeader)
-            .toString().section(';', 0, 0).trimmed().toLower();
-        const QByteArray content_encoding = reply->rawHeader("Content-Encoding").trimmed();
-        const QByteArray wire_bytes = succeeded ? reply->readAll() : QByteArray();
-        const QByteArray content_length_header = reply->rawHeader("Content-Length").trimmed();
-        bool declared_length_valid = false;
-        const qint64 declared_length = content_length_header.toLongLong(&declared_length_valid);
-        reply->deleteLater();
+            const QVariant status_attribute = reply->attribute(
+                QNetworkRequest::HttpStatusCodeAttribute);
+            const int http_status = status_attribute.toInt();
+            const QByteArray instance = reply->rawHeader(CascadeInstanceHeader).trimmed();
+            const bool answered = isCascadeInstanceId(instance);
+            const bool busy = reply->rawHeader(CascadeUpstreamStatusHeader).trimmed() ==
+                QByteArray(CascadeUpstreamStatusBusy);
+            const int retry_after_s = reply->rawHeader("Retry-After").trimmed().toInt();
+            // Qt reports HTTP 4xx/5xx as network errors too; only a reply
+            // without any HTTP status is a transport failure.
+            const bool transport_failed = !status_attribute.isValid();
+            const QString transport_error = reply->errorString();
+            const QByteArray revision = reply->rawHeader("X-AOWIS-Terrain-Revision").trimmed();
+            const QString content_type = reply->header(QNetworkRequest::ContentTypeHeader)
+                .toString().section(';', 0, 0).trimmed().toLower();
+            const QByteArray content_encoding = reply->rawHeader("Content-Encoding").trimmed();
+            const bool succeeded = reply->error() == QNetworkReply::NoError && http_status == 200;
+            const QByteArray wire_bytes = succeeded ? reply->readAll() : QByteArray();
+            const QByteArray content_length_header = reply->rawHeader("Content-Length").trimmed();
+            bool declared_length_valid = false;
+            const qint64 declared_length = content_length_header.toLongLong(&declared_length_valid);
+            // Deleted here, not with deleteLater(): the network manager is
+            // reused by later requests of this thread, and this worker runs
+            // no event loop that would ever process the deferred deletion.
+            delete reply;
 
-        if (generation != this->cascade_cancel_generation.load(std::memory_order_acquire) ||
-            (cancel_requested && cancel_requested->load(std::memory_order_acquire)))
-        {
-            result.status = TerrainProviderFetchStatus::Cancelled;
-            result.error_message = QStringLiteral("Terrain cascade canceled");
-            return result;
-        }
-        if (!succeeded)
-        {
-            result.status = TerrainProviderFetchStatus::NetworkError;
-            result.error_message = QStringLiteral("MAP upstream '%1' returned HTTP %2 or a network error")
-                .arg(upstream.name).arg(http_status);
-            if (http_status == 0 || http_status >= 500)
+            if (canceled())
             {
-                QMutexLocker lock(&this->cascade_cooldown_mutex);
-                this->cascade_cooldown_until_ms.insert(
-                    origin, QDateTime::currentMSecsSinceEpoch() + 5000);
+                result.status = TerrainProviderFetchStatus::Cancelled;
+                result.error_message = QStringLiteral("Terrain cascade canceled");
+                return result;
             }
-            continue;
-        }
-        if (content_type != terrainTileMimeType() ||
-            revision != QByteArray::number(TerrainNormalizationRevision) ||
-            (content_encoding != "zstd" && !content_encoding.isEmpty()) ||
-            (content_encoding == "zstd" && !cascade.poor_internet_mode) ||
-            wire_bytes.isEmpty() || wire_bytes.size() > maximumCompressedTerrainTileBytes() ||
-            (declared_length_valid && declared_length != wire_bytes.size()))
-        {
-            result.status = TerrainProviderFetchStatus::NetworkError;
-            result.error_message = QStringLiteral("MAP upstream '%1' returned an incompatible terrain representation")
-                .arg(upstream.name);
-            continue;
-        }
-        QByteArray bytes;
-        if (content_encoding == "zstd")
-        {
-            QString decompression_error;
-            const std::optional<QByteArray> restored = decompressTerrainTileFromTransfer(
-                wire_bytes, &decompression_error);
-            if (!restored.has_value())
+            const qint64 now_ms = QDateTime::currentMSecsSinceEpoch();
+            if (transport_failed || (!answered && http_status >= 500))
             {
+                // Did not reach a MAP server: an outage of this upstream.
                 result.status = TerrainProviderFetchStatus::NetworkError;
-                result.error_message = QStringLiteral("MAP upstream '%1': %2")
-                    .arg(upstream.name, decompression_error);
+                result.error_message = transport_failed
+                    ? QStringLiteral("MAP upstream '%1' is unreachable: %2")
+                          .arg(upstream.name, transport_error)
+                    : QStringLiteral("MAP upstream '%1' returned HTTP %2 without MAP identity")
+                          .arg(upstream.name).arg(http_status);
+                this->upstream_health.recordUnreachable(upstream.name, result.error_message, now_ms);
+                next_upstream = true;
                 continue;
             }
-            bytes = restored.value();
-        }
-        else
-            bytes = wire_bytes;
-        if (bytes.size() > MaximumCascadeTerrainTileBytes)
-        {
-            result.status = TerrainProviderFetchStatus::NetworkError;
-            result.error_message = QStringLiteral("MAP upstream returned oversized canonical terrain");
-            continue;
-        }
-        QString decode_error;
-        const std::optional<TerrainTile> tile = decodeTerrainTile(bytes, &decode_error);
-        if (!tile.has_value() || tile->dataset != dataset ||
-            tile->address.zoom != address.zoom || tile->address.x != address.x ||
-            tile->address.y != address.y)
-        {
-            result.status = TerrainProviderFetchStatus::NetworkError;
-            result.error_message = QStringLiteral("MAP upstream '%1' returned invalid terrain data: %2")
-                .arg(upstream.name, decode_error);
-            continue;
-        }
+            this->upstream_health.recordAnswered(upstream.name, instance, now_ms);
+            if (http_status == 202)
+            {
+                if (polling.elapsed() >= poll_budget_ms)
+                {
+                    result.status = TerrainProviderFetchStatus::NetworkError;
+                    result.error_message = QStringLiteral(
+                        "MAP upstream '%1' did not deliver the terrain tile within %2 s")
+                        .arg(upstream.name).arg(poll_budget_ms / 1000);
+                    next_upstream = true;
+                    continue;
+                }
+                // Retry-After clamped to 1..5 s: soon enough to pick up a
+                // finished tile quickly, far enough apart to stay cheap.
+                const qint64 wait_ms = qint64(qBound(1, retry_after_s, 5)) * 1000;
+                QElapsedTimer waited;
+                waited.start();
+                while (waited.elapsed() < wait_ms)
+                {
+                    if (canceled())
+                    {
+                        result.status = TerrainProviderFetchStatus::Cancelled;
+                        result.error_message = QStringLiteral("Terrain cascade canceled");
+                        return result;
+                    }
+                    QThread::msleep(50);
+                }
+                continue; // Poll the same upstream again.
+            }
+            if (!succeeded)
+            {
+                result.status = TerrainProviderFetchStatus::NetworkError;
+                result.error_message = busy
+                    ? QStringLiteral("MAP upstream '%1' is busy").arg(upstream.name)
+                    : QStringLiteral("MAP upstream '%1' returned HTTP %2")
+                          .arg(upstream.name).arg(http_status);
+                if (busy && upstream_busy != nullptr) *upstream_busy = true;
+                next_upstream = true;
+                continue;
+            }
+            if (content_type != terrainTileMimeType() ||
+                revision != QByteArray::number(TerrainNormalizationRevision) ||
+                (content_encoding != "zstd" && !content_encoding.isEmpty()) ||
+                (content_encoding == "zstd" && !cascade.poor_internet_mode) ||
+                wire_bytes.isEmpty() || wire_bytes.size() > maximumCompressedTerrainTileBytes() ||
+                (declared_length_valid && declared_length != wire_bytes.size()))
+            {
+                result.status = TerrainProviderFetchStatus::NetworkError;
+                result.error_message = QStringLiteral("MAP upstream '%1' returned an incompatible terrain representation")
+                    .arg(upstream.name);
+                next_upstream = true;
+                continue;
+            }
+            QByteArray bytes;
+            if (content_encoding == "zstd")
+            {
+                QString decompression_error;
+                const std::optional<QByteArray> restored = decompressTerrainTileFromTransfer(
+                    wire_bytes, &decompression_error);
+                if (!restored.has_value())
+                {
+                    result.status = TerrainProviderFetchStatus::NetworkError;
+                    result.error_message = QStringLiteral("MAP upstream '%1': %2")
+                        .arg(upstream.name, decompression_error);
+                    next_upstream = true;
+                    continue;
+                }
+                bytes = restored.value();
+            }
+            else
+                bytes = wire_bytes;
+            if (bytes.size() > MaximumCascadeTerrainTileBytes)
+            {
+                result.status = TerrainProviderFetchStatus::NetworkError;
+                result.error_message = QStringLiteral("MAP upstream returned oversized canonical terrain");
+                next_upstream = true;
+                continue;
+            }
+            QString decode_error;
+            const std::optional<TerrainTile> tile = decodeTerrainTile(bytes, &decode_error);
+            if (!tile.has_value() || tile->dataset != dataset ||
+                tile->address.zoom != address.zoom || tile->address.x != address.x ||
+                tile->address.y != address.y)
+            {
+                result.status = TerrainProviderFetchStatus::NetworkError;
+                result.error_message = QStringLiteral("MAP upstream '%1' returned invalid terrain data: %2")
+                    .arg(upstream.name, decode_error);
+                next_upstream = true;
+                continue;
+            }
 
-        if (generation != this->cascade_cancel_generation.load(std::memory_order_acquire) ||
-            (cancel_requested && cancel_requested->load(std::memory_order_acquire)))
-        {
-            result.status = TerrainProviderFetchStatus::Cancelled;
-            result.error_message = QStringLiteral("Terrain cascade canceled");
+            if (canceled())
+            {
+                result.status = TerrainProviderFetchStatus::Cancelled;
+                result.error_message = QStringLiteral("Terrain cascade canceled");
+                return result;
+            }
+            const QString file_path = normalizedTilePath(dataset, address);
+            QString directory_error;
+            if (!ensureNormalizedTileDirectory(QFileInfo(file_path).absolutePath(),
+                                               &directory_error))
+            {
+                result.status = TerrainProviderFetchStatus::SourceReadError;
+                result.error_message = directory_error;
+                return result;
+            }
+            QSaveFile file(file_path);
+            if (!file.open(QIODevice::WriteOnly))
+            {
+                result.status = TerrainProviderFetchStatus::SourceReadError;
+                result.error_message = file.errorString();
+                return result;
+            }
+            if (file.write(bytes) != bytes.size() || !file.commit())
+            {
+                result.status = TerrainProviderFetchStatus::SourceReadError;
+                result.error_message = file.errorString();
+                file.cancelWriting();
+                return result;
+            }
+            result.status = TerrainProviderFetchStatus::Ready;
+            result.origin = TerrainDataOrigin::Cache;
+            result.error_message.clear();
             return result;
         }
-        const QString file_path = normalizedTilePath(dataset, address);
-        QString directory_error;
-        if (!ensureNormalizedTileDirectory(QFileInfo(file_path).absolutePath(),
-                                           &directory_error))
-        {
-            result.status = TerrainProviderFetchStatus::SourceReadError;
-            result.error_message = directory_error;
-            return result;
-        }
-        QSaveFile file(file_path);
-        if (!file.open(QIODevice::WriteOnly))
-        {
-            result.status = TerrainProviderFetchStatus::SourceReadError;
-            result.error_message = file.errorString();
-            return result;
-        }
-        if (file.write(bytes) != bytes.size() || !file.commit())
-        {
-            result.status = TerrainProviderFetchStatus::SourceReadError;
-            result.error_message = file.errorString();
-            file.cancelWriting();
-            return result;
-        }
-        result.status = TerrainProviderFetchStatus::Ready;
-        result.origin = TerrainDataOrigin::Cache;
-        result.error_message.clear();
-        return result;
     }
     return result;
 }
@@ -929,11 +1057,15 @@ TerrainProviderFetchResult TerrainData::acquireTileSources(
     }
     if (!cascade.upstreams.isEmpty())
     {
+        bool upstream_busy = false;
         const TerrainProviderFetchResult upstream_result = fetchNormalizedFromUpstreams(
-            dataset, address, cancel_requested, cascade_trace);
+            dataset, address, cancel_requested, cascade_trace, &upstream_busy);
+        // A busy upstream is reachable and will have capacity again soon:
+        // fail this attempt (the caller retries) instead of downloading the
+        // whole Copernicus source tile over the slow link.
         if (upstream_result.status == TerrainProviderFetchStatus::Ready ||
             upstream_result.status == TerrainProviderFetchStatus::Cancelled ||
-            !cascade.allow_direct_fetch)
+            !cascade.allow_direct_fetch || upstream_busy)
             return upstream_result;
     }
     for (const std::unique_ptr<TerrainProvider> &provider : this->providers)
@@ -1224,11 +1356,13 @@ TerrainTileLookupResult TerrainData::fetchAndStoreNormalizedTile(
             this->config.coverage_profile, address.zoom, address.x, address.y) &&
         !cascade.upstreams.isEmpty())
     {
+        bool upstream_busy = false;
         const TerrainProviderFetchResult acquired = fetchNormalizedFromUpstreams(
-            dataset, address, {}, {});
+            dataset, address, {}, {}, &upstream_busy);
         if (acquired.status == TerrainProviderFetchStatus::Ready)
             return readNormalizedTile(dataset, address);
-        if (!cascade.allow_direct_fetch)
+        // A busy upstream: retry later rather than download the source directly.
+        if (!cascade.allow_direct_fetch || upstream_busy)
         {
             result.status = TerrainTileLookupStatus::RemoteFetchError;
             result.error_message = acquired.error_message;

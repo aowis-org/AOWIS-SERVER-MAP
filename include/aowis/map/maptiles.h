@@ -4,6 +4,7 @@
 #include <QObject>
 #include <aowis/map/map_provider.h>
 #include <aowis/map/map_cascade_config.h>
+#include <aowis/map/cascade_upstream_health.h>
 #include <aowis/map/download_coverage.h>
 
 #include <QByteArray>
@@ -90,6 +91,8 @@ public:
     int deleteTiles(const QString &provider, int zoom, int tile_x_min, int tile_x_max,
                     int tile_y_min, int tile_y_max);
     UpstreamActivity upstreamActivity() const;
+    // Reachability, cooldown and learned instance ID per upstream name.
+    QHash<QString, Aowis::Map::CascadeUpstreamState> upstreamHealth() const;
     void cancelUpstreamDownloads();
 
 private:
@@ -106,6 +109,7 @@ private:
         QString url;
         QByteArray api_key;
         bool cascade = false;
+        QString upstream_name; // Cascade sources only
         // A WireGuard upstream: requested through its tunnel's proxy.
         bool tunnelled = false;
         QNetworkProxy proxy;
@@ -113,7 +117,9 @@ private:
 
     struct QueuedDownload
     {
-        QString url; // First attempt: existing per-origin admission accounting.
+        // URL of the attempt in progress (the first source until a failover):
+        // per-origin admission is charged to the origin actually contacted.
+        QString url;
         QString tile_path;
         QString canonical_key;
         QString response_key;
@@ -125,7 +131,10 @@ private:
     enum class DownloadScheduleStatus
     {
         Scheduled,
-        QueueFull
+        QueueFull,
+        // The tile is already being downloaded from an upstream that is
+        // itself waiting for this request (see scheduleMapTileDownload).
+        LoopRefused
     };
 
     QString providerCachePath(const QString &provider) const;
@@ -139,6 +148,7 @@ private:
     bool canStartDownloadLocked(const QueuedDownload &download) const;
     void markDownloadStartedLocked(const QueuedDownload &download);
     void markDownloadFinishedLocked(const QueuedDownload &download);
+    void moveDownloadOriginLocked(const QString &from_url, const QString &to_url);
     // The download's own response key plus those of later requests for the
     // same canonical tile that joined it (e.g. x and x + 2^z).
     QStringList takeResponseKeysLocked(const QueuedDownload &download);
@@ -151,9 +161,9 @@ private:
     bool remote_fetch_enabled = true;
     Aowis::Map::MapCascadeConfig cascade_config;
     QByteArray cascade_instance_id;
-    // New requests check these short transient-failure cooldowns;
-    // permanent misses/auth failures do not suppress a healthy upstream.
-    QHash<QString, qint64> cascade_cooldown_until_ms;
+    // Exponential cooldowns of unreachable upstreams and their learned
+    // instance IDs. An answered failure never suppresses an upstream.
+    Aowis::Map::CascadeUpstreamHealth upstream_health;
     QHash<QString, Aowis::Map::MapProvider> configured_providers;
     // Remote-only providers can never use a direct origin URL fallback.
     QHash<QString, QSet<QString>> inherited_upstreams;
@@ -190,6 +200,10 @@ private:
     QQueue<QueuedDownload> downloads_queued;
     QSet<QString> downloads_queued_keys;
     QHash<QString, QStringList> downloads_joined_response_keys;
+    // Upstream name each running or queued download is asking now (empty:
+    // the original provider). A cascade request must not join a download
+    // that is waiting for the very upstream the request came from.
+    QHash<QString, QString> downloads_current_upstream;
 
 signals:
     void tileReady(QString key, QByteArray data);

@@ -3,6 +3,7 @@
 
 #include <aowis/map/terrain_tile.h>
 #include <aowis/map/map_cascade_config.h>
+#include <aowis/map/cascade_upstream_health.h>
 #include <aowis/map/terrain_provider.h>
 #include <aowis/map/download_coverage.h>
 
@@ -14,6 +15,7 @@
 #include <QHash>
 #include <QMutex>
 #include <QString>
+#include <QStringList>
 #include <QVector>
 
 #include <atomic>
@@ -199,6 +201,16 @@ public:
 
     TerrainUpstreamActivity upstreamActivity() const;
     void cancelUpstreamDownloads();
+    // Reachability, cooldown and learned instance ID per upstream name.
+    QHash<QString, CascadeUpstreamState> upstreamHealth() const;
+    // Upstreams a terrain acquisition for this visited trace may ask: the
+    // usable ones whose known instance is not already in the trace.
+    QStringList cascadeCandidates(const QByteArray &cascade_trace) const;
+    // True when a request with incoming_trace must not join an acquisition
+    // that may ask upstream_names: one of them is waiting for that request
+    // (tie-break: see CascadeUpstreamHealth::refusesJoin).
+    bool cascadeJoinConflicts(const QStringList &upstream_names,
+                              const QByteArray &incoming_trace) const;
 
     // Cache deletion for one XYZ tile range of one zoom level (the map-tile
     // cache's DELETE semantics: y is clamped to the zoom's rows, x wraps
@@ -237,7 +249,7 @@ private:
     TerrainProviderFetchResult fetchNormalizedFromUpstreams(
         const QString &dataset, const TerrainTileAddress &address,
         const std::shared_ptr<std::atomic_bool> &cancel_requested,
-        const QByteArray &cascade_trace) const;
+        const QByteArray &cascade_trace, bool *upstream_busy) const;
     TerrainTileLookupResult fetchAndStoreNormalizedTile(const QString &dataset,
                                                         const TerrainTileAddress &address,
                                                         bool allow_remote_fetch) const;
@@ -246,8 +258,9 @@ private:
     mutable QMutex cascade_config_mutex;
     MapCascadeConfig cascade_config;
     QByteArray cascade_instance_id;
-    mutable QMutex cascade_cooldown_mutex;
-    mutable QHash<QString, qint64> cascade_cooldown_until_ms;
+    // Exponential cooldowns of unreachable upstreams and learned instance
+    // IDs; thread-safe, updated by const acquisition paths.
+    mutable CascadeUpstreamHealth upstream_health;
     std::atomic_uint64_t cascade_cancel_generation{0};
     mutable std::atomic_int cascade_active{0};
     StoragePaths storage_paths;

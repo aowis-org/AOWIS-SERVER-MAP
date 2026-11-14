@@ -24,7 +24,14 @@ struct AvailableMapProvider
     QStringList selected_upstreams; // Effective order after per-provider selection.
     MapProviderAcquisitionMode acquisition_mode = MapProviderAcquisitionMode::Automatic;
     bool direct_fetch_allowed = false;
+    // Inherited only: cascade instance IDs of the MAP servers the definition
+    // passed through, nearest first, not including this server (empty when
+    // an older upstream did not report them).
+    QStringList via;
 };
+
+// Provenance limit, same as the visited-trace hop limit of tile requests.
+inline constexpr int MaximumProviderViaHops = 8;
 
 class ProviderCatalog final : public QObject
 {
@@ -32,6 +39,12 @@ class ProviderCatalog final : public QObject
 public:
     explicit ProviderCatalog(const QString &cache_directory, QObject *parent = nullptr);
 
+    // This server's cascade instance ID (MapTiles::cascadeInstanceId()).
+    // Advertised entries carry it in "via"; an upstream entry that already
+    // passed through this server is dropped, so servers that are upstreams
+    // of each other do not keep re-advertising a provider to one another
+    // after its real origin removed it. Set before configure().
+    void setInstanceId(const QByteArray &instance_id);
     void configure(const QVector<MapProvider> &local_providers,
                    const MapCascadeConfig &cascade);
     void setLocalProviders(const QVector<MapProvider> &local_providers);
@@ -62,6 +75,9 @@ private:
     QHash<QString, QStringList> upstream_routes_;
     QHash<QString, MapProviderAcquisitionMode> acquisition_modes_;
     QHash<QString, QVector<MapProvider>> upstream_catalogs_;
+    // Upstream name -> provider ID -> its "via" list as advertised.
+    QHash<QString, QHash<QString, QStringList>> upstream_via_;
+    QByteArray instance_id_;
     QVector<AvailableMapProvider> available_;
     QByteArray encoded_;
     QNetworkAccessManager network_;
