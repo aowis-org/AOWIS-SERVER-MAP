@@ -235,11 +235,17 @@ int main(int argc, char **argv)
                  raster_result.content_type.startsWith("image/jpeg") &&
                  raster_result.body == jpeg_reference.body,
                  "Three-server raster cascade re-encoded JPEG or returned wrong bytes")) return 1;
-    if (!require(loadFile(QDir(middle_config.cache_directory).filePath(raster_relative)) ==
+    // A JPEG received for a .png route is cached under .jpg, never as .png.
+    QString jpeg_relative = raster_relative;
+    jpeg_relative.chop(3);
+    jpeg_relative += QStringLiteral("jpg");
+    if (!require(loadFile(QDir(middle_config.cache_directory).filePath(jpeg_relative)) ==
                      jpeg_reference.body &&
-                 loadFile(QDir(edge_config.cache_directory).filePath(raster_relative)) ==
-                     jpeg_reference.body,
-                 "Middle or edge failed to persist the exact transferred JPEG")) return 1;
+                 loadFile(QDir(edge_config.cache_directory).filePath(jpeg_relative)) ==
+                     jpeg_reference.body &&
+                 !QFileInfo::exists(QDir(middle_config.cache_directory).filePath(raster_relative)) &&
+                 !QFileInfo::exists(QDir(edge_config.cache_directory).filePath(raster_relative)),
+                 "Middle or edge did not persist the exact transferred JPEG as .jpg")) return 1;
 
     const HttpResult terrain_result = get(application, network,
         QUrl(baseUrl(*edge).toString() + terrain_route));

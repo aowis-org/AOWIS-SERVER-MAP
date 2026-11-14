@@ -225,7 +225,7 @@ honor a valid cascade request. Public GUI responses remain compatible.
 
 | Data | MAP-to-MAP transfer | Local storage |
 | --- | --- | --- |
-| Opaque PNG imagery | Adaptive libjpeg-turbo JPEG at quality 75 when worthwhile | Received image can be cached; avoid repeated lossy encoding across hops |
+| Opaque PNG imagery | Adaptive libjpeg-turbo JPEG at quality 75 when worthwhile | Received image is cached as `.jpg`; avoid repeated lossy encoding across hops |
 | Already JPEG/WebP, transparent PNG, provider lossless-only | Original bytes; no lossy conversion | Original representation |
 | `.aowterrain` | zstd HTTP content encoding only if smaller | Decompressed, validated canonical terrain tile |
 

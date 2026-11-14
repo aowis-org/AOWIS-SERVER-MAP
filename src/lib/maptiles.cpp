@@ -35,6 +35,47 @@ QString downloadOrigin(const QString &url)
         .arg(parsed.scheme(), parsed.host(), QString::number(parsed.port(-1)));
 }
 
+// Cached tiles are stored under the extension of their actual format. A MAP
+// upstream may answer a .png URL with JPEG (adaptive slow-link transfer), and
+// some providers deliver JPEG or WebP; storing those as .png misled every
+// tool looking at the cache. Unknown bytes keep the historical .png name.
+QString rasterTileExtension(const QByteArray &data)
+{
+    if (data.size() >= 3 && static_cast<unsigned char>(data[0]) == 0xff &&
+        static_cast<unsigned char>(data[1]) == 0xd8 && static_cast<unsigned char>(data[2]) == 0xff)
+        return QStringLiteral("jpg");
+    if (data.size() >= 12 && data.startsWith("RIFF") && data.mid(8, 4) == "WEBP")
+        return QStringLiteral("webp");
+    return QStringLiteral("png");
+}
+
+// Every name a cached tile may have, in lookup order. .png first: it is the
+// name of all tiles cached before formats were told apart (whatever their
+// bytes), so existing caches keep working unchanged.
+const QStringList &rasterTileExtensions()
+{
+    static const QStringList extensions = {
+        QStringLiteral("png"), QStringLiteral("jpg"), QStringLiteral("webp")};
+    return extensions;
+}
+
+// "<directory>/<z>/<x>/<y>" without extension.
+QString rasterTileBasePath(const QString &directory, int z, int x, int y)
+{
+    return QDir(directory).filePath(QStringLiteral("%1/%2/%3").arg(z).arg(x).arg(y));
+}
+
+// The existing cached file of a tile, or empty.
+QString existingRasterTilePath(const QString &base_path)
+{
+    for (const QString &extension : rasterTileExtensions())
+    {
+        const QString path = base_path + QLatin1Char('.') + extension;
+        if (QFile::exists(path)) return path;
+    }
+    return {};
+}
+
 int tileMemoryCacheCostKiB(const QByteArray &data)
 {
     const qint64 rounded_cost = (qint64(data.size()) + 1023) / 1024;
@@ -355,8 +396,7 @@ MapTiles::TileRequestResult MapTiles::getTile(const QString &provider, int z, in
     }
 
     const QString cache_path = providerCachePath(provider);
-    const QString file_name = QString("%1/%2/%3.png").arg(z).arg(wrapped_x).arg(y);
-    const QString tile_path = QDir(cache_path).filePath(file_name);
+    const QString tile_base_path = rasterTileBasePath(cache_path, z, wrapped_x, y);
     const Aowis::Map::MapProvider selected_provider = this->configured_providers.value(provider);
 
     if (!this->permanent_data_directory.isEmpty())
@@ -366,9 +406,10 @@ MapTiles::TileRequestResult MapTiles::getTile(const QString &provider, int z, in
             const QByteArray *cached = this->tile_memory_cache.object(canonical_key);
             if (cached != nullptr) return { TileRequestStatus::Ready, *cached };
         }
-        QFile permanent_tile(QDir(this->permanent_data_directory).filePath(
-            QStringLiteral("maptiles/%1/%2").arg(provider, file_name)));
-        if (permanent_tile.open(QIODevice::ReadOnly))
+        QFile permanent_tile(existingRasterTilePath(rasterTileBasePath(
+            QDir(this->permanent_data_directory).filePath(QStringLiteral("maptiles/%1").arg(provider)),
+            z, wrapped_x, y)));
+        if (!permanent_tile.fileName().isEmpty() && permanent_tile.open(QIODevice::ReadOnly))
         {
             const QByteArray permanent_bytes = permanent_tile.readAll();
             if (!permanent_bytes.isEmpty())
@@ -387,8 +428,8 @@ MapTiles::TileRequestResult MapTiles::getTile(const QString &provider, int z, in
     if (memory_tile != nullptr && !memory_tile->isEmpty())
         return { TileRequestStatus::Ready, *memory_tile };
 
-    QFile file(tile_path);
-    if (file.open(QIODevice::ReadOnly))
+    QFile file(existingRasterTilePath(tile_base_path));
+    if (!file.fileName().isEmpty() && file.open(QIODevice::ReadOnly))
     {
         const QByteArray data = file.readAll();
         if (!data.isEmpty())
@@ -407,7 +448,7 @@ MapTiles::TileRequestResult MapTiles::getTile(const QString &provider, int z, in
     if (!may_fetch)
         return { TileRequestStatus::InvalidRequest, {} };
     QueuedDownload download;
-    download.tile_path = tile_path;
+    download.tile_path = tile_base_path;
     download.canonical_key = canonical_key;
     download.response_key = key;
     download.source_fingerprint = rasterSourceFingerprint(provider);
@@ -505,26 +546,22 @@ MapTiles::TileRequestResult MapTiles::getTileForHttp(
             return { TileRequestStatus::Ready, *cached };
     }
 
-    const QString file_name = QStringLiteral("%1/%2/%3.png").arg(z).arg(wrapped_x).arg(y);
     QString read_path;
     bool permanent = false;
     if (!this->permanent_data_directory.isEmpty())
     {
-        const QString path = QDir(this->permanent_data_directory).filePath(
-            QStringLiteral("maptiles/%1/%2").arg(provider, file_name));
-        if (QFile::exists(path))
-        {
-            read_path = path;
-            permanent = true;
-        }
+        read_path = existingRasterTilePath(rasterTileBasePath(
+            QDir(this->permanent_data_directory).filePath(QStringLiteral("maptiles/%1").arg(provider)),
+            z, wrapped_x, y));
+        permanent = !read_path.isEmpty();
     }
     if (read_path.isEmpty())
     {
         const QByteArray *cached = this->tile_memory_cache.object(canonical_key);
         if (cached != nullptr && !cached->isEmpty())
             return { TileRequestStatus::Ready, *cached };
-        const QString path = QDir(providerCachePath(provider)).filePath(file_name);
-        if (QFile::exists(path)) read_path = path;
+        read_path = existingRasterTilePath(
+            rasterTileBasePath(providerCachePath(provider), z, wrapped_x, y));
     }
 
     // Missing files follow the established download/coverage path unchanged.
@@ -719,8 +756,10 @@ int MapTiles::deleteTiles(const QString &provider, int zoom, int tile_x_min, int
         }
 
         QDir x_directory(zoom_dir.filePath(x_directory_name));
-        const QStringList tile_file_names = x_directory.entryList(
-            QStringList() << QStringLiteral("*.png"), QDir::Files);
+        QStringList name_filters;
+        for (const QString &extension : rasterTileExtensions())
+            name_filters << QStringLiteral("*.") + extension;
+        const QStringList tile_file_names = x_directory.entryList(name_filters, QDir::Files);
         for (const QString &tile_file_name : tile_file_names)
         {
             bool tile_y_valid = false;
@@ -1109,8 +1148,18 @@ void MapTiles::startQueuedDownloads()
         startMapTileDownload(download);
 }
 
-bool MapTiles::saveMapTile(const QByteArray &data, const QString &tile_path)
+bool MapTiles::saveMapTile(const QByteArray &data, const QString &tile_base_path)
 {
+    // Accept a path with a known extension too (older callers, tests).
+    QString base_path = tile_base_path;
+    for (const QString &extension : rasterTileExtensions())
+        if (base_path.endsWith(QLatin1Char('.') + extension))
+        {
+            base_path.chop(extension.size() + 1);
+            break;
+        }
+    const QString extension = rasterTileExtension(data);
+    const QString tile_path = base_path + QLatin1Char('.') + extension;
     const QFileInfo info(tile_path);
     QDir dir = info.dir();
     if (!dir.exists() && !dir.mkpath("."))
@@ -1141,5 +1190,17 @@ bool MapTiles::saveMapTile(const QByteArray &data, const QString &tile_path)
         return false;
     }
 
+    // One file per tile: a tile cached before in another format (or under the
+    // old always-.png name) would otherwise shadow the new one on lookup.
+    for (const QString &other : rasterTileExtensions())
+        if (other != extension)
+        {
+            const QString stale = base_path + QLatin1Char('.') + other;
+            if (QFile::exists(stale))
+            {
+                QFile::remove(stale);
+                QFile::remove(stale + QStringLiteral(".http.json"));
+            }
+        }
     return true;
 }

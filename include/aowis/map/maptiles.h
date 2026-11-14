@@ -120,7 +120,7 @@ private:
         // URL of the attempt in progress (the first source until a failover):
         // per-origin admission is charged to the origin actually contacted.
         QString url;
-        QString tile_path;
+        QString tile_path; // Without extension; saveMapTile() adds the format's.
         QString canonical_key;
         QString response_key;
         QByteArray source_fingerprint;
@@ -152,7 +152,9 @@ private:
     // The download's own response key plus those of later requests for the
     // same canonical tile that joined it (e.g. x and x + 2^z).
     QStringList takeResponseKeysLocked(const QueuedDownload &download);
-    static bool saveMapTile(const QByteArray &data, const QString &tile_path);
+    // Writes <tile_base_path>.png/.jpg/.webp according to the data's format
+    // and removes the tile's files in other formats.
+    static bool saveMapTile(const QByteArray &data, const QString &tile_base_path);
 
     QString domainRandomizer(const QString &url) const;
 
