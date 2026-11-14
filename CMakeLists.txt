@@ -413,6 +413,21 @@ if(AOWIS_SERVER_MAP_BUILD_SERVER)
             COMMAND aowis-server-map-cascade-chain-test)
         set_tests_properties(aowis-server-map-cascade-chain
             PROPERTIES TIMEOUT 60)
+        add_executable(aowis-server-map-cascade-mesh-test
+            tests/test_map_cascade_mesh.cpp
+            src/server/server.cpp
+            src/server/server.h
+            src/server/configuration.cpp
+            src/server/configuration.h)
+        target_include_directories(aowis-server-map-cascade-mesh-test
+            PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/server")
+        target_link_libraries(aowis-server-map-cascade-mesh-test
+            PRIVATE AOWIS::Map Qt6::HttpServer Qt6::Concurrent PNG::PNG)
+        add_test(NAME aowis-server-map-cascade-mesh
+            COMMAND aowis-server-map-cascade-mesh-test)
+        # Real timeouts are part of the scenarios (dead upstream, slow hub).
+        set_tests_properties(aowis-server-map-cascade-mesh
+            PROPERTIES TIMEOUT 180)
         add_executable(aowis-server-map-provider-discovery-test
             tests/test_map_provider_discovery.cpp
             src/server/server.cpp
@@ -514,6 +529,7 @@ if(BUILD_TESTING)
             aowis-server-map-terrain-singleflight-http-test
             aowis-server-map-terrain-zstd-http-test
             aowis-server-map-cascade-chain-test
+            aowis-server-map-cascade-mesh-test
             aowis-server-map-provider-discovery-test
             aowis-server-map-raster-jpeg-http-test
             aowis-server-map-server)

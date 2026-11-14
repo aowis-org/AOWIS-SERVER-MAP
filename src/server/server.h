@@ -52,6 +52,7 @@ class Server : public QObject
     friend class TerrainZstdHttpTestAccess;
     friend class RasterJpegHttpTestAccess;
     friend class MapCascadeChainTestAccess;
+    friend class MapCascadeMeshTestAccess;
     friend class MapManagedSettingsHttpTestAccess;
     friend class ProviderDiscoveryTestAccess;
 

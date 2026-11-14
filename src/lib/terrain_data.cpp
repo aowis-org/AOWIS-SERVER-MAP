@@ -818,8 +818,12 @@ TerrainProviderFetchResult TerrainData::fetchNormalizedFromUpstreams(
         // arrives at once, so an upstream that is still working never hits it.
         request.setTransferTimeout(CascadeRequestTimeoutMs);
         request.setRawHeader("Accept", terrainTileMimeType().toUtf8());
-        if (cascade.poor_internet_mode)
-            request.setRawHeader("Accept-Encoding", "zstd");
+        // Always explicit: without the header Qt advertises its own encodings
+        // (zstd included in current Qt releases), the upstream then sends
+        // zstd although this side did not ask for it, and the response is
+        // rejected below as an incompatible representation.
+        request.setRawHeader("Accept-Encoding",
+                             cascade.poor_internet_mode ? "zstd" : "identity");
         request.setRawHeader("X-AOWIS-Cascade-Visited", visited);
         request.setRawHeader(CascadeTileDeliveryHeader, CascadeTileDeliveryCacheFirst);
         if (!upstream.api_key.isEmpty())
