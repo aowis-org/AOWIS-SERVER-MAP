@@ -355,6 +355,16 @@ QString MapTiles::providerUrl(const QString &provider, int zoom, int x, int y) c
     return url;
 }
 
+bool MapTiles::tileDownloadInProgress(const QString &provider, int z, int x, int y) const
+{
+    if (z < 0 || z > 30) return false;
+    const int tile_count = 1 << z;
+    const QString canonical_key = canonicalTileKey(provider, z, positiveModulo(x, tile_count), y);
+    QMutexLocker locker(&this->downloads_mutex);
+    return this->downloads_active.contains(canonical_key) ||
+           this->downloads_queued_keys.contains(canonical_key);
+}
+
 QString MapTiles::canonicalTileKey(const QString &provider, int zoom, int x, int y) const
 {
     return QString("%1/%2/%3/%4").arg(provider).arg(zoom).arg(x).arg(y);

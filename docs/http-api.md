@@ -225,7 +225,7 @@ Terrain deletion runs outside the HTTP event loop. Active source file locks and 
 | Status | Typical meaning |
 | --- | --- |
 | `200` | Requested response completed |
-| `202` | Cache-first raster tile still being fetched, or cache-first terrain tile being acquired |
+| `202` | Cache-first raster tile still being downloaded (`Retry-After: 1`; a tile only being read from disk is answered directly), or cache-first terrain tile being acquired |
 | `400` | Bad parameters, invalid raster request or unsupported datum conversion |
 | `401` | Invalid/missing required API key |
 | `403` | Requested acquisition mode forbidden by administrator policy |

@@ -18,6 +18,13 @@ constexpr int timeout_retry_delay_ms = 250;
 constexpr int overall_timeout_ms = 45000;
 #endif
 constexpr qsizetype maximum_tile_size = 10 * 1024 * 1024;
+// MAP-to-MAP: no bytes for this long means the upstream is gone. Requests
+// are cache-first, so an upstream that is still downloading the tile from
+// its own source answers 202 at once and never runs into this limit.
+constexpr int cascade_transfer_timeout_ms = 10000;
+// How long a MAP upstream may keep answering 202 for one tile before the
+// attempt fails (as an answered failure: no cooldown, next source).
+constexpr qint64 cascade_poll_budget_ms = 120000;
 
 bool hasSupportedImageSignature(const QByteArray &data)
 {
@@ -82,7 +89,14 @@ void TileHttpClient::prepareRequest(QNetworkRequest *request) const
     if (!this->cascade_request) return;
     request->setAttribute(QNetworkRequest::RedirectPolicyAttribute,
                           QNetworkRequest::ManualRedirectPolicy);
-    request->setTransferTimeout(10000);
+    request->setTransferTimeout(cascade_transfer_timeout_ms);
+    // Never hold the connection while the upstream fetches the tile from
+    // its own source over its own (possibly slow) link: that wait has no
+    // data in it, ran into the transfer timeout, and put a healthy
+    // upstream on cooldown, so whole map areas stayed empty. The upstream
+    // answers 202 instead and this client polls (handleCascadeAccepted).
+    request->setRawHeader(Aowis::Map::CascadeTileDeliveryHeader,
+                          Aowis::Map::CascadeTileDeliveryCacheFirst);
     if (!this->cascade_api_key.isEmpty())
         request->setRawHeader("X-API-Key", this->cascade_api_key);
     request->setRawHeader("X-AOWIS-Raster-Source", this->cascade_source);
@@ -100,9 +114,43 @@ void TileHttpClient::recordResponder(QNetworkReply *reply)
     this->responder_instance = this->upstream_answered ? instance : QByteArray();
 }
 
+bool TileHttpClient::handleCascadeAccepted(QNetworkReply *reply, int status_code)
+{
+    // Also without X-AOWIS-Instance: releases before this one answer 202 to
+    // cache-first requests without it.
+    if (!this->cascade_request || status_code != 202)
+        return false;
+    reply->deleteLater();
+    if (!this->poll_elapsed.isValid())
+        this->poll_elapsed.start();
+    if (this->poll_elapsed.elapsed() >= cascade_poll_budget_ms)
+    {
+        emit requestError(RequestFailureReason::UpstreamError,
+                          QStringLiteral("MAP upstream did not deliver the tile within %1 s")
+                              .arg(cascade_poll_budget_ms / 1000));
+        return true;
+    }
+    // 250, 500, 1000, then every 2000 ms: a tile the upstream gets quickly
+    // arrives quickly, a slow one costs few requests.
+    const int delay_ms = qMin(2000, 250 << qMin(this->poll_count, 3));
+    ++this->poll_count;
+    QTimer::singleShot(delay_ms, this, [this]()
+    {
+        if (this->cancel_requested)
+        {
+            emit requestError(RequestFailureReason::Cancelled,
+                              QStringLiteral("Tile download canceled"));
+            return;
+        }
+        get(this->poll_endpoint);
+    });
+    return true;
+}
+
 void TileHttpClient::get(const QString &endpoint)
 {
     this->cancel_requested = false;
+    this->poll_endpoint = endpoint;
 #ifdef Q_OS_WIN
     getAttempt(endpoint, 0);
 #else
@@ -258,7 +306,8 @@ void TileHttpClient::handleReply(QNetworkReply *reply, bool validate_tile_respon
         {
             timeout_description =
                 QStringLiteral("Tile transfer timed out after %1 ms without data")
-                    .arg(transfer_timeout_ms);
+                    .arg(this->cascade_request ? cascade_transfer_timeout_ms
+                                               : transfer_timeout_ms);
         }
 
         emit requestError(RequestFailureReason::Timeout, timeout_description);
@@ -344,6 +393,8 @@ void TileHttpClient::handleReply(QNetworkReply *reply, bool validate_tile_respon
     const QByteArray cache_control = reply->rawHeader("Cache-Control").toLower();
     const bool may_store = !cache_control.contains("no-store") &&
                            !cache_control.contains("private");
+    if (handleCascadeAccepted(reply, status_code))
+        return;
     // A MAP-to-MAP tile must be a complete successful representation.
     // In particular, never treat 202 (still fetching) or 206 as image data.
     if (this->cascade_request && status_code != 200)

@@ -2098,11 +2098,16 @@ void Server::setupRoutes()
                 QHttpServerResponse::StatusCode::ServiceUnavailable), true));
         }
 
-        if (cache_first_delivery)
+        // Cache-first answers 202 only while the tile is really being
+        // downloaded. A Pending result can also be an asynchronous read of
+        // a tile already on disk: hold that request (it completes within
+        // milliseconds) instead of making the client poll for it.
+        if (cache_first_delivery && this->maptiles->tileDownloadInProgress(provider, z, x, y))
         {
-            return makeReadyResponse(cascadeResponse(QHttpServerResponse(
-                "Map tile is being fetched",
-                QHttpServerResponse::StatusCode::Accepted)));
+            QHttpServerResponse accepted("Map tile is being fetched",
+                                         QHttpServerResponse::StatusCode::Accepted);
+            setResponseHeader(accepted, QByteArrayLiteral("Retry-After"), QByteArrayLiteral("1"));
+            return makeReadyResponse(cascadeResponse(std::move(accepted)));
         }
 
         PendingPromise promise = PendingPromise::create();

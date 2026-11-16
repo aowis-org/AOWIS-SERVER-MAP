@@ -1,6 +1,7 @@
 #ifndef HTTP_CLIENT_TILEFETCH_H
 #define HTTP_CLIENT_TILEFETCH_H
 
+#include <QElapsedTimer>
 #include <QObject>
 
 #include <QJsonDocument>
@@ -65,6 +66,11 @@ private:
     int cascade_jpeg_quality = 75;
     bool upstream_answered = false;
     QByteArray responder_instance;
+    // Cache-first polling of a MAP upstream (see handleCascadeAccepted).
+    QString poll_endpoint;
+    QElapsedTimer poll_elapsed;
+    int poll_count = 0;
+    bool handleCascadeAccepted(QNetworkReply *reply, int status_code);
     void prepareRequest(QNetworkRequest *request) const;
 
 signals:

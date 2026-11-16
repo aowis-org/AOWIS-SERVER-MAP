@@ -182,8 +182,17 @@ and keeps working even though nobody waits on the connection. The downstream
 polls every 1–5 s until the tile arrives, its own `terrain/download_deadline_seconds`
 passes, or its job is canceled. A failed upstream acquisition is reported to
 the next poll once. Each request is limited only by 10 s of **inactivity**, not
-by an overall deadline. Raster tiles are small and are still fetched in one
-request.
+by an overall deadline.
+
+Raster tiles use the same scheme: a downstream requests them cache-first, an
+upstream that is still downloading the tile from its own source answers `202`
+(`Retry-After: 1`), and the downstream polls after 250 ms, 500 ms, 1 s, then
+every 2 s, for up to 120 s. A tile the upstream is only reading from its disk
+cache is answered directly, without `202`. Before this, the downstream held
+the request while the upstream fetched from its origin; over a slow or
+congested link that wait regularly exceeded the 10 s inactivity limit, the
+healthy upstream was put on cooldown, and with direct fetching disabled every
+tile failed until the cooldown ended.
 
 ### Provider inheritance and per-provider routing
 
