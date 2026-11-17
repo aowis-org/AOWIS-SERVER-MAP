@@ -44,19 +44,10 @@ test -f /etc/apache2/sites-available/aowis-server-map.conf
 getent passwd aowis-server-map >/dev/null
 getent group aowis-server-map >/dev/null
 
-# Both keys are nonempty, independently generated and saved in the admin INI.
-python3 - <<'PY'
-import configparser
-import re
-settings = configparser.ConfigParser(interpolation=None)
-assert settings.read('/etc/aowis-server-map/map-server.ini')
-read_key = settings.get('authentication', 'api_key')
-delete_key = settings.get('authentication', 'delete_api_key')
-assert re.fullmatch('[0-9a-f]{64}', read_key)
-assert re.fullmatch('[0-9a-f]{64}', delete_key)
-assert read_key != delete_key
-PY
-
+if grep -Eq '^(api_key|delete_api_key)=' "$config"; then
+    echo "Error: installed configuration still contains inbound API keys" >&2
+    exit 1
+fi
 "$binary" --check-config --config "$config" >/dev/null
 "$binary" --print-default-config >/dev/null
 systemd-analyze verify "$unit"
@@ -77,10 +68,9 @@ cleanup_server()
 trap cleanup_server EXIT
 
 printf '\n== Installed binary HTTP smoke test ==\n'
-read_key="$(sed -n 's/^api_key=//p' "$config" | head -n 1)"
 setpriv --reuid "$(id -u aowis-server-map)" --regid "$(id -g aowis-server-map)" --init-groups \
     env STATE_DIRECTORY="$state" CACHE_DIRECTORY="$cache" \
-    "$binary" --config "$config" --require-api-key --require-delete-api-key \
+    "$binary" --config "$config" \
     --listen-address 127.0.0.1 --port 18122 \
     >/tmp/aowis-server-map-package-test.log 2>&1 &
 server_pid=$!
@@ -88,7 +78,6 @@ server_pid=$!
 ready=false
 for attempt in $(seq 1 50); do
     if curl --silent --show-error --max-time 2 \
-        -H "X-API-Key: $read_key" \
         -o /dev/null -f 'http://127.0.0.1:18122/status' 2>/dev/null; then
         ready=true
         break
@@ -97,23 +86,16 @@ for attempt in $(seq 1 50); do
 done
 if [[ "$ready" != true ]]; then
     cat /tmp/aowis-server-map-package-test.log >&2
-    echo 'Error: installed server did not serve authenticated /status.' >&2
+    echo 'Error: installed server did not serve /status.' >&2
     exit 1
 fi
 
 for path in /status /map/v1/providers /terrain/v1/datasets; do
     curl --fail --silent --show-error --max-time 5 \
-        -H "X-API-Key: $read_key" \
         "http://127.0.0.1:18122$path" >/dev/null
 done
-unauthorized="$(curl --silent --max-time 5 -o /dev/null -w '%{http_code}' \
-    'http://127.0.0.1:18122/status')"
-if [[ "$unauthorized" != 401 ]]; then
-    printf 'Error: unauthenticated /status returned HTTP %s instead of 401.\n' "$unauthorized" >&2
-    exit 1
-fi
 cleanup_server
-printf '%s\n' 'PASS: installed binary responds correctly with read-key authorization.'
+printf '%s\n' 'PASS: installed binary serves GET endpoints without API keys.'
 
 printf '\n== Configuration and state preservation on upgrade ==\n'
 cat >> "$config" <<'EOF_ADMIN'

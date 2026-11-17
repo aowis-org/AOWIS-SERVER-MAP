@@ -13,16 +13,6 @@ script_directory="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 project_directory="$(cd -- "$script_directory/../.." && pwd)"
 source_binary="$project_directory/build-linux/aowis-server-map"
 enable_now=false
-temporary_config=""
-
-cleanup()
-{
-    if [[ -n "$temporary_config" && -e "$temporary_config" ]]; then
-        rm -f -- "$temporary_config"
-    fi
-}
-trap cleanup EXIT
-
 print_usage()
 {
     cat <<EOF_USAGE
@@ -34,10 +24,10 @@ Options:
   --enable-now     Enable and start the service after installation.
   -h, --help       Show this help.
 
-On first installation, the installer creates $config_file with separate random
-read and delete API keys and prints both keys. Existing configuration files are
-never overwritten and existing keys are never changed. The vendor service unit
-is installed under /usr/local/lib/systemd/system; /etc unit overrides are preserved.
+On first installation, the installer creates $config_file from the bundled
+example without API keys. Existing configuration files are preserved. The
+vendor service unit is installed under /usr/local/lib/systemd/system; /etc
+unit overrides are preserved.
 EOF_USAGE
 }
 
@@ -77,7 +67,7 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
-for command_name in chmod getent groupadd install mktemp openssl rm systemctl useradd; do
+for command_name in getent groupadd install systemctl useradd; do
     if ! command -v "$command_name" >/dev/null 2>&1; then
         echo "Error: required command is unavailable: $command_name" >&2
         exit 1
@@ -105,42 +95,16 @@ if [[ ! -d "$config_directory" ]]; then
     install -d -o root -g "$service_group" -m 0750 "$config_directory"
 fi
 
-created_config=false
-api_key=""
-delete_api_key=""
 if [[ -e "$config_file" || -L "$config_file" ]]; then
     if [[ ! -f "$config_file" || ! -r "$config_file" ]]; then
         echo "Error: existing configuration path is not a readable file: $config_file" >&2
         exit 1
     fi
     echo "Preserved existing configuration: $config_file"
-    echo "Verify that authentication/api_key and authentication/delete_api_key are both set."
 else
-    api_key="$(openssl rand -hex 32)"
-    delete_api_key="$(openssl rand -hex 32)"
-    while [[ "$delete_api_key" == "$api_key" ]]; do
-        delete_api_key="$(openssl rand -hex 32)"
-    done
-    temporary_config="$(mktemp)"
-    chmod 0600 "$temporary_config"
-
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        case "$line" in
-            api_key=)
-                printf 'api_key=%s\n' "$api_key"
-                ;;
-            delete_api_key=)
-                printf 'delete_api_key=%s\n' "$delete_api_key"
-                ;;
-            *)
-                printf '%s\n' "$line"
-                ;;
-        esac
-    done < "$script_directory/map-server.ini" > "$temporary_config"
-
-    install -m 0640 -o root -g "$service_group" "$temporary_config" "$config_file"
-    created_config=true
-    echo "Installed configuration with generated API keys: $config_file"
+    install -m 0640 -o root -g "$service_group" \
+        "$script_directory/map-server.ini" "$config_file"
+    echo "Installed initial configuration: $config_file"
 fi
 
 install -D -m 0644 "$script_directory/$service_name.service" "$unit_file"
@@ -158,20 +122,6 @@ systemctl daemon-reload
 echo "Installed binary: $install_binary"
 echo "Installed systemd unit: $unit_file"
 echo "Edit the configuration with: sudoedit $config_file"
-
-if [[ "$created_config" == true ]]; then
-    cat <<EOF_KEYS
-
-Generated API keys
-------------------
-Read API key:   $api_key
-Delete API key: $delete_api_key
-
-The keys are stored in $config_file. The read key authorizes status and tile GET
-requests. The delete key authorizes cache DELETE requests. Record them now for
-the clients or reverse proxy configuration that will use them.
-EOF_KEYS
-fi
 
 if [[ "$enable_now" == true ]]; then
     systemctl enable --now "$service_name.service"

@@ -94,10 +94,6 @@ public:
         QString terrain_cache_directory;
         QString terrain_coverage;
         bool copernicus_enabled = true;
-        QByteArray api_key;
-        QByteArray delete_api_key;
-        bool require_api_key = false;
-        bool require_delete_api_key = false;
     };
 
     explicit Server(const Config &config, QObject *parent = nullptr);
@@ -122,9 +118,6 @@ private:
     QFuture<QHttpServerResponse> submitTerrainGrid(
         const Aowis::Map::TerrainAnalysisGridRequest &request,
         const QHttpServerRequest *client_request = nullptr);
-    bool isReadAuthorized(const QHttpServerRequest &request) const;
-    bool isDeleteAuthorized(const QHttpServerRequest &request) const;
-    bool requestContainsKey(const QHttpServerRequest &request, const QByteArray &expected_key) const;
     static QString terrainClientKey(const QHostAddress &address, quint16 port);
     void trackTerrainSocket(QTcpSocket *socket);
     void abandonTerrainWaiters(QTcpSocket *socket);

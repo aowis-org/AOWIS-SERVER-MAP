@@ -173,7 +173,6 @@ int main(int argc, char **argv)
     Server::Config root_config = serverConfig(directory.path() + QStringLiteral("/root"));
     root_config.map_remote_fetch_enabled = false;
     root_config.terrain_remote_fetch_enabled = false;
-    root_config.api_key = QByteArrayLiteral("root-read-key");
     std::unique_ptr<Server> root = std::make_unique<Server>(root_config);
     if (!require(root->start(), "Unable to start root MAP server")) return 1;
 
@@ -201,15 +200,12 @@ int main(int argc, char **argv)
         "Unable to seed root terrain cache")) return 1;
 
     Server::Config middle_config = serverConfig(directory.path() + QStringLiteral("/middle"));
-    middle_config.api_key = QByteArrayLiteral("middle-read-key");
-    middle_config.cascade.upstreams.append(upstream(QStringLiteral("root"), *root,
-                                                    root_config.api_key));
+    middle_config.cascade.upstreams.append(upstream(QStringLiteral("root"), *root, {}));
     std::unique_ptr<Server> middle = std::make_unique<Server>(middle_config);
     if (!require(middle->start(), "Unable to start middle MAP server")) return 1;
 
     Server::Config edge_config = serverConfig(directory.path() + QStringLiteral("/edge"));
-    edge_config.cascade.upstreams.append(upstream(QStringLiteral("middle"), *middle,
-                                                  middle_config.api_key));
+    edge_config.cascade.upstreams.append(upstream(QStringLiteral("middle"), *middle, {}));
     std::unique_ptr<Server> edge = std::make_unique<Server>(edge_config);
     if (!require(edge->start(), "Unable to start edge MAP server")) return 1;
 
@@ -221,7 +217,7 @@ int main(int argc, char **argv)
     const QByteArray reference_trace = QByteArrayLiteral("00000000-0000-4000-8000-000000000001");
     const HttpResult jpeg_reference = get(application, network,
         QUrl(baseUrl(*root).toString() + raster_route), reference_trace,
-        QByteArrayLiteral("adaptive-jpeg;quality=75"), root_config.api_key);
+        QByteArrayLiteral("adaptive-jpeg;quality=75"));
     if (!require(jpeg_reference.code == 200 &&
                  jpeg_reference.content_type.startsWith("image/jpeg") &&
                  jpeg_reference.body.size() < png.size(),

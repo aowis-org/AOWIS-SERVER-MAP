@@ -9,8 +9,8 @@ Provider state: /var/lib/aowis-server-map/providers.ini
 Cache root:    /var/cache/aowis-server-map/
 
 On first installation, the package creates a service account and an
-administrator INI containing independent, randomly generated read and delete
-API keys. If the INI exists, the package preserves its content and permissions.
+administrator INI copied from the sample configuration. No inbound API keys
+are generated. If the INI exists, the package preserves its content and permissions.
 It does not merge or replace administrator configuration during upgrades.
 
 The service runs as the unprivileged aowis-server-map user and provisions
@@ -50,8 +50,9 @@ The package installs two Apache reverse-proxy templates disabled:
 Enable only the template appropriate for the installation, after replacing its
 sample domain/backend/origin values. Internet-facing deployments must terminate
 HTTPS at the proxy and restrict direct network access to the map-server port.
-The map-provider PUT API currently has no authentication; only trusted clients
-may reach it.
+The complete MAP HTTP API currently has no inbound authentication, including
+management PUT and destructive DELETE requests. Only trusted clients may
+reach it until AOWIS identity-based authorization is implemented.
 
 More instructions: /usr/share/doc/aowis-server-map/ or the source repository's
 README.md and configs/systemd/README.md.

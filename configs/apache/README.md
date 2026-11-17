@@ -13,8 +13,9 @@ one based on where the GUI, proxy and backend run.
 Both templates forward the map/terrain API (including provider catalog,
 upstream activity and cache-management routes). Their CORS response headers
 are intended for a configured browser GUI origin; **CORS is not authentication**.
-In particular, the map-provider editing `PUT /map/v1/providers` route currently
-has no API-key check. Only trusted clients should be able to reach it.
+All incoming MAP requests, including management PUT and destructive DELETE,
+currently have no application-layer authentication. Only trusted clients
+should be able to reach it.
 
 ## Debian package installation
 
@@ -126,8 +127,7 @@ For a first-time **manual** install, copy the repository template to
 do not overwrite an existing file. When using the Debian package the file
 already exists.
 
-The reverse proxy passes `Authorization` and `X-API-Key` headers through to the
-backend. Read endpoints use `authentication/api_key`, while cache DELETE and
-upstream cancellation use `authentication/delete_api_key`. The provider-edit
-PUT endpoint is currently unauthenticated; network-level access restrictions
-remain essential. See [the API reference](../../docs/http-api.md).
+The reverse proxy is not an authentication layer by itself. The MAP backend
+currently accepts all inbound GET, PUT and DELETE requests without credentials.
+Configure explicit network restrictions or proxy authentication for untrusted
+networks; CORS is not sufficient. See [the API reference](../../docs/http-api.md).

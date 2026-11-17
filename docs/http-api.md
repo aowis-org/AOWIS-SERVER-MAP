@@ -2,10 +2,14 @@
 
 All routes use the configured server host and port (default `http://127.0.0.1:8122`). The server speaks HTTP through Qt 6 QHttpServer. For external access place it behind a trusted TLS reverse proxy rather than exposing the backend listener directly.
 
-- **Read authentication:** GET endpoints require `authentication/api_key` when that key is configured; otherwise read requests are open in user mode.
-- **Administrative authentication:** cache DELETE and upstream cancellation endpoints require `authentication/delete_api_key`. If that key is empty, those operations are **disabled**, not anonymous.
-- **Provider editing exception:** `PUT /map/v1/providers` has **no API-key check**. Restrict it to trusted clients at the network/proxy boundary. CORS alone does not restrict access.
-- For authenticated requests, send `X-API-Key: <appropriate-key>` or `Authorization: Bearer <appropriate-key>`.
+**Security (temporary development mode):** the MAP HTTP API does not authenticate
+incoming requests. GET, PUT and DELETE—including destructive cache/source deletion,
+provider administration and upstream cancellation—are reachable by any client
+with network access to the server. Limit the listener to trusted clients with
+loopback/private binding, firewall rules or an authenticated reverse proxy.
+CORS alone does not provide access control. The previous inbound read/delete
+API keys and their CLI/configuration options have been removed. Outgoing keys
+for older/third-party upstreams are a separate configuration feature.
 
 Except where noted, successful GETs use HTTP `200`. `OPTIONS` is supported for the registered routes. A full request/admission queue returns HTTP `503`; terrain admission paths may include `Retry-After: 1`.
 
@@ -16,10 +20,10 @@ Except where noted, successful GETs use HTTP `200`. `OPTIONS` is supported for t
 | GET | `/status` | Plain-text Qt/server and terrain status |
 | GET | `/map/v1/providers` | Local editable raster-provider catalog |
 | GET | `/map/v1/providers/available` | Local + inherited providers, read-only |
-| PUT | `/map/v1/providers` | Replace and persist local provider catalog (**unauthenticated**) |
-| PUT | `/map/v1/providers/inherited` | Locally enable/disable one inherited provider (admin key) |
-| PUT | `/map/v1/providers/upstreams` | Set/reset an ordered subset of MAP upstreams for one provider (admin key) |
-| PUT | `/map/v1/providers/acquisition` | Set Automatic, Cascade or Direct raster acquisition (admin key) |
+| PUT | `/map/v1/providers` | Replace and persist local provider catalog (unauthenticated) |
+| PUT | `/map/v1/providers/inherited` | Locally enable/disable one inherited provider (unauthenticated) |
+| PUT | `/map/v1/providers/upstreams` | Set/reset an ordered subset of MAP upstreams for one provider (unauthenticated) |
+| PUT | `/map/v1/providers/acquisition` | Set Automatic, Cascade or Direct raster acquisition (unauthenticated) |
 | GET | `/<provider-uuid>/<z>/<x>/<y>.png` | Raster image; `Content-Type` reflects PNG/JPEG/WebP bytes (including MAP transfer variants) |
 | DELETE | `/cache/<provider-uuid>/<z>/<xmin>/<xmax>/<ymin>/<ymax>` | Number of deleted raster cache entries |
 | GET | `/upstream/v1/activity` | Raster and terrain `active`/`queued` counts |
@@ -78,7 +82,6 @@ MAP servers and GUI clients. Each entry has the usual provider fields plus
 `via` (cascade instance IDs of the MAP servers the definition passed through,
 this server first; an entry whose `via` already contains the downstream's own
 ID, or has 8 entries, is not inherited).
-This endpoint requires the ordinary read API key if configured.
 It retains validated, last-known-good inherited providers when an upstream is
 unreachable. Editing via PUT remains **local-only**; it cannot alter inherited
 providers or upstream catalogs.
@@ -91,14 +94,12 @@ survives upstream outages. To disable one inherited provider:
 
 ```bash
 curl -i -X PUT 'http://127.0.0.1:8122/map/v1/providers/inherited' \
-  -H 'X-API-Key: YOUR_ADMIN_DELETE_KEY' \
   -H 'Content-Type: application/json' \
   -d '{"id":"<provider-uuid>","enabled":false}'
 ```
 
-Set `enabled:true` to restore it. This endpoint requires the **delete/admin
-API key** even when read access is public; a missing admin key disables writes.
-It returns `404` for a local or unknown provider and `409` for concurrent
+Set `enabled:true` to restore it. No request key is required in this temporary
+development mode. It returns `404` for a local or unknown provider and `409` for concurrent
 CONFIG changes. `/map/v1/providers` remains the local-only editable catalog.
 
 A PUT replaces **the entire catalog**, not just selected entries:
@@ -122,25 +123,22 @@ curl -i -X PUT 'http://127.0.0.1:8122/map/v1/providers' \
 
 Up to 100 providers are accepted. The server validates the UUIDs, URL templates and zoom limits before updating the in-memory catalog and atomically saving MAP-owned AOWIS-CONFIG records. It **never rewrites the administrator's `map-server.ini`**. The `providers` array can be intentionally empty. A URL change separates the disk-cache variant so imagery from the previous upstream is not silently reused.
 
-> The PUT endpoint currently has **no read-key or delete-key authentication**. Apply trusted-client restrictions before deploying this feature on any shared network.
+> All MAP management routes currently lack inbound authentication. Apply trusted-client restrictions before exposing them beyond the local machine.
 
 ### Provider routing and acquisition
 
 These operations change **this downstream only**, not the upstream MAP servers.
-They require the **delete/admin key** (even when read requests are public).
-The server validates upstream names against the advertised provider catalog and
+They are currently **unauthenticated**. The server validates upstream names against the advertised provider catalog and
 persists the result through MAP-owned AOWIS-CONFIG.
 
 ```bash
 # Prefer backup only for a provider already advertised by backup:
 curl -i -X PUT 'http://127.0.0.1:8122/map/v1/providers/upstreams' \
-  -H 'X-API-Key: YOUR_ADMIN_DELETE_KEY' \
   -H 'Content-Type: application/json' \
   -d '{"id":"0381bc44-67e9-5af9-aeb0-023ccba36658","upstreams":["backup"]}'
 
 # Forbid the original imagery source for this provider:
 curl -i -X PUT 'http://127.0.0.1:8122/map/v1/providers/acquisition' \
-  -H 'X-API-Key: YOUR_ADMIN_DELETE_KEY' \
   -H 'Content-Type: application/json' \
   -d '{"id":"0381bc44-67e9-5af9-aeb0-023ccba36658","mode":"cascade"}'
 ```
@@ -157,7 +155,7 @@ mean "block every upstream". Unknown or repeated names are rejected. Modes:
 Raster provider modes **do not apply to terrain**, which follows the global
 cascade configuration. Mode and route changes apply immediately; existing
 cached tiles remain readable for enabled providers. Expected errors include
-`400` (invalid JSON/value), `401` (missing admin key), `403` (forbidden Direct),
+`400` (invalid JSON/value), `403` (forbidden Direct),
 `404` (unknown provider), `409` (stale CONFIG revision), and `503` (managed
 settings unavailable). See [Cascading MAP servers](map-cascading.md) for setup
 and offline semantics.
@@ -206,10 +204,10 @@ For larger windows, request adjacent subdivisions with cell centers aligned to t
 
 ## Cache deletion and upstream cancellation
 
-Delete requests require the **delete API key**:
+Delete requests are currently **unauthenticated**:
 
 ```bash
-curl -i -X DELETE -H 'X-API-Key: YOUR_DELETE_KEY' \
+curl -i -X DELETE \
   'http://127.0.0.1:8122/terrain/v1/cache/copernicus-glo30/8/133/133/86/86'
 ```
 
@@ -227,7 +225,6 @@ Terrain deletion runs outside the HTTP event loop. Active source file locks and 
 | `200` | Requested response completed |
 | `202` | Cache-first raster tile still being downloaded (`Retry-After: 1`; a tile only being read from disk is answered directly), or cache-first terrain tile being acquired |
 | `400` | Bad parameters, invalid raster request or unsupported datum conversion |
-| `401` | Invalid/missing required API key |
 | `403` | Requested acquisition mode forbidden by administrator policy |
 | `409` | Concurrent CONFIG edit conflict or cascade-loop rejection |
 | `404` | Requested terrain/source data unavailable |

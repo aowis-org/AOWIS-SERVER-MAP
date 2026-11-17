@@ -100,8 +100,8 @@ QString joinedValue(const QVariant &value)
 }
 
 // QSettings splits an unquoted value at commas into a QStringList, whose
-// toString() is empty. For single-string keys that silently loses the value
-// (an API key would disable authentication), so reject it with a hint.
+// toString() is empty. Reject unquoted commas in any single-string value
+// rather than silently dropping the configured value.
 bool readSingleString(QSettings *settings, const QString &key, const QString &fallback,
                       QString *value, QString *error_message)
 {
@@ -873,24 +873,6 @@ bool MapServerConfiguration::loadConfigFile(const QString &path, Server::Config 
         }
     }
 
-    if (settings.contains(QStringLiteral("authentication/api_key")))
-    {
-        QString api_key;
-        if (!readSingleString(&settings, QStringLiteral("authentication/api_key"), QString(),
-                              &api_key, error_message))
-            return false;
-        config->api_key = api_key.toUtf8();
-    }
-
-    if (settings.contains(QStringLiteral("authentication/delete_api_key")))
-    {
-        QString delete_api_key;
-        if (!readSingleString(&settings, QStringLiteral("authentication/delete_api_key"), QString(),
-                              &delete_api_key, error_message))
-            return false;
-        config->delete_api_key = delete_api_key.toUtf8();
-    }
-
     if (settings.status() == QSettings::AccessError)
     {
         *error_message = QStringLiteral("Failed to access configuration file: %1").arg(path);
@@ -970,7 +952,6 @@ QByteArray MapServerConfiguration::defaultConfigText()
         "[terrain_provider.copernicus]\n"
         "enabled=true\nremote_fetch_enabled=true\n"
         "; coverage=projects  (optional provider-specific override)\n\n"
-        "[authentication]\napi_key=\ndelete_api_key=\n"
     ).arg(defaults.listen_address.toString())
      .arg(defaults.port)
      .arg(defaults.maximum_pending_requests)

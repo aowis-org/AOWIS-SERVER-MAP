@@ -11,7 +11,7 @@ server never needs to write to `/etc`.
 | --- | --- |
 | `/usr/bin/aowis-server-map` | Installed executable |
 | `/usr/share/aowis-server-map/map-server.ini` | Packaged example INI (Debian package) |
-| `/etc/aowis-server-map/map-server.ini` | Administrator INI and API keys |
+| `/etc/aowis-server-map/map-server.ini` | Administrator INI |
 | `/var/lib/aowis-server-map/config/server-map/` | MAP-owned AOWIS-CONFIG providers, cascade, inherited-provider overrides and routing |
 | `/var/lib/aowis-server-map/providers.ini` | Legacy provider catalog, imported once and retained for rollback |
 | `/var/lib/aowis-server-map/data/` | Permanent administrator-supplied data, if configured |
@@ -28,11 +28,10 @@ The unit explicitly starts with:
 
 ```text
 --config /etc/aowis-server-map/map-server.ini
---require-api-key
---require-delete-api-key
 ```
 
-Both read and delete API keys must be configured for the packaged service.
+There is no inbound API-key authentication during development. Limit network
+access to trusted clients, including for management and destructive operations.
 
 ## Debian package installation
 
@@ -51,8 +50,8 @@ Install the resulting `dist/*.deb` on your actual target system with
 `sudo apt install ./dist/<package-filename>.deb`.
 
 The package installs the vendor unit under `/usr/lib/systemd/system` and a
-sample INI under `/usr/share`. It creates an administrator configuration with
-two independent random API keys only when no configuration exists. It preserves
+sample INI under `/usr/share`. It creates an administrator configuration from
+the sample only when no configuration exists. It preserves
 existing `/etc/aowis-server-map/map-server.ini` contents and permissions on
 subsequent package operations. The service account is `aowis-server-map`.
 
@@ -83,9 +82,8 @@ sudo configs/systemd/install.sh --binary /path/to/aowis-server-map
 The installer creates the service account, installs the binary as
 `/usr/bin/aowis-server-map`, installs the vendor unit at
 `/usr/local/lib/systemd/system/aowis-server-map.service`, and prepares a fresh
-`/etc/aowis-server-map/map-server.ini` with random read/delete keys only if
-missing. It prints newly generated keys once. Re-running it updates the binary
-and vendor unit without rewriting an existing `/etc` configuration, keys,
+`/etc/aowis-server-map/map-server.ini` only if missing. Re-running it updates the binary
+and vendor unit without rewriting an existing `/etc` configuration,
 permissions or administrator-owned service overrides.
 
 If the service was not started during installation:
@@ -136,8 +134,7 @@ sudo -u aowis-server-map env \
   STATE_DIRECTORY=/var/lib/aowis-server-map \
   CACHE_DIRECTORY=/var/cache/aowis-server-map \
   /usr/bin/aowis-server-map --check-config \
-    --config /etc/aowis-server-map/map-server.ini \
-    --require-api-key --require-delete-api-key
+    --config /etc/aowis-server-map/map-server.ini
 ```
 
 The environment variables matter: a bare `sudo aowis-server-map --check-config
@@ -161,12 +158,13 @@ out-of-process CONFIG records requires a service restart:
 sudo systemctl restart aowis-server-map.service
 ```
 
-Local provider edits and authenticated per-provider enablement, routing and
-acquisition-mode edits apply immediately through REST; see
+Local provider edits and per-provider enablement, routing and
+acquisition-mode edits apply immediately through unauthenticated REST; see
 [configuration](../../docs/configuration.md#what-goes-where) and
 [cascading](../../docs/map-cascading.md) for details.
-**Security:** `PUT /map/v1/providers` currently has no API-key authorization;
-restrict access to trusted clients at the network/proxy layer.
+**Security:** all MAP HTTP requests are currently unauthenticated, including
+management PUT and destructive DELETE operations. Restrict access to trusted
+clients at the network/proxy layer.
 
 For office projects in multiple places, the administrator can define several
 `[region.<id>]` bounding rectangles, one `[coverage.<id>]` with progressively
@@ -189,10 +187,9 @@ port=8122
 ```
 
 Allow TCP port 8122 **only from the reverse proxy** in the host firewall. The
-proxy should terminate HTTPS. The provider-editing `PUT /map/v1/providers`
-endpoint currently has no API authentication: don't expose it to untrusted
-clients. Neither a reverse proxy nor CORS response headers alone authorize
-this operation.
+proxy should terminate HTTPS and restrict all write and delete operations
+to trusted administrators. Currently MAP authenticates no incoming requests.
+CORS response headers alone never authorize an operation.
 
 See [Apache reverse proxy configurations](../apache/README.md) for templates.
 For complete settings and API access controls, consult the

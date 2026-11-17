@@ -155,7 +155,7 @@ For event-loop timer-scheduling warnings during normal runs, opt in with `AOWIS_
 
 - The current supported Internet terrain dataset is **Copernicus GLO-30**; its source is a DSM in EGM2008, not bare-earth hydraulic elevations. Map does not perform cross-datum conversion.
 - Analysis grids use original GeoTIFF source-pixel sampling, rather than normalized renderer tiles. The two products have different precision and sampling semantics.
-- `PUT /map/v1/providers` currently has **no API-key authentication**. Protect it at the network/proxy level; the read and delete keys cover different endpoint groups.
+- All incoming MAP HTTP endpoints are currently **unauthenticated**, including PUT and DELETE. Protect the listener at the network/proxy level until AOWIS security authorization is implemented.
 - Bind QHttpServer to loopback or a protected private interface. Terminate public HTTPS at Apache or another suitable reverse proxy. CORS is not authorization.
 
 See [Configuration](configuration.md), [HTTP API](http-api.md), [terrain sources](terrain-providers.md), [elevation contract](terrain-elevation-contract.md), and [systemd](../configs/systemd/README.md)/[Apache](../configs/apache/README.md) deployment.

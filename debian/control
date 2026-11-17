@@ -9,10 +9,10 @@ Homepage: https://aowis.org/
 
 Package: aowis-server-map
 Architecture: any
-Depends: ${shlibs:Depends}, ${misc:Depends}, adduser, apache2, openssl, systemd
+Depends: ${shlibs:Depends}, ${misc:Depends}, adduser, apache2, systemd
 Suggests: certbot, python3-certbot-apache
 Description: AOWIS caching map tile server
  AOWIS Server Map is a Qt-based HTTP service that caches map tiles for the
- AOWIS Server GUI. The package installs a hardened systemd service, generates
- separate read and delete API keys on first installation, and provides disabled
- Apache reverse-proxy site templates for local and Internet-facing deployments.
+ AOWIS Server GUI. The package installs a hardened systemd service, provides disabled Apache reverse-proxy site templates for local and
+ Internet-facing deployments. Access must be restricted at the network
+ boundary until user-based authorization is implemented.

@@ -98,12 +98,11 @@ checks actual installation and package-manager lifecycle behavior:
 
 1. Install the package with `apt`, including declared runtime dependencies.
 2. Verify the binary, service unit, Apache templates and dedicated user/group.
-3. Check the installed configuration and distinct random API keys.
+3. Check that the installed configuration no longer generates inbound API keys.
 4. Validate the vendor unit with `systemd-analyze verify`.
 5. Start the **installed** binary as its unprivileged service account, on
-   container-local port **18122**, with the installed INI and required API keys.
-6. Verify authenticated status, provider-list, and terrain-dataset HTTP reads;
-   verify that unauthenticated status is denied.
+   container-local port **18122**, with the installed INI and no API keys.
+6. Verify unauthenticated status, provider-list, and terrain-dataset HTTP reads.
 7. Upgrade to the next package revision and verify that `/etc` configuration,
    permissions, `/var/lib` provider state, and `/var/cache` contents survive.
 8. Remove/reinstall the package and check preservation again, then purge and

@@ -45,7 +45,7 @@ jpeg_quality=75
 ```
 
 `servers` sets **failover order**. Names are unique identifiers, not hostnames;
-each entry has its own MAP URL and **upstream read key**. Omit a redundant
+each entry has its own MAP URL and optional **outgoing upstream API key** for legacy/third-party services. Omit a redundant
 upstream if you only have one. Use HTTPS or a protected private tunnel across
 the WAN. Do not place keys in a URL or publish this file.
 
@@ -70,7 +70,7 @@ upstream list, direct-fetch policy and slow-link settings. Changes are autosaved
 through the MAP library's AOWIS-CONFIG repository and applied live to the
 embedded MAP engine (`MapTiles::setCascadeConfig`, `TerrainData::setCascadeConfig`)
 and provider discovery; no separate MAP daemon or GUI restart is required.
-Later requests use the new upstreams, read keys, order and options; downloads
+Later requests use the new upstreams, optional upstream credentials, order and options; downloads
 in flight from a changed upstream set are canceled and retried, upstream
 cooldowns are reset, and cached tiles stay valid. A setting that fails
 validation is not saved and the previous configuration stays in use. On a separate
@@ -216,7 +216,7 @@ On the downstream you can independently:
 
 These overrides are persisted **on the downstream** in MAP-owned AOWIS-CONFIG,
 not forwarded to upstream servers. Administrator download restrictions always
-win. Routing and acquisition changes apply immediately via authenticated
+win. Routing and acquisition changes apply immediately via unauthenticated
 `PUT /map/v1/providers/upstreams` and `PUT /map/v1/providers/acquisition`.
 The GUI presents these settings in **Map Settings**; full REST examples are in
 [HTTP API — Provider routing](http-api.md#provider-routing-and-acquisition).
@@ -263,17 +263,17 @@ this MAP-only zstd encoding. Downstreams validate both kinds before caching.
 ## Verify and troubleshoot
 
 ```bash
-# On the site MAP server (supply its read key when configured):
-curl -fsS -H 'X-API-Key: SITE_READ_KEY' \
+# On the site MAP server (current MAP releases require no inbound key):
+curl -fsS \
   http://127.0.0.1:8122/map/v1/providers/available
-curl -fsS -H 'X-API-Key: SITE_READ_KEY' \
+curl -fsS \
   http://127.0.0.1:8122/upstream/v1/activity
 
 # Run the MAP tests, including cascading, source validation and transfer codecs:
 ./compile_linux_tests.sh
 ```
 
-If an inherited layer does not appear, check the **upstream read key**, the
+If an inherited layer does not appear, check any **upstream credential for legacy/third-party servers**, the
 upstream's `/map/v1/providers/available`, and whether the provider is enabled
 and remote-fetchable there. If the catalog appears but tiles are missing, check
 local download/coverage restrictions, the selected upstream names, provider

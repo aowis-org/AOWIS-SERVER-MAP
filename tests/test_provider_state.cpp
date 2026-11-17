@@ -55,8 +55,7 @@ int main(int argc, char **argv)
         "name=Administrator Provider\n"
         "url=https://example.org/{z}/{x}/{y}.png\n"
         "min_zoom=0\nmax_zoom=12\n"
-        "coverage=projects\n"
-        "[authentication]\napi_key=unchanged-secret\n");
+        "coverage=projects\n");
     if (!expect(writeFile(admin_path, admin_content), QStringLiteral("Could not write admin INI")))
         return 1;
 
@@ -147,25 +146,30 @@ int main(int argc, char **argv)
     if (!expect(MapServerConfiguration::saveMapProvidersToState(state_path, modified, &error), error))
         return 1;
 
-    // An unquoted comma turns a single-string INI value into a list. That
-    // must be rejected instead of silently emptying an API key.
+    // The upstream API-key field remains supported for old MAP/third-party
+    // upstreams. Its single-string parsing still rejects unquoted commas.
     const QString comma_key_path = QDir(temporary.path()).filePath(QStringLiteral("comma-key.ini"));
-    if (!expect(writeFile(comma_key_path, QByteArrayLiteral("[authentication]\napi_key=abc,def\n")),
-                QStringLiteral("Could not write comma API-key INI")))
+    const QByteArray upstream_prefix = QByteArrayLiteral(
+        "[upstream]\nservers=site\n"
+        "[upstream.site]\nurl=http://127.0.0.1:8123\n");
+    if (!expect(writeFile(comma_key_path, upstream_prefix +
+                          QByteArrayLiteral("api_key=abc,def\n")),
+                QStringLiteral("Could not write comma upstream API-key INI")))
         return 1;
     Server::Config comma_key;
     QString comma_error;
     if (!expect(!MapServerConfiguration::loadConfigFile(comma_key_path, &comma_key, &comma_error),
-                QStringLiteral("Unquoted comma in api_key was silently accepted")))
+                QStringLiteral("Unquoted comma in upstream api_key was silently accepted")))
         return 1;
-    if (!expect(writeFile(comma_key_path,
-                          QByteArrayLiteral("[authentication]\napi_key=\"abc,def\"\n")),
-                QStringLiteral("Could not write quoted API-key INI")))
+    if (!expect(writeFile(comma_key_path, upstream_prefix +
+                          QByteArrayLiteral("api_key=\"abc,def\"\n")),
+                QStringLiteral("Could not write quoted upstream API-key INI")))
         return 1;
     Server::Config quoted_key;
     if (!expect(MapServerConfiguration::loadConfigFile(comma_key_path, &quoted_key, &error), error) ||
-        !expect(quoted_key.api_key == QByteArrayLiteral("abc,def"),
-                QStringLiteral("Quoted api_key with a comma was not read verbatim")))
+        !expect(quoted_key.cascade.upstreams.size() == 1 &&
+                quoted_key.cascade.upstreams[0].api_key == QByteArrayLiteral("abc,def"),
+                QStringLiteral("Quoted upstream api_key with a comma was not read verbatim")))
         return 1;
 
     // Older versions emitted '#' instead of ';' in provider state too.

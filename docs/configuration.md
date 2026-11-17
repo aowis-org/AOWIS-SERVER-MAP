@@ -30,18 +30,18 @@ settings API. The GUI must not read or write MAP's configuration files itself.
 
 | Settings | Owner and change mechanism | When applied |
 | --- | --- | --- |
-| Listen IP/port, API keys, worker limits, cache directories, coverage regions, global raster/terrain download switches | Administrator **INI**, optional CLI overrides | Process start/restart |
+| Listen IP/port, worker limits, cache directories, coverage regions, global raster/terrain download switches | Administrator **INI**, optional CLI overrides | Process start/restart |
 | Local raster providers (name, tile URL, zoom bounds, enabled, per-provider restrictions) | **MAP-owned AOWIS-CONFIG** provider record; `GET/PUT /map/v1/providers` on a separate server, MAP library in Standalone | REST or embedded-library edits apply immediately |
 | Global cascading (ordered MAP URLs/read keys, direct fallback, slow-link settings) | MAP CONFIG cascade record, or explicit **administrator INI** entries | Separate-server INI changes require restart; Standalone library changes autosave and apply live |
-| Inherited-provider enablement, selected upstream names/order, raster acquisition mode | Separate MAP CONFIG records; authenticated provider REST endpoints or Standalone MAP library | Applied immediately without changing upstream definitions |
+| Inherited-provider enablement, selected upstream names/order, raster acquisition mode | Separate MAP CONFIG records; unauthenticated provider REST endpoints or Standalone MAP library | Applied immediately without changing upstream definitions |
 | Raster tiles, Copernicus source data, normalized terrain | **Cache**, kept independently of configuration | Reused on subsequent requests, including offline |
 
 AOWIS-CONFIG stores versioned, revision-checked JSON records under MAP's owner
 root. It is not another INI and is not intended for hand editing. MAP validates
 and saves it through `Aowis::Map::SettingsRepository`. A stale provider write is
 rejected with HTTP **409** instead of overwriting another editor's changes.
-Provider REST editing currently **does not check API keys**: expose that write
-route only to trusted clients using firewall/reverse-proxy access controls.
+All MAP REST routes currently lack inbound authentication: expose the server
+only to trusted clients using firewall/reverse-proxy access controls.
 
 ### Which value wins?
 
@@ -141,10 +141,6 @@ binary, not a replacement for MAP's managed CONFIG records.
 --max-pending-requests <count>      Override pending HTTP request limit
 --max-active-downloads <count>      Override raster download concurrency
 --cache-directory <path>            Override raster cache root
---api-key <key>                     Override read API key
---delete-api-key <key>              Override cache-management API key
---require-api-key                   Refuse startup without read key
---require-delete-api-key            Refuse startup without delete key
 -h, --help                          Show help
 --version                           Show version
 ```
@@ -171,9 +167,9 @@ port=8122
 
 For a manually started server, pass `--config ./map-server.ini` (or place the INI at its default user configuration path). For the packaged systemd service, change `/etc/aowis-server-map/map-server.ini` and run `sudo systemctl restart aowis-server-map`; it does not inherit arguments passed to a separate shell launch.
 
-Use `ss -ltn | grep ':8122'` locally to confirm the listening socket. From another machine, use `curl http://<server-lan-ip>:8122/status`, supplying `-H 'X-API-Key: YOUR_READ_KEY'` when the read API key is set. A firewall must also permit the desired clients.
+Use `ss -ltn | grep ':8122'` locally to confirm the listening socket. From another machine, use `curl http://<server-lan-ip>:8122/status`. A firewall must also permit the desired clients.
 
-**Security:** Binding `0.0.0.0` exposes the HTTP listener on *all* IPv4 interfaces, potentially including public ones. `PUT /map/v1/providers` does not currently check API keys. Bind to a private interface where possible, restrict network access, and use a controlled TLS reverse proxy for external deployment. See [systemd deployment](../configs/systemd/README.md#local-and-remote-reverse-proxies).
+**Security:** Binding `0.0.0.0` exposes the HTTP listener on *all* IPv4 interfaces, potentially including public ones. All incoming MAP requests (including DELETE) are unauthenticated. Bind to a private interface where possible, restrict network access, and use a controlled TLS reverse proxy for external deployment. See [systemd deployment](../configs/systemd/README.md#local-and-remote-reverse-proxies).
 
 ## INI keys and defaults
 
@@ -201,8 +197,6 @@ Use `ss -ltn | grep ':8122'` locally to confirm the listening socket. From anoth
 | `storage/provider_state_file` | empty | Legacy provider catalog path, read only for one-time migration |
 | `storage/managed_settings_directory` | empty | Optional CONFIG `server-map` owner root (defaults under the service state directory) |
 | `regions/geojson_file` | empty | Optional named Polygon/MultiPolygon regions |
-| `authentication/api_key` | empty | Read API key; empty disables read-key checks in user mode |
-| `authentication/delete_api_key` | empty | Cache/delete API key; empty **disables** management DELETE routes |
 
 `[terrain_provider.copernicus]` accepts `enabled`, `remote_fetch_enabled` and optional `coverage`. Provider-level settings cannot override the global terrain download switch. The remote-capable job-admission ceiling is half the global terrain job limit (64 by default); it is separate from the worker count. Other fixed in-memory budgets are documented in [Architecture](architecture.md).
 
@@ -234,7 +228,7 @@ remote_fetch_enabled=true
 coverage=
 ```
 
-String values containing a comma must be enclosed in double quotes (`name="Esri, Maxar"`); Qt's INI reader would otherwise split them into a list. The server rejects an unquoted comma in provider `name`, `url` and `coverage` and in `authentication/api_key`/`delete_api_key` instead of silently dropping the value. Inside quotes, write `\"` for a quote and `\\` for a backslash. The legacy `providers.ini` writer used this escaping; current edits are stored through AOWIS-CONFIG.
+String values containing a comma must be enclosed in double quotes (`name="Esri, Maxar"`); Qt's INI reader would otherwise split them into a list. The server rejects an unquoted comma in provider `name`, `url` and `coverage` and in upstream `api_key` values instead of silently dropping the value. Inside quotes, write `\"` for a quote and `\\` for a backslash. The legacy `providers.ini` writer used this escaping; current edits are stored through AOWIS-CONFIG.
 
 `{z}`, `{x}` and `{y}` placeholders are required, in any order; `{s}` optionally selects subdomains `a`, `b`, `c`. An empty provider `coverage` inherits the raster default. A provider's `remote_fetch_enabled=true` cannot override `downloads/remote_fetch_enabled=false`.
 
@@ -258,9 +252,9 @@ and [provider routing](http-api.md#provider-routing-and-acquisition).
 | `/var/cache/aowis-server-map/` | Disposable raster/terrain caches |
 | `/var/lib/aowis-server-map/data/` | Optional administrator-supplied permanent data |
 
-To return to the INI-defined raster providers, stop the service, back up/remove the managed CONFIG provider record using CONFIG's supported storage API, and restart. The legacy `providers.ini` remains a migration source until it is backed up or removed; move it out of the state directory if you want to restore administrator defaults after clearing CONFIG. Editing providers does not alter region definitions, API keys or terrain configuration. A changed upstream URL gets a separate raster cache variant using its URL fingerprint.
+To return to the INI-defined raster providers, stop the service, back up/remove the managed CONFIG provider record using CONFIG's supported storage API, and restart. The legacy `providers.ini` remains a migration source until it is backed up or removed; move it out of the state directory if you want to restore administrator defaults after clearing CONFIG. Editing providers does not alter region definitions, upstream credentials or terrain configuration. A changed upstream URL gets a separate raster cache variant using its URL fingerprint.
 
-**Security boundary:** `PUT /map/v1/providers` currently **does not validate read or delete API keys**. Provider URLs are metadata, not secret storage. Limit PUT access to trusted users with an actual proxy/network policy; CORS headers are not access control.
+**Security boundary:** MAP currently authenticates **none of its incoming HTTP requests**. All GET, PUT and DELETE routes (including cache deletion and provider administration) are accessible to clients with network reachability. Provider URLs are metadata, not secret storage. Restrict access with firewall, private binding or an authenticated proxy; CORS headers are not access control. The former incoming `authentication/api_key` and `authentication/delete_api_key` fields are ignored if present in an older INI; remove them from local configurations. Outgoing `upstream.*.api_key` is still supported for older/third-party upstreams.
 
 ## Geographic download coverage
 

@@ -222,13 +222,6 @@ QHttpServerResponse makeOptionsResponse()
     return QHttpServerResponse(QHttpServerResponse::StatusCode::NoContent);
 }
 
-QHttpServerResponse makeUnauthorizedResponse()
-{
-    return QHttpServerResponse(
-        "Missing or invalid API key",
-        QHttpServerResponse::StatusCode::Unauthorized);
-}
-
 QHttpServerResponse makeTerrainTileErrorResponse(
     const Aowis::Map::TerrainTileLookupResult &result)
 {
@@ -404,19 +397,6 @@ QHttpServerResponse makeTerrainCacheDeletionResponse(
     return QHttpServerResponse(message, status);
 }
 
-bool secureEquals(const QByteArray &left, const QByteArray &right)
-{
-    const qsizetype maximum_size = qMax(left.size(), right.size());
-    quint64 difference = quint64(left.size()) ^ quint64(right.size());
-    for (qsizetype index = 0; index < maximum_size; ++index)
-    {
-        const uchar left_value = index < left.size() ? uchar(left.at(index)) : 0;
-        const uchar right_value = index < right.size() ? uchar(right.at(index)) : 0;
-        difference |= left_value ^ right_value;
-    }
-
-    return difference == 0;
-}
 }
 
 Server::Server(const Config &config, QObject *parent)
@@ -1261,17 +1241,6 @@ QFuture<QHttpServerResponse> Server::submitTerrainGrid(
 
 bool Server::start()
 {
-    if (this->config.require_api_key && this->config.api_key.isEmpty())
-    {
-        qCritical() << "The map server requires an API key, but authentication/api_key is empty";
-        return false;
-    }
-    if (this->config.require_delete_api_key && this->config.delete_api_key.isEmpty())
-    {
-        qCritical() << "The map server requires a delete API key, but authentication/delete_api_key is empty";
-        return false;
-    }
-
     QDir cache_directory;
     if (this->config.cache_directory.trimmed().isEmpty()
         || !cache_directory.mkpath(this->config.cache_directory))
@@ -1310,13 +1279,6 @@ bool Server::start()
         return false;
     }
 
-    const QString read_authentication_status = this->config.api_key.isEmpty()
-        ? QStringLiteral("read API-key authentication disabled")
-        : QStringLiteral("read API-key authentication enabled");
-    const QString delete_authentication_status = this->config.delete_api_key.isEmpty()
-        ? QStringLiteral("delete API-key authentication disabled")
-        : QStringLiteral("delete API-key authentication enabled");
-
     const Aowis::Map::TerrainData::StoragePaths terrain_paths = this->terrain_data->storagePaths();
     const QString terrain_status = !this->terrain_data->isEnabled()
         ? QStringLiteral("terrain subsystem disabled")
@@ -1334,7 +1296,7 @@ bool Server::start()
                     ? QStringLiteral("terrain cache: %1, default dataset: %2")
                           .arg(terrain_paths.root, this->config.terrain_default_dataset)
                     : QString())
-            << read_authentication_status << "and" << delete_authentication_status;
+            << "without inbound API-key authentication";
     this->provider_catalog->refresh();
     return true;
 }
@@ -1342,10 +1304,8 @@ bool Server::start()
 void Server::setupRoutes()
 {
     this->http.route("/status", QHttpServerRequest::Method::Get,
-                     [this](const QHttpServerRequest &request)
+                     [this]()
     {
-        if (!isReadAuthorized(request))
-            return makeUnauthorizedResponse();
 
         const Aowis::Map::TerrainData::StoragePaths terrain_paths = this->terrain_data->storagePaths();
         const QString terrain_status = !this->terrain_data->isEnabled()
@@ -1370,10 +1330,8 @@ void Server::setupRoutes()
     });
 
     this->http.route("/upstream/v1/activity", QHttpServerRequest::Method::Get,
-                     [this](const QHttpServerRequest &request)
+                     [this]()
     {
-        if (!isReadAuthorized(request))
-            return makeUnauthorizedResponse();
 
         const MapTiles::UpstreamActivity tile_activity = this->maptiles->upstreamActivity();
         const Aowis::Map::TerrainUpstreamActivity terrain_activity =
@@ -1441,10 +1399,8 @@ void Server::setupRoutes()
     });
 
     this->http.route("/upstream/v1/map-tiles", QHttpServerRequest::Method::Delete,
-                     [this](const QHttpServerRequest &request)
+                     [this]()
     {
-        if (!isDeleteAuthorized(request))
-            return makeUnauthorizedResponse();
 
         this->maptiles->cancelUpstreamDownloads();
         return QHttpServerResponse(
@@ -1458,10 +1414,8 @@ void Server::setupRoutes()
     });
 
     this->http.route("/upstream/v1/terrain", QHttpServerRequest::Method::Delete,
-                     [this](const QHttpServerRequest &request)
+                     [this]()
     {
-        if (!isDeleteAuthorized(request))
-            return makeUnauthorizedResponse();
 
         this->terrain_data->cancelUpstreamDownloads();
         return QHttpServerResponse(
@@ -1476,11 +1430,8 @@ void Server::setupRoutes()
 
     this->http.route("/cache/<arg>/<arg>/<arg>/<arg>/<arg>/<arg>", QHttpServerRequest::Method::Delete,
                      [this](const QString &provider, int zoom, int tile_x_min, int tile_x_max,
-                            int tile_y_min, int tile_y_max, const QHttpServerRequest &request)
+                            int tile_y_min, int tile_y_max)
     {
-        if (!isDeleteAuthorized(request))
-            return makeUnauthorizedResponse();
-
         const int deleted_count = this->maptiles->deleteTiles(
             provider, zoom, tile_x_min, tile_x_max, tile_y_min, tile_y_max);
         if (deleted_count == -1)
@@ -1508,17 +1459,13 @@ void Server::setupRoutes()
     // Terrain cache deletion, the map-tile cache DELETE's shape per zoom
     // level: the normalized .aowterrain tiles of an XYZ range, or the
     // provider-native source data (downloaded DEM rasters) covering its
-    // area. Both use the delete API key and run the file work outside the
-    // HTTP event loop (a source file being downloaded is waited for briefly).
+    // area. Both run outside the HTTP event loop (a source file being downloaded is waited for briefly).
     this->http.route("/terrain/v1/cache/<arg>/<arg>/<arg>/<arg>/<arg>/<arg>",
                      QHttpServerRequest::Method::Delete,
                      [this](const QString &dataset, int zoom, int tile_x_min, int tile_x_max,
                             int tile_y_min, int tile_y_max,
-                            const QHttpServerRequest &request) -> QFuture<QHttpServerResponse>
+                            const QHttpServerRequest &) -> QFuture<QHttpServerResponse>
     {
-        if (!isDeleteAuthorized(request))
-            return makeReadyResponse(makeUnauthorizedResponse());
-
         return submitTerrainJob(
             [this, dataset, zoom, tile_x_min, tile_x_max, tile_y_min, tile_y_max]()
         {
@@ -1538,11 +1485,8 @@ void Server::setupRoutes()
                      QHttpServerRequest::Method::Delete,
                      [this](const QString &dataset, int zoom, int tile_x_min, int tile_x_max,
                             int tile_y_min, int tile_y_max,
-                            const QHttpServerRequest &request) -> QFuture<QHttpServerResponse>
+                            const QHttpServerRequest &) -> QFuture<QHttpServerResponse>
     {
-        if (!isDeleteAuthorized(request))
-            return makeReadyResponse(makeUnauthorizedResponse());
-
         return submitTerrainJob(
             [this, dataset, zoom, tile_x_min, tile_x_max, tile_y_min, tile_y_max]()
         {
@@ -1563,7 +1507,6 @@ void Server::setupRoutes()
     this->http.route("/map/v1/providers/available", QHttpServerRequest::Method::Get,
                      [this](const QHttpServerRequest &request)
     {
-        if (!isReadAuthorized(request)) return makeUnauthorizedResponse();
         if (!this->maptiles->acceptsCascadeTrace(
                 request.value("x-aowis-cascade-visited")))
             return cascadeResponse(QHttpServerResponse("Cascade loop detected",
@@ -1579,7 +1522,6 @@ void Server::setupRoutes()
     this->http.route("/map/v1/providers/inherited", QHttpServerRequest::Method::Put,
                      [this](const QHttpServerRequest &request)
     {
-        if (!isDeleteAuthorized(request)) return makeUnauthorizedResponse();
         QJsonParseError parse_error;
         const QJsonDocument document = QJsonDocument::fromJson(request.body(), &parse_error);
         if (request.body().size() > 1024 || parse_error.error != QJsonParseError::NoError ||
@@ -1640,10 +1582,7 @@ void Server::setupRoutes()
     this->http.route("/map/v1/providers/upstreams", QHttpServerRequest::Method::Put,
                      [this](const QHttpServerRequest &request)
     {
-        // Route changes affect every client on this MAP server. Never expose
-        // unauthenticated edits when no administrator key is configured.
-        if (this->config.delete_api_key.isEmpty() || !isDeleteAuthorized(request))
-            return makeUnauthorizedResponse();
+        // Route changes affect every client on this MAP server.
         if (request.body().size() > 4096)
             return QHttpServerResponse("Provider route request too large",
                 QHttpServerResponse::StatusCode::BadRequest);
@@ -1718,8 +1657,6 @@ void Server::setupRoutes()
     this->http.route("/map/v1/providers/acquisition", QHttpServerRequest::Method::Put,
                      [this](const QHttpServerRequest &request)
     {
-        if (this->config.delete_api_key.isEmpty() || !isDeleteAuthorized(request))
-            return makeUnauthorizedResponse();
         if (request.body().size() > 4096)
             return QHttpServerResponse("Provider mode request too large",
                 QHttpServerResponse::StatusCode::BadRequest);
@@ -1796,15 +1733,14 @@ void Server::setupRoutes()
     // Discoverable catalog of map layers. Only server-configured providers
     // are exposed; URLs and credentials stay on the server.
     this->http.route("/map/v1/providers", QHttpServerRequest::Method::Get,
-                     [this](const QHttpServerRequest &request)
+                     [this]()
     {
-        if (!isReadAuthorized(request)) return makeUnauthorizedResponse();
         return QHttpServerResponse(QByteArrayLiteral("application/json"),
             Aowis::Map::encodeProviderCatalog(this->config.map_providers),
             QHttpServerResponse::StatusCode::Ok);
     });
-    // As requested, provider editing currently has no authentication. Only
-    // application-managed state is writable; administrator /etc is untouched.
+    // During the pre-security development phase, management is unauthenticated.
+    // Only application-managed state is writable; administrator /etc is untouched.
     this->http.route("/map/v1/providers", QHttpServerRequest::Method::Put,
                      [this](const QHttpServerRequest &request)
     {
@@ -1862,10 +1798,8 @@ void Server::setupRoutes()
     // dataset's maximum_zoom instead of hardcoding provider knowledge.
     this->http.route("/terrain/v1/datasets",
                      QHttpServerRequest::Method::Get,
-                     [this](const QHttpServerRequest &request)
+                     [this]()
     {
-        if (!isReadAuthorized(request))
-            return makeUnauthorizedResponse();
 
         if (!this->terrain_data->isEnabled() || !this->terrain_data->isInitialized())
         {
@@ -1899,8 +1833,6 @@ void Server::setupRoutes()
                      QHttpServerRequest::Method::Get,
                      [this](const QHttpServerRequest &request) -> QFuture<QHttpServerResponse>
     {
-        if (!isReadAuthorized(request))
-            return makeReadyResponse(makeUnauthorizedResponse());
         const QUrlQuery query(request.url());
         const QStringList names = { QStringLiteral("west"), QStringLiteral("south"),
                                     QStringLiteral("east"), QStringLiteral("north") };
@@ -1945,8 +1877,6 @@ void Server::setupRoutes()
                      QHttpServerRequest::Method::Get,
                      [this](const QHttpServerRequest &request) -> QFuture<QHttpServerResponse>
     {
-        if (!isReadAuthorized(request))
-            return makeReadyResponse(makeUnauthorizedResponse());
 
         const QUrlQuery query(request.url());
         const QString latitude_text = query.queryItemValue(QStringLiteral("latitude"));
@@ -1998,10 +1928,8 @@ void Server::setupRoutes()
     this->http.route("/terrain/v1/<arg>/<arg>/<arg>/<arg>.aowterrain",
                      QHttpServerRequest::Method::Get,
                      [this](const QString &dataset, int zoom, int tile_x, int tile_y,
-                            const QHttpServerRequest &request) -> QFuture<QHttpServerResponse>
+                            const QHttpServerRequest &) -> QFuture<QHttpServerResponse>
     {
-        if (!isReadAuthorized(request))
-            return makeReadyResponse(makeUnauthorizedResponse());
 
         Aowis::Map::TerrainTileAddress address;
         address.zoom = zoom;
@@ -2037,10 +1965,8 @@ void Server::setupRoutes()
 
     this->http.route("/<arg>/<arg>/<arg>/<arg>.png", QHttpServerRequest::Method::Get,
                      [this](const QString &provider, int z, int x, int y,
-                            const QHttpServerRequest &request) -> QFuture<QHttpServerResponse>
+                            const QHttpServerRequest &) -> QFuture<QHttpServerResponse>
     {
-        if (!isReadAuthorized(request))
-            return makeReadyResponse(makeUnauthorizedResponse());
 
         const QByteArray expected_source = this->maptiles->rasterSourceFingerprint(provider);
         const QByteArray claimed_source = request.value("x-aowis-raster-source");
@@ -2131,39 +2057,6 @@ void Server::setupRoutes()
     {
         return makeOptionsResponse();
     });
-}
-
-bool Server::isReadAuthorized(const QHttpServerRequest &request) const
-{
-    if (this->config.api_key.isEmpty())
-        return true;
-
-    return requestContainsKey(request, this->config.api_key);
-}
-
-bool Server::isDeleteAuthorized(const QHttpServerRequest &request) const
-{
-    if (this->config.delete_api_key.isEmpty())
-        return true;
-
-    return requestContainsKey(request, this->config.delete_api_key);
-}
-
-bool Server::requestContainsKey(const QHttpServerRequest &request, const QByteArray &expected_key) const
-{
-    const QByteArray direct_key = request.value("x-api-key");
-    if (secureEquals(direct_key, expected_key))
-        return true;
-
-    const QByteArray authorization = request.value("authorization");
-    static const QByteArray bearer_prefix("Bearer ");
-    if (authorization.size() <= bearer_prefix.size()
-        || authorization.first(bearer_prefix.size()).compare(bearer_prefix, Qt::CaseInsensitive) != 0)
-    {
-        return false;
-    }
-
-    return secureEquals(authorization.sliced(bearer_prefix.size()), expected_key);
 }
 
 bool Server::appendPendingPromise(const QString &key, const PendingPromise &promise)

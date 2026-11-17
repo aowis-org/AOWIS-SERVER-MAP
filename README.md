@@ -4,7 +4,7 @@
 
 It is a C++/Qt 6 HTTP server for Linux, usable as a local desktop companion, a shared office cache or a systemd-managed backend. Raster imagery and terrain have **independent remote-download and geographic-coverage controls**. Already cached data is still served when downloading is disabled.
 
-> **Security:** The raster-provider editing endpoint (`PUT /map/v1/providers`) has **no API-key authentication**. Bind to loopback or a private interface and restrict that endpoint to trusted clients. For external access, use a TLS reverse proxy with appropriate access controls. See [Deployment](#deployment).
+> **Development security:** This release has **no inbound API-key authentication**. All HTTP methods, including PUT and DELETE, are available to any client that can reach the listener. Bind to loopback or a protected private interface; use a firewall or authenticated reverse proxy before permitting untrusted clients. A future AOWIS security layer will replace this temporary unrestricted mode. See [Deployment](#deployment).
 
 ## Start here
 
@@ -24,7 +24,7 @@ curl -fsS http://127.0.0.1:8122/map/v1/providers
 curl -fsS http://127.0.0.1:8122/terrain/v1/datasets
 ```
 
-If a read API key is configured, add `-H 'X-API-Key: YOUR_READ_KEY'` to GET requests. `./compile_linux.sh` **without** `--no-run` builds *and starts* the server; when another instance already uses port 8122, a subsequent bind failure does not indicate a compilation failure.
+No API keys are needed for requests. `./compile_linux.sh` **without** `--no-run` builds *and starts* the server; when another instance already uses port 8122, a subsequent bind failure does not indicate a compilation failure.
 
 ### Listen on the LAN (`0.0.0.0`)
 
@@ -38,7 +38,7 @@ To accept connections from **other machines** on all IPv4 interfaces, run:
 
 `--listen-address` (`-a`) and `--port` (`-p`) override defaults and INI settings **for that process only**. To use a persistent INI, set `listen_address=0.0.0.0` under `[server]` and launch with `--config ./map-server.ini`. For the packaged systemd service, edit `[server]` in `/etc/aowis-server-map/map-server.ini` and run `sudo systemctl restart aowis-server-map`; command-line changes made in a shell do not alter the service configuration. See [Configuration](docs/configuration.md#listen-on-another-network-interface).
 
-Verify the listener with `ss -ltn | grep ':8122'` on the server, then request `http://<server-lan-ip>:8122/status` from another machine (with `X-API-Key` if configured). **Security:** `0.0.0.0` exposes the listener on *every* IPv4 interface, and `PUT /map/v1/providers` currently has no API-key enforcement. Restrict access to trusted clients with a firewall or reverse proxy; prefer a specific private interface when possible.
+Verify the listener with `ss -ltn | grep ':8122'` on the server, then request `http://<server-lan-ip>:8122/status` from another machine. **Security:** `0.0.0.0` exposes the entire unauthenticated HTTP API, including cache deletion and provider changes, on *every* IPv4 interface. Restrict access to trusted clients with a firewall or authenticated reverse proxy; prefer a specific private interface when possible.
 
 Generate and validate a configuration **without starting the listener**:
 
@@ -75,11 +75,11 @@ All endpoints are relative to the configured host and port. Raster provider IDs 
 | --- | --- |
 | `GET /status` | Server status |
 | `GET /map/v1/providers` | Raster provider catalog |
-| `PUT /map/v1/providers` | Replace raster provider catalog (**no API-key check**) |
+| `PUT /map/v1/providers` | Replace raster provider catalog (unauthenticated) |
 | `GET /map/v1/providers/available` | Combined local and inherited provider catalog, with routing and acquisition mode |
-| `PUT /map/v1/providers/inherited` | Locally enable/disable an inherited provider (admin key) |
-| `PUT /map/v1/providers/upstreams` | Select an ordered subset of MAP upstreams for a provider (admin key) |
-| `PUT /map/v1/providers/acquisition` | Select Automatic, Cascade or Direct for a raster provider (admin key) |
+| `PUT /map/v1/providers/inherited` | Locally enable/disable an inherited provider (unauthenticated) |
+| `PUT /map/v1/providers/upstreams` | Select an ordered subset of MAP upstreams for a provider (unauthenticated) |
+| `PUT /map/v1/providers/acquisition` | Select Automatic, Cascade or Direct for a raster provider (unauthenticated) |
 | `GET /<provider-uuid>/<z>/<x>/<y>.png` | Raster map tile |
 | `GET /terrain/v1/datasets` | Terrain dataset catalog |
 | `GET /terrain/v1/<dataset>/<z>/<x>/<y>.aowterrain` | Normalized terrain tile |
@@ -92,7 +92,7 @@ All endpoints are relative to the configured host and port. Raster provider IDs 
 | `DELETE /terrain/v1/cache/<dataset>/<z>/<xmin>/<xmax>/<ymin>/<ymax>` | Remove normalized terrain tiles |
 | `DELETE /terrain/v1/source/<dataset>/<z>/<xmin>/<xmax>/<ymin>/<ymax>` | Remove corresponding native source cells |
 
-GET endpoints use the **read key** when configured. DELETE and the three per-provider cascading PUT endpoints use the separate **delete/admin key**; an empty delete key disables these operations rather than exposing them anonymously. The **local catalog PUT remains unauthenticated** and must be restricted at the network/proxy boundary. Either key can be supplied in `X-API-Key` or as a Bearer token, according to the endpoint's role. A successful grid response uses `application/vnd.aowis.dem-f32le` with exactly `rows × columns × 4` bytes.
+All GET, PUT and DELETE endpoints are currently **unauthenticated**, including cache deletion, upstream cancellation and provider administration. The old inbound read/delete API-key options have been removed. Outgoing API keys configured for older/third-party upstreams remain supported. Restrict access at the network/proxy boundary. A successful grid response uses `application/vnd.aowis.dem-f32le` with exactly `rows × columns × 4` bytes.
 
 See the [HTTP API reference](docs/http-api.md) for concrete requests, content types, response codes, provider editing and deletion semantics.
 
@@ -155,12 +155,12 @@ For a Debian package, build with a disposable Debian 13 Docker toolchain and opt
 
 The native `./compile_deb.sh --install-dependencies` remains available on Debian without Docker. See [Debian package building and qualification](docs/debian-package-build.md) for test scope and installation details. Install the resulting artifact on the target system with `sudo apt install ./dist/<package-filename>.deb`.
 
-The package installs a dedicated `aowis-server-map` systemd service, preserves existing administrator settings and creates independent random API keys on initial configuration. The service uses an explicit `/etc/aowis-server-map/map-server.ini`, state under `/var/lib/aowis-server-map/` and disposable caches under `/var/cache/aowis-server-map/`.
+The package installs a dedicated `aowis-server-map` systemd service, preserves existing administrator settings and creates a default INI when needed, without API keys. The service uses an explicit `/etc/aowis-server-map/map-server.ini`, state under `/var/lib/aowis-server-map/` and disposable caches under `/var/cache/aowis-server-map/`.
 
 - [systemd and Debian installation](configs/systemd/README.md) — paths, ownership, service administration and manual installation.
 - [Apache reverse proxy](configs/apache/README.md) — local proxy or HTTPS with Certbot, headers and trusted-client restrictions.
 
-**Do not publish the Qt HTTP listener directly to the Internet.** CORS does not authorize writes; the unauthenticated catalog PUT route needs a genuine network/proxy access restriction.
+**Do not publish the Qt HTTP listener directly to the Internet.** CORS does not authorize requests; all incoming MAP operations, including DELETE, need genuine network/proxy restrictions before exposure to untrusted clients.
 
 ## Documentation
 
@@ -168,7 +168,7 @@ The package installs a dedicated `aowis-server-map` systemd service, preserves e
 | --- | --- |
 | [Debian package build](docs/debian-package-build.md) | Docker builds, isolated installation and upgrade qualification |
 | [Configuration](docs/configuration.md) | INI, CLI, providers, region/zoom policies, state-file precedence |
-| [HTTP API](docs/http-api.md) | Requests, responses, authentication, cache and upstream operations |
+| [HTTP API](docs/http-api.md) | Requests, responses, cache and upstream operations |
 | [MAP-to-MAP cascading](docs/map-cascading.md) | Ordered upstreams, optional direct fetch, adaptive JPEG and zstd terrain transfer |
 | [Architecture and resource limits](docs/architecture.md) | Execution model, concurrency, memory, cancellation, test and benchmark tools |
 | [Terrain sources](docs/terrain-providers.md) | Copernicus GLO-30, cache fill, resumable download, data provenance |

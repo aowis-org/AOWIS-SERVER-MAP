@@ -105,11 +105,10 @@ struct ReplyData
 };
 
 ReplyData request(QCoreApplication &application, QNetworkAccessManager *manager,
-                  const QUrl &url, const QByteArray &api_key = {})
+                  const QUrl &url, bool delete_request = false)
 {
     QNetworkRequest query(url);
-    if (!api_key.isEmpty()) query.setRawHeader("X-API-Key", api_key);
-    QNetworkReply *reply = manager->get(query);
+    QNetworkReply *reply = delete_request ? manager->deleteResource(query) : manager->get(query);
     QElapsedTimer timer;
     timer.start();
     while (!reply->isFinished() && timer.elapsed() < 9000)
@@ -125,11 +124,10 @@ ReplyData request(QCoreApplication &application, QNetworkAccessManager *manager,
     return data;
 }
 ReplyData updateProvider(QCoreApplication &application, QNetworkAccessManager *manager,
-                         const QUrl &url, const QByteArray &key, const QString &id, bool enabled)
+                         const QUrl &url, const QString &id, bool enabled)
 {
     QNetworkRequest query(url);
     query.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
-    if (!key.isEmpty()) query.setRawHeader("X-API-Key", key);
     const QByteArray body = QJsonDocument(QJsonObject{
         {QStringLiteral("id"), id}, {QStringLiteral("enabled"), enabled}
     }).toJson(QJsonDocument::Compact);
@@ -149,12 +147,11 @@ ReplyData updateProvider(QCoreApplication &application, QNetworkAccessManager *m
     return response;
 }
 ReplyData updateMode(QCoreApplication &application, QNetworkAccessManager *manager,
-                     const QUrl &url, const QByteArray &key, const QString &id,
+                     const QUrl &url, const QString &id,
                      const QString &mode)
 {
     QNetworkRequest query(url);
     query.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
-    if (!key.isEmpty()) query.setRawHeader("X-API-Key", key);
     const QByteArray body = QJsonDocument(QJsonObject{
         {QStringLiteral("id"), id}, {QStringLiteral("mode"), mode}
     }).toJson(QJsonDocument::Compact);
@@ -174,12 +171,11 @@ ReplyData updateMode(QCoreApplication &application, QNetworkAccessManager *manag
     return response;
 }
 ReplyData updateRoute(QCoreApplication &application, QNetworkAccessManager *manager,
-                      const QUrl &url, const QByteArray &key, const QString &id,
+                      const QUrl &url, const QString &id,
                       const QStringList &upstreams)
 {
     QNetworkRequest query(url);
     query.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
-    if (!key.isEmpty()) query.setRawHeader("X-API-Key", key);
     QJsonArray selected;
     for (const QString &name : upstreams) selected.append(name);
     const QByteArray body = QJsonDocument(QJsonObject{
@@ -235,11 +231,9 @@ int main(int argc, char **argv)
     config.terrain_enabled = false;
     config.cache_directory = QDir(storage.path()).filePath(QStringLiteral("cache"));
     config.map_providers.clear();
-    config.api_key = QByteArrayLiteral("client-key");
     config.cascade.allow_direct_fetch = true; // Must NEVER apply to inherited sources.
     config.cascade.upstreams.append({QStringLiteral("root"), root.origin(), root.api_key});
     config.cascade.upstreams.append({QStringLiteral("backup"), backup.origin(), backup.api_key});
-    config.delete_api_key = QByteArrayLiteral("admin-key");
     config.managed_settings_root = QDir(storage.path()).filePath(QStringLiteral("map-config"));
 
     QNetworkAccessManager network;
@@ -251,13 +245,10 @@ int main(int argc, char **argv)
             ProviderDiscoveryTestAccess::port(downstream));
         const QUrl available_url(base + QStringLiteral("/map/v1/providers/available"));
         const QUrl local_url(base + QStringLiteral("/map/v1/providers"));
-        if (!check(request(application, &network, available_url).status == 401,
-                   "Discovered catalog requires read authentication")) return 1;
         bool found = false;
         for (int index = 0; index < 150 && !found; ++index)
         {
-            const ReplyData response = request(application, &network, available_url,
-                                               config.api_key);
+            const ReplyData response = request(application, &network, available_url);
             const QJsonArray array = QJsonDocument::fromJson(response.body)
                 .object().value(QStringLiteral("providers")).toArray();
             if (array.size() == 1)
@@ -316,19 +307,14 @@ int main(int argc, char **argv)
                    different_entries.size() == 1 &&
                    different_entries.first().upstream_names.isEmpty(),
                    "Do not advertise conflicting upstream source under local UUID")) return 1;
-        const ReplyData local = request(application, &network, local_url, config.api_key);
+        const ReplyData local = request(application, &network, local_url);
         if (!check(local.status == 200 && QJsonDocument::fromJson(local.body)
                    .object().value(QStringLiteral("providers")).toArray().isEmpty(),
                    "Keep editable local catalog separate")) return 1;
         const QUrl override_url(base + QStringLiteral("/map/v1/providers/inherited"));
-        if (!check(updateProvider(application, &network, override_url, {}, inherited.id,
-                                  false).status == 401,
-                   "Inherited provider edits require administrator authentication")) return 1;
-        if (!check(updateProvider(application, &network, override_url,
-                                  config.delete_api_key, inherited.id, false).status == 200,
+        if (!check(updateProvider(application, &network, override_url, inherited.id, false).status == 200,
                    "Disable inherited provider locally")) return 1;
-        const ReplyData disabled_catalog = request(application, &network, available_url,
-                                                   config.api_key);
+        const ReplyData disabled_catalog = request(application, &network, available_url);
         const QJsonArray disabled_entries = QJsonDocument::fromJson(disabled_catalog.body)
             .object().value(QStringLiteral("providers")).toArray();
         if (!check(disabled_entries.size() == 1 &&
@@ -345,12 +331,10 @@ int main(int argc, char **argv)
                    stored_disabled.contains(inherited.id),
                    "Inherited disable state saved through MAP CONFIG")) return 1;
         const int root_tiles_before_disabled = root.tile_count;
-        const ReplyData disabled_tile = request(application, &network, QUrl(base + path),
-                                                config.api_key);
+        const ReplyData disabled_tile = request(application, &network, QUrl(base + path));
         if (!check(disabled_tile.status != 200 && root.tile_count == root_tiles_before_disabled,
                    "Disabled provider cannot retrieve tiles from upstream")) return 1;
-        if (!check(updateProvider(application, &network, override_url,
-                                  config.delete_api_key, inherited.id, true).status == 200,
+        if (!check(updateProvider(application, &network, override_url, inherited.id, true).status == 200,
                    "Re-enable inherited provider without editing upstream catalog")) return 1;
         std::unique_ptr<Aowis::Map::SettingsRepository> persisted =
             Aowis::Map::SettingsRepository::openAtOwnerRoot(
@@ -359,26 +343,20 @@ int main(int argc, char **argv)
         if (!check(persisted != nullptr &&
                    persisted->readDisabledInheritedProviders(&disabled_after) &&
                    disabled_after.isEmpty(), "Inherited override persists in MAP CONFIG")) return 1;
-        const ReplyData tile = request(application, &network, QUrl(base + path),
-                                       config.api_key);
+        const ReplyData tile = request(application, &network, QUrl(base + path));
         if (!check(tile.status == 200 && tile.body == ValidPng &&
                    root.tile_count > 0 && origin.tile_count == 0,
                    "Fetch inherited provider via MAP only")) return 1;
         // Routing overrides are local-only, select an ordered subset of the
         // advertising peers, and never contact a provider's origin directly.
         const QUrl routes_url(base + QStringLiteral("/map/v1/providers/upstreams"));
-        if (!check(updateRoute(application, &network, routes_url, {}, inherited.id,
-                               {QStringLiteral("backup")}).status == 401,
-                   "Provider route updates require administrator authentication")) return 1;
-        if (!check(updateRoute(application, &network, routes_url, config.delete_api_key,
-                               inherited.id, {QStringLiteral("unknown")}).status == 400,
+        if (!check(updateRoute(application, &network, routes_url, inherited.id, {QStringLiteral("unknown")}).status == 400,
                    "Unknown advertising peers cannot be selected")) return 1;
-        if (!check(updateRoute(application, &network, routes_url, config.delete_api_key,
-                               inherited.id, {QStringLiteral("backup"), QStringLiteral("root")})
+        if (!check(updateRoute(application, &network, routes_url, inherited.id, {QStringLiteral("backup"), QStringLiteral("root")})
                        .status == 200,
                    "Save preferred MAP upstream order")) return 1;
         const QJsonArray ordered_entries = QJsonDocument::fromJson(
-            request(application, &network, available_url, config.api_key).body)
+            request(application, &network, available_url).body)
             .object().value(QStringLiteral("providers")).toArray();
         const QJsonArray selected_upstreams = ordered_entries.first().toObject()
             .value(QStringLiteral("selected_upstreams")).toArray();
@@ -387,20 +365,14 @@ int main(int argc, char **argv)
                    selected_upstreams.at(1).toString() == QStringLiteral("root"),
                    "Advertise the effective provider-specific route order")) return 1;
         const QUrl mode_url(base + QStringLiteral("/map/v1/providers/acquisition"));
-        if (!check(updateMode(application, &network, mode_url, {}, inherited.id,
-                              QStringLiteral("automatic")).status == 401,
-                   "Acquisition policy edits require administrator authentication")) return 1;
-        if (!check(updateMode(application, &network, mode_url, config.delete_api_key,
-                              inherited.id, QStringLiteral("direct")).status == 403,
+        if (!check(updateMode(application, &network, mode_url, inherited.id, QStringLiteral("direct")).status == 403,
                    "Inherited providers must never select Direct")) return 1;
-        if (!check(updateMode(application, &network, mode_url, config.delete_api_key,
-                              inherited.id, QStringLiteral("nonsense")).status == 400,
+        if (!check(updateMode(application, &network, mode_url, inherited.id, QStringLiteral("nonsense")).status == 400,
                    "Unknown acquisition policies are rejected")) return 1;
-        if (!check(updateMode(application, &network, mode_url, config.delete_api_key,
-                              inherited.id, QStringLiteral("automatic")).status == 200,
+        if (!check(updateMode(application, &network, mode_url, inherited.id, QStringLiteral("automatic")).status == 200,
                    "Inherited provider may select Automatic (MAP upstream only)")) return 1;
         const QJsonArray automatic_catalog = QJsonDocument::fromJson(
-            request(application, &network, available_url, config.api_key).body)
+            request(application, &network, available_url).body)
             .object().value(QStringLiteral("providers")).toArray();
         if (!check(automatic_catalog.first().toObject().value(
                        QStringLiteral("acquisition_mode")).toString() ==
@@ -408,13 +380,12 @@ int main(int argc, char **argv)
                    !automatic_catalog.first().toObject().value(
                        QStringLiteral("direct_fetch_allowed")).toBool(),
                    "Catalog advertises effective inherited policy")) return 1;
-        if (!check(updateMode(application, &network, mode_url, config.delete_api_key,
-                              inherited.id, QStringLiteral("cascade")).status == 200,
+        if (!check(updateMode(application, &network, mode_url, inherited.id, QStringLiteral("cascade")).status == 200,
                    "Reset inherited provider to safe cascade default")) return 1;
         const int root_before_routing = root.tile_count;
         const int backup_before_routing = backup.tile_count;
         const ReplyData preferred = request(application, &network,
-            QUrl(base + QStringLiteral("/%1/6/30/25.png").arg(inherited.id)), config.api_key);
+            QUrl(base + QStringLiteral("/%1/6/30/25.png").arg(inherited.id)));
         if (!check(preferred.status == 200 && preferred.body == ValidPng &&
                    backup.tile_count > backup_before_routing &&
                    root.tile_count == root_before_routing && origin.tile_count == 0,
@@ -428,24 +399,21 @@ int main(int argc, char **argv)
                    saved_routes.value(inherited.id) ==
                        QStringList({QStringLiteral("backup"), QStringLiteral("root")}),
                    "Selected MAP upstreams persist in MAP-owned CONFIG")) return 1;
-        if (!check(updateRoute(application, &network, routes_url, config.delete_api_key,
-                               inherited.id, {}).status == 200,
+        if (!check(updateRoute(application, &network, routes_url, inherited.id, {}).status == 200,
                    "Reset per-provider order to global priority")) return 1;
         const QJsonArray reset_entries = QJsonDocument::fromJson(
-            request(application, &network, available_url, config.api_key).body)
+            request(application, &network, available_url).body)
             .object().value(QStringLiteral("providers")).toArray();
         if (!check(reset_entries.first().toObject().value(QStringLiteral("selected_upstreams"))
                        .toArray().first().toString() == QStringLiteral("root"),
                    "Default global upstream priority restored")) return 1;
         // Cached tiles must also obey local enablement, not just new downloads.
-        if (!check(updateProvider(application, &network, override_url,
-                                  config.delete_api_key, inherited.id, false).status == 200,
+        if (!check(updateProvider(application, &network, override_url, inherited.id, false).status == 200,
                    "Disable inherited provider with cached tiles")) return 1;
-        if (!check(request(application, &network, QUrl(base + path), config.api_key).status != 200,
+        if (!check(request(application, &network, QUrl(base + path)).status != 200,
                    "Disabling hides even locally cached inherited tiles")) return 1;
-        if (!check(updateProvider(application, &network, override_url,
-                                  config.delete_api_key, inherited.id, true).status == 200 &&
-                   request(application, &network, QUrl(base + path), config.api_key).status == 200,
+        if (!check(updateProvider(application, &network, override_url, inherited.id, true).status == 200 &&
+                   request(application, &network, QUrl(base + path)).status == 200,
                    "Re-enabling restores cached inherited tiles")) return 1;
         // The primary is now unavailable, but a second advertising MAP server
         // may serve another tile of the same source without direct fetching.
@@ -466,7 +434,7 @@ int main(int argc, char **argv)
             for (int retry = 0; retry < 80 && !advertised; ++retry)
             {
                 const QJsonArray available = QJsonDocument::fromJson(
-                    request(application, &network, local_catalog, config.api_key).body)
+                    request(application, &network, local_catalog).body)
                     .object().value(QStringLiteral("providers")).toArray();
                 if (!available.isEmpty())
                     advertised = available.first().toObject().value(
@@ -477,40 +445,33 @@ int main(int argc, char **argv)
             const QUrl local_mode(local_base + QStringLiteral("/map/v1/providers/acquisition"));
             const int direct_origin_before = origin.tile_count;
             const int direct_root_before = root.tile_count;
-            if (!check(updateMode(application, &network, local_mode, config.delete_api_key,
-                                  inherited.id, QStringLiteral("direct")).status == 200,
+            if (!check(updateMode(application, &network, local_mode, inherited.id, QStringLiteral("direct")).status == 200,
                        "Local provider selects Direct")) return 1;
             const ReplyData direct = request(application, &network,
-                QUrl(local_base + QStringLiteral("/%1/6/20/10.png").arg(inherited.id)),
-                config.api_key);
+                QUrl(local_base + QStringLiteral("/%1/6/20/10.png").arg(inherited.id)));
             if (!check(direct.status == 200 && origin.tile_count > direct_origin_before &&
                        root.tile_count == direct_root_before,
                        "Direct mode bypasses MAP upstreams")) return 1;
-            if (!check(updateMode(application, &network, local_mode, config.delete_api_key,
-                                  inherited.id, QStringLiteral("cascade")).status == 200,
+            if (!check(updateMode(application, &network, local_mode, inherited.id, QStringLiteral("cascade")).status == 200,
                        "Local provider selects Cascade")) return 1;
             const int cascade_origin_before = origin.tile_count;
             const int cascade_root_before = root.tile_count;
             const ReplyData cascaded = request(application, &network,
-                QUrl(local_base + QStringLiteral("/%1/6/20/11.png").arg(inherited.id)),
-                config.api_key);
+                QUrl(local_base + QStringLiteral("/%1/6/20/11.png").arg(inherited.id)));
             if (!check(cascaded.status == 200 && root.tile_count > cascade_root_before &&
                        origin.tile_count == cascade_origin_before,
                        "Cascade mode never contacts origin")) return 1;
-            if (!check(updateMode(application, &network, local_mode, config.delete_api_key,
-                                  inherited.id, QStringLiteral("automatic")).status == 200,
+            if (!check(updateMode(application, &network, local_mode, inherited.id, QStringLiteral("automatic")).status == 200,
                        "Reset local provider to Automatic mode")) return 1;
             const int automatic_root_before = root.tile_count;
             const int automatic_origin_before = origin.tile_count;
             const ReplyData automatic = request(application, &network,
-                QUrl(local_base + QStringLiteral("/%1/6/20/12.png").arg(inherited.id)),
-                config.api_key);
+                QUrl(local_base + QStringLiteral("/%1/6/20/12.png").arg(inherited.id)));
             if (!check(automatic.status == 200 &&
                        root.tile_count > automatic_root_before &&
                        origin.tile_count == automatic_origin_before,
                        "Automatic mode uses a healthy MAP upstream before origin")) return 1;
-            if (!check(updateMode(application, &network, local_mode, config.delete_api_key,
-                                  inherited.id, QStringLiteral("cascade")).status == 200,
+            if (!check(updateMode(application, &network, local_mode, inherited.id, QStringLiteral("cascade")).status == 200,
                        "Return local provider to Cascade policy")) return 1;
             std::unique_ptr<Aowis::Map::SettingsRepository> mode_repository =
                 Aowis::Map::SettingsRepository::openAtOwnerRoot(
@@ -537,7 +498,7 @@ int main(int argc, char **argv)
                 ProviderDiscoveryTestAccess::port(restricted));
             if (!check(updateMode(application, &network,
                     QUrl(restricted_base + QStringLiteral("/map/v1/providers/acquisition")),
-                    config.delete_api_key, inherited.id, QStringLiteral("direct")).status == 403,
+                    inherited.id, QStringLiteral("direct")).status == 403,
                     "Admin ban on direct fetching overrides provider-level preference")) return 1;
         }
         // Direct-mode coverage above intentionally contacted the origin.
@@ -546,7 +507,7 @@ int main(int argc, char **argv)
         const int origin_before_failover = origin.tile_count;
         root.close();
         const ReplyData failover = request(application, &network,
-            QUrl(base + QStringLiteral("/%1/6/30/23.png").arg(inherited.id)), config.api_key);
+            QUrl(base + QStringLiteral("/%1/6/30/23.png").arg(inherited.id)));
         if (!check(failover.status == 200 && failover.body == ValidPng &&
                    backup.tile_count > backup_before_failover &&
                    origin.tile_count == origin_before_failover,
@@ -558,6 +519,12 @@ int main(int argc, char **argv)
                          origin_before_failover, origin.tile_count);
             return 1;
         }
+        if (!check(request(application, &network,
+                   QUrl(base + QStringLiteral("/upstream/v1/map-tiles")), true).status == 200,
+                   "Unauthenticated upstream cancellation is accepted")) return 1;
+        if (!check(request(application, &network,
+                   QUrl(base + QStringLiteral("/upstream/v1/terrain")), true).status == 200,
+                   "Unauthenticated terrain cancellation is accepted")) return 1;
     }
     backup.close();
     {
@@ -566,18 +533,17 @@ int main(int argc, char **argv)
         const QString base = QStringLiteral("http://127.0.0.1:%1").arg(
             ProviderDiscoveryTestAccess::port(offline));
         const ReplyData catalog = request(application, &network,
-            QUrl(base + QStringLiteral("/map/v1/providers/available")), config.api_key);
+            QUrl(base + QStringLiteral("/map/v1/providers/available")));
         if (!check(catalog.status == 200 && QJsonDocument::fromJson(catalog.body)
                    .object().value(QStringLiteral("providers")).toArray().size() == 1,
                    "Restore validated offline provider catalog")) return 1;
-        const ReplyData cached = request(application, &network, QUrl(base + path),
-                                         config.api_key);
+        const ReplyData cached = request(application, &network, QUrl(base + path));
         if (!check(cached.status == 200 && cached.body == ValidPng,
                    "Serve cached inherited tile offline")) return 1;
         // New tile must not call the origin directly, even with direct fallback on.
         const int origin_before_offline_miss = origin.tile_count;
         const ReplyData missing = request(application, &network,
-            QUrl(base + QStringLiteral("/%1/6/30/24.png").arg(inherited.id)), config.api_key);
+            QUrl(base + QStringLiteral("/%1/6/30/24.png").arg(inherited.id)));
         if (!check(missing.status != 200 &&
                    origin.tile_count == origin_before_offline_miss,
                    "Inherited provider cannot bypass MAP upstream")) return 1;

@@ -204,7 +204,6 @@ Current response semantics are:
 
 - `200`: valid cached normalized tile;
 - `400`: invalid dataset identifier or XYZ address;
-- `401`: missing/invalid server read API key when authentication is enabled;
 - `404`: no cached tile exists and no enabled provider can supply the requested dataset/address;
 - `500`: cached tile is unreadable/corrupt or provider normalization failed locally;
 - `502`: an enabled remote provider failed to fetch its upstream source;

@@ -91,8 +91,7 @@ int main(int argc, char **argv)
         "managed_settings_directory=old/config/server-map\n"
         "[downloads]\nremote_fetch_enabled=false\n"
         "[terrain]\nremote_fetch_enabled=false\n"
-        "[upstream]\nallow_direct_fetch=false\n"
-        "[authentication]\napi_key=admin-secret\n");
+        "[upstream]\nallow_direct_fetch=false\n");
     const QByteArray no_upstream_ini = QByteArrayLiteral(
         "[storage]\nprovider_state_file=old/providers.ini\n"
         "managed_settings_directory=old/config/server-map\n"
@@ -118,9 +117,8 @@ int main(int argc, char **argv)
                !config.cascade.allow_direct_fetch &&
                config.cascade_defined_in_admin_ini &&
                !config.map_remote_fetch_enabled && !config.terrain_remote_fetch_enabled &&
-               config.api_key == QByteArrayLiteral("admin-secret") &&
                readFile(admin_path) == admin_ini && readFile(legacy_path) == legacy_bytes,
-               "Preserve administrator restrictions, secrets and old files")) return 1;
+               "Preserve administrator restrictions and old files")) return 1;
 
     std::unique_ptr<Aowis::Map::SettingsRepository> store =
         Aowis::Map::SettingsRepository::openAtOwnerRoot(
@@ -229,7 +227,6 @@ int main(int argc, char **argv)
         .arg(MapManagedSettingsHttpTestAccess::port(server)));
     QNetworkAccessManager network;
     QNetworkRequest request(endpoint);
-    request.setRawHeader("X-API-Key", live_config.api_key);
     request.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
     QVector<Aowis::Map::MapProvider> http_edit = live_config.map_providers;
     http_edit[0].name = QStringLiteral("Updated through MAP REST");
