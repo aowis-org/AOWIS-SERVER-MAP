@@ -13,6 +13,22 @@ namespace Aowis::Map
 
 enum class CacheStorageKind { Raster, NormalizedTerrain, TerrainSources };
 
+// Process-wide safety reserve, independent of the optional per-root LRU limits.
+// All embedded MAP instances share admission accounting. A zero floor still
+// checks available space and concurrent reservations. Existing reads are unaffected.
+inline constexpr std::uint64_t DefaultCacheMinimumFreeBytes = 256ULL * 1024 * 1024;
+void setCacheMinimumFreeBytes(std::uint64_t bytes);
+std::uint64_t cacheMinimumFreeBytes();
+
+// Hold through the complete physical write (including an atomic replacement's
+// temporary copy). The directory must exist and be on the destination filesystem.
+// Empty token means insufficient/unknown space or unrepresentable reservation.
+// In-flight reservations are conservatively shared across all volumes in this
+// process; external processes and filesystem allocation overhead are not quotas.
+using CacheDiskWriteReservation = std::shared_ptr<void>;
+CacheDiskWriteReservation reserveCacheDiskWrite(const std::filesystem::path &directory,
+                                                std::uint64_t bytes);
+
 // Logical file sizes, not allocated filesystem blocks. The scan does not
 // follow symlinks. Concurrent writes/deletes can change the result during a scan.
 struct CacheStorageStatistics

@@ -1087,6 +1087,15 @@ TerrainProviderFetchResult TerrainData::fetchNormalizedFromUpstreams(
                 result.error_message = directory_error;
                 return result;
             }
+            const CacheDiskWriteReservation reservation = reserveCacheDiskWrite(
+                std::filesystem::path(QFileInfo(file_path).absolutePath().toStdU16String()),
+                std::uint64_t(bytes.size()));
+            if (!reservation)
+            {
+                result.status = TerrainProviderFetchStatus::SourceReadError;
+                result.error_message = QStringLiteral("Insufficient or unavailable cache disk space for normalized terrain");
+                return result;
+            }
             QSaveFile file(file_path);
             if (!file.open(QIODevice::WriteOnly))
             {
@@ -1516,6 +1525,15 @@ TerrainTileLookupResult TerrainData::fetchAndStoreNormalizedTile(
             return result;
         }
 
+        const CacheDiskWriteReservation reservation = reserveCacheDiskWrite(
+            std::filesystem::path(file_info.absolutePath().toStdU16String()),
+            std::uint64_t(encoded.size()));
+        if (!reservation)
+        {
+            result.status = TerrainTileLookupStatus::TileReadError;
+            result.error_message = QStringLiteral("Insufficient or unavailable cache disk space for normalized terrain");
+            return result;
+        }
         QSaveFile file(path);
         if (!file.open(QIODevice::WriteOnly))
         {

@@ -14,6 +14,7 @@
 #include <exception>
 #include <cmath>
 #include <numbers>
+#include <limits>
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -37,6 +38,38 @@ constexpr std::size_t MaximumProtectionRangesPerGroup = 16384;
 constexpr std::chrono::seconds FlushInterval(30);
 constexpr std::chrono::seconds RetryInterval(30);
 constexpr const char *IndexFilename = ".aowis-cache-access-v1.sqlite3";
+
+struct DiskAdmissionState
+{
+    std::mutex mutex;
+    std::uint64_t minimum_free = DefaultCacheMinimumFreeBytes;
+    std::uint64_t reserved = 0;
+};
+
+const std::shared_ptr<DiskAdmissionState> &diskAdmissionState()
+{
+    // Reservations retain the state even during static teardown.
+    static const std::shared_ptr<DiskAdmissionState> state = std::make_shared<DiskAdmissionState>();
+    return state;
+}
+
+class DiskReservation final
+{
+public:
+    DiskReservation(const std::shared_ptr<DiskAdmissionState> &state, std::uint64_t bytes)
+        : state(state), bytes(bytes) {}
+    ~DiskReservation()
+    {
+        if (!this->admitted) return;
+        std::lock_guard<std::mutex> lock(this->state->mutex);
+        this->state->reserved -= this->bytes;
+    }
+    void activate() { this->admitted = true; } // caller holds state mutex
+private:
+    std::shared_ptr<DiskAdmissionState> state;
+    std::uint64_t bytes;
+    bool admitted = false;
+};
 // Cooperative ownership locks are separate from the SQLite index. Every
 // participating instance holds a shared owner lock during its lifetime; only
 // a sole owner may evict. A second lock serializes shared->exclusive upgrades
@@ -435,6 +468,42 @@ std::optional<std::vector<CacheTileRange>> cacheRegionTileRanges(
         }
     }
     return ranges;
+}
+
+void setCacheMinimumFreeBytes(std::uint64_t bytes)
+{
+    const std::shared_ptr<DiskAdmissionState> state = diskAdmissionState();
+    std::lock_guard<std::mutex> lock(state->mutex);
+    state->minimum_free = bytes;
+}
+
+std::uint64_t cacheMinimumFreeBytes()
+{
+    const std::shared_ptr<DiskAdmissionState> state = diskAdmissionState();
+    std::lock_guard<std::mutex> lock(state->mutex);
+    return state->minimum_free;
+}
+
+CacheDiskWriteReservation reserveCacheDiskWrite(const std::filesystem::path &directory,
+                                                std::uint64_t bytes)
+{
+    if (directory.empty()) return {};
+    const std::shared_ptr<DiskAdmissionState> state = diskAdmissionState();
+    std::error_code error;
+    std::lock_guard<std::mutex> lock(state->mutex);
+    if (!std::filesystem::is_directory(directory, error) || error) return {};
+    const std::filesystem::space_info space = std::filesystem::space(directory, error);
+    if (error || space.available == std::uintmax_t(-1) || space.available < state->minimum_free)
+        return {};
+    // Subtraction checks avoid overflow even for administrator-supplied UINT64_MAX.
+    const std::uintmax_t usable = space.available - state->minimum_free;
+    if (state->reserved > usable || bytes > usable - state->reserved ||
+        bytes > std::numeric_limits<std::uint64_t>::max() - state->reserved)
+        return {};
+    const std::shared_ptr<DiskReservation> reservation = std::make_shared<DiskReservation>(state, bytes);
+    state->reserved += bytes;
+    reservation->activate();
+    return reservation;
 }
 
 bool cacheStorageRootsOverlap(const std::filesystem::path &first,

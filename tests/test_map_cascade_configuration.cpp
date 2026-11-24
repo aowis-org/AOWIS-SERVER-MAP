@@ -205,7 +205,8 @@ int main(int argc, char **argv)
         QString error;
         if (!check(loadIni(path, QByteArrayLiteral("[storage]\nraster_cache_maximum_bytes=10737418240\n"
                      "normalized_terrain_cache_maximum_bytes=2147483648\ncache_cleanup_target_percent=80\n"
-                     "cache_prefer_overview_tiles=false\n"), &limits, &error) &&
+                     "cache_prefer_overview_tiles=false\ncache_minimum_free_bytes=536870912\n"), &limits, &error) &&
+                   limits.cache_minimum_free_bytes == 536870912ULL &&
                    limits.raster_cache_policy.maximum_bytes == 10737418240ULL &&
                    limits.terrain_cache_policy.maximum_bytes == 2147483648ULL &&
                    limits.raster_cache_policy.cleanup_target_percent == 80 &&
@@ -213,7 +214,8 @@ int main(int argc, char **argv)
                    !limits.terrain_cache_policy.prefer_overview_tiles,
                    "Valid cache storage limits rejected")) return 1;
         if (!check(!loadIni(path, QByteArrayLiteral("[storage]\nraster_cache_maximum_bytes=-1\n"), &limits, &error) &&
-                   !loadIni(path, QByteArrayLiteral("[storage]\ncache_cleanup_target_percent=100\n"), &limits, &error),
+                   !loadIni(path, QByteArrayLiteral("[storage]\ncache_cleanup_target_percent=100\n"), &limits, &error) &&
+                   !loadIni(path, QByteArrayLiteral("[storage]\ncache_minimum_free_bytes=-1\n"), &limits, &error),
                    "Invalid cache storage policy accepted")) return 1;
     }
     StubHttpServer primary;

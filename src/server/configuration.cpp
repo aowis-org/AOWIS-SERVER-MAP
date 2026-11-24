@@ -685,7 +685,9 @@ bool MapServerConfiguration::loadConfigFile(const QString &path, Server::Config 
         }
     }
 
-    if (!readCacheByteLimit(&settings, QStringLiteral("storage/raster_cache_maximum_bytes"),
+    if (!readCacheByteLimit(&settings, QStringLiteral("storage/cache_minimum_free_bytes"),
+                            &config->cache_minimum_free_bytes, error_message) ||
+        !readCacheByteLimit(&settings, QStringLiteral("storage/raster_cache_maximum_bytes"),
                             &config->raster_cache_policy.maximum_bytes, error_message) ||
         !readCacheByteLimit(&settings, QStringLiteral("storage/normalized_terrain_cache_maximum_bytes"),
                             &config->terrain_cache_policy.maximum_bytes, error_message))
@@ -957,6 +959,8 @@ QByteArray MapServerConfiguration::defaultConfigText()
         "; Soft ordinary-cache payload limits in bytes; 0 = unlimited.\n"
         "raster_cache_maximum_bytes=0\nnormalized_terrain_cache_maximum_bytes=0\n"
         "cache_cleanup_target_percent=85\ncache_prefer_overview_tiles=true\n"
+        "; Free space reserved for the device/filesystem, independent of cache limits.\n"
+        "cache_minimum_free_bytes=268435456\n"
         "; Permanent imported tiles and terrain packages; not a disposable cache.\n"
         "; Empty means <terrain cache>/offline-packages for legacy terrain packages.\n"
         "permanent_data_directory=\n"

@@ -20,6 +20,7 @@
 
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 
 namespace
 {
@@ -466,6 +467,50 @@ int main(int argc, char **argv)
         require(!limited.setCacheStoragePolicy({120, 85, false}), "Overlapping permanent root accepted");
     }
 
+    // A denied disk write must not replace an existing tile, nor prevent
+    // delivery of a downloaded raster tile through the normal worker path.
+    {
+        using namespace Aowis::Map;
+        QTemporaryDir pressure_cache;
+        require(pressure_cache.isValid(), "Cannot create low-space fixture");
+        const QString retained_path = QDir(pressure_cache.path()).filePath(
+            QStringLiteral("maptiles/%1/6/31/20.png").arg(provider_id));
+        writeFile(retained_path, old_bytes);
+        MapTiles pressure(pressure_cache.path(), 2, 8);
+        pressure.configureProviders(providers, {}, {});
+        // Establish the provider's cache identity before simulated disk pressure.
+        require(pressure.getTile(provider_id, 6, 31, 20, QStringLiteral("existing")).data == old_bytes,
+                "Cannot read pressure fixture");
+        const std::uint64_t previous_floor = cacheMinimumFreeBytes();
+        setCacheMinimumFreeBytes(std::numeric_limits<std::uint64_t>::max());
+        require(!MapTilesCacheWriteTestAccess::persist(image, retained_path),
+                "Raster replacement bypassed disk admission");
+        QFile retained(retained_path);
+        require(retained.open(QIODevice::ReadOnly) && retained.readAll() == old_bytes,
+                "Denied raster replacement damaged old data");
+        retained.close();
+        QByteArray received;
+        bool failed = false;
+        QEventLoop loop;
+        QObject::connect(&pressure, &MapTiles::tileReady, &loop,
+            [&loop, &received](const QString &key, const QByteArray &data) {
+                if (key == QStringLiteral("low-space")) { received = data; loop.quit(); }
+            });
+        QObject::connect(&pressure, &MapTiles::tileFailed, &loop,
+            [&loop, &failed](const QString &key, MapTiles::TileFailureReason) {
+                if (key == QStringLiteral("low-space")) { failed = true; loop.quit(); }
+            });
+        pressure.getTileForHttp(provider_id, 6, 30, 20, QStringLiteral("low-space"));
+        QTimer::singleShot(5000, &loop, &QEventLoop::quit);
+        if (received.isEmpty() && !failed) loop.exec();
+        require(!failed && received == image, "Disk pressure prevented raster delivery");
+        const QString denied_path = QDir(pressure_cache.path()).filePath(
+            QStringLiteral("maptiles/%1/6/30/20.png").arg(provider_id));
+        require(!QFile::exists(denied_path) &&
+                pressure.getTile(provider_id, 6, 30, 20, QStringLiteral("ram")).data == image,
+                "Denied raster write was persisted or not retained in RAM");
+        setCacheMinimumFreeBytes(previous_floor);
+    }
     std::cout << "Permanent raster cache reuse tests passed\n";
     return EXIT_SUCCESS;
 }

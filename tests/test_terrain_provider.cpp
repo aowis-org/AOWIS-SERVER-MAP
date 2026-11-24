@@ -14,6 +14,7 @@
 #include <tiffio.h>
 
 #include <chrono>
+#include <limits>
 #include <cmath>
 #include <future>
 #include <thread>
@@ -280,6 +281,19 @@ int main()
             return 1;
     }
 
+    // A replacement requires a second complete copy on disk. Force admission
+    // denial without modifying the filesystem capacity; the old file survives.
+    const std::uint64_t previous_floor = cacheMinimumFreeBytes();
+    setCacheMinimumFreeBytes(std::numeric_limits<std::uint64_t>::max());
+    const bool denied_publication = !Internal::publishCopernicusSource(final_path, incoming_path, partial_path);
+    setCacheMinimumFreeBytes(previous_floor);
+    {
+        QFile complete(final_path);
+        if (!require(denied_publication && complete.open(QIODevice::ReadOnly) &&
+                     complete.readAll() == QByteArray("ABCDEFGH"),
+                     "Disk admission did not preserve published source")) return 1;
+    }
+
     TerrainData::Config config;
     config.enabled = true;
     config.remote_fetch_enabled = true;
@@ -461,6 +475,23 @@ int main()
         return 1;
     }
 
+    // Cached normalized terrain remains readable even with no write budget.
+    // A different tile over the same native source requires a new file.
+    const TerrainTileAddress pressure_address = addressForCoordinate(50.8, 8.8, 14);
+    const QString pressure_path = terrain_data.normalizedTilePath(
+        QStringLiteral("copernicus-glo30"), pressure_address);
+    if (!require(!QFileInfo::exists(pressure_path), "Pressure fixture already normalized")) return 1;
+    setCacheMinimumFreeBytes(std::numeric_limits<std::uint64_t>::max());
+    const TerrainTileLookupResult retained_tile = terrain_data.terrainTile(
+        QStringLiteral("copernicus-glo30"), address, false);
+    const TerrainTileLookupResult denied_tile = terrain_data.terrainTile(
+        QStringLiteral("copernicus-glo30"), pressure_address, false);
+    setCacheMinimumFreeBytes(previous_floor);
+    if (!require(retained_tile.status == TerrainTileLookupStatus::Ready && retained_tile.data == first_data &&
+                 denied_tile.status == TerrainTileLookupStatus::TileReadError &&
+                 denied_tile.error_message.contains(QStringLiteral("disk space")) && !QFileInfo::exists(pressure_path),
+                 "Disk pressure affected existing terrain or admitted a new normalized tile")) return 1;
+
     const QString normalized_path = terrain_data.normalizedTilePath(
         QStringLiteral("copernicus-glo30"), address);
     QFile corrupt_normalized_file(normalized_path);
@@ -619,7 +650,17 @@ int main()
             return 1;
     }
     const Internal::CopernicusPartialState repeated_state{4, 12, "\"v1\""};
-    if (!require(Internal::saveCopernicusPartialState(repeated_meta, repeated_state, 1024) &&
+    if (!require(Internal::saveCopernicusPartialState(repeated_meta, repeated_state, 1024),
+                 "Failed to create resume metadata")) return 1;
+    setCacheMinimumFreeBytes(std::numeric_limits<std::uint64_t>::max());
+    const bool denied_append = !Internal::appendCopernicusPartialSuffix(
+        repeated_prefix, repeated_meta, repeated_incoming, repeated_state, 3, 1024);
+    setCacheMinimumFreeBytes(previous_floor);
+    const std::optional<Internal::CopernicusPartialState> retained_partial =
+        Internal::loadCopernicusPartialState(repeated_prefix, repeated_meta, 1024);
+    if (!require(denied_append && retained_partial && retained_partial->downloaded_bytes == 4,
+                 "Denied resume assembly lost the previously verified prefix")) return 1;
+    if (!require(
                  Internal::appendCopernicusPartialSuffix(
                      repeated_prefix, repeated_meta, repeated_incoming, repeated_state, 3, 1024),
                  "Failed to extend a verified interrupted range"))

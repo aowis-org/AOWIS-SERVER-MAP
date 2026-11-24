@@ -82,6 +82,8 @@ raster_cache_maximum_bytes=10737418240
 normalized_terrain_cache_maximum_bytes=2147483648
 cache_cleanup_target_percent=85
 cache_prefer_overview_tiles=true
+; Reserve 256 MiB of free filesystem space, even with unlimited cache limits
+cache_minimum_free_bytes=268435456
 ```
 
 The worker checks limits at startup/policy change and roughly every 30 seconds.
@@ -115,9 +117,58 @@ These are **soft payload limits**, not filesystem quotas. Native GeoTIFFs,
 permanent/offline package data, SQLite files, partial files and other auxiliary
 files are not evicted. Writes continue during cleanup and can temporarily exceed
 the limit. An unreachable target is reported instead of deleting unrelated or
-active or protected data. Disk-free-space admission and native
-source retention are not yet implemented. Available disk space is still exposed
-by storage statistics; do not set a payload limit equal to total free space.
+active or protected data. Native source retention is not yet implemented.
+Available disk space is exposed by storage statistics; do not set a payload
+limit equal to total free space.
+
+## Disk-space admission
+
+Ordinary cache writes preserve a default 256 MiB of available filesystem space.
+The reserve applies even when the LRU limits are unlimited. Dedicated servers
+can set `storage/cache_minimum_free_bytes` in the INI; embedded hosts can call
+`Aowis::Map::setCacheMinimumFreeBytes(bytes)` and query
+`cacheMinimumFreeBytes()`. The setting is process-wide (one policy for all MAP
+instances in the process). Zero removes the extra free-space floor but still
+checks available bytes and outstanding reservations.
+
+- Raster: reserve the entire encoded tile before atomic publication. Refusal
+  leaves any old file intact; the normal download path still delivers the tile
+  and retains it in the bounded RAM cache.
+- Normalized terrain: reserve the complete encoded tile before committing a
+  local or upstream result. If persistence is refused, the new tile reports a
+  storage error; existing normalized terrain can still be read.
+- Native terrain: refuse acquisition before connecting if there is no room for
+  any payload; reserve each incoming chunk through its write and flush. Final
+  publication or resume assembly requires extra space for the complete atomic
+  copy, while the input files still exist. Failed admission discards only the
+  incoming attempt and retains a previously validated partial where applicable.
+- Provider catalog snapshots: reserve before writing; a refused snapshot does
+  not prevent updating the in-memory catalog.
+
+The RAII reservation API (`reserveCacheDiskWrite`) checks the destination
+filesystem's available bytes and subtracts all outstanding reservations under
+one mutex. Concurrent MAP writers cannot each independently claim the same
+reported free capacity. The token is released when the last copy is destroyed.
+Each atomic replacement reserves the full temporary payload, not just the net
+change. Outstanding reservations are conservatively counted across all volumes
+in a process, even if their filesystems differ.
+
+This is a preventive payload-write guard, not a hard filesystem quota. Other
+processes, filesystem allocation/metadata overhead, SQLite journals and small
+control files can consume additional space. Separate MAP processes do not share
+reservations. Filesystem changes after admission can still cause real write
+failures, which retain the existing atomic-publication error handling. The
+reserve leaves headroom for such metadata and other device activity. Explicit
+administrative data and configuration are not limited by this guard.
+
+If available space is unknown or below the reserve, new cache payloads are
+refused. Admission automatically resumes when capacity returns. The guard does
+not itself trigger additional eviction below the configured LRU thresholds;
+free space can be restored through ordinary cleanup or administrator deletion.
+The per-root limits remain soft and protected tiles are never automatically
+sacrificed. Blocking new cache writes specifically because protected payload
+alone exceeds a configured soft limit requires additional protected-storage
+accounting.
 
 ## Persistent protection groups
 
@@ -192,8 +243,10 @@ enabled: it does not understand these protection groups.
 
 ## Next steps
 
-Add disk-free-space admission and protected-storage statistics independent of
-cleanup, then expose management via the MAP settings API and REST. Native
+Add protected-storage statistics independent of cleanup and management APIs,
+then expose management via the MAP settings API and REST. A later maintenance
+policy can reclaim ordinary payloads under filesystem pressure even below the
+configured LRU limits. Native
 source eviction needs independent coordination with readers, partial downloads
 and shared source dependencies. GUI and Mobile can then use these common APIs.
 Offline download scheduling, progress and completeness verification are later

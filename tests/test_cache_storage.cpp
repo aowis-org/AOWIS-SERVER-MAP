@@ -3,6 +3,7 @@
 #include <limits>
 
 #include <chrono>
+#include <barrier>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -50,6 +51,45 @@ void writeFile(const fs::path &path, std::size_t bytes)
 int main()
 {
     TemporaryDirectory temporary;
+    // Simulate pressure by reserving existing free space, never by filling
+    // the test filesystem. Verify that both roots share concurrent admission.
+    require(cacheMinimumFreeBytes() == DefaultCacheMinimumFreeBytes,
+            "Default free-space floor missing");
+    const fs::path admission_a = temporary.path / "admission-a";
+    const fs::path admission_b = temporary.path / "admission-b";
+    fs::create_directories(admission_a);
+    fs::create_directories(admission_b);
+    const std::uint64_t window = 64ULL * 1024 * 1024;
+    const std::uint64_t amount = 40ULL * 1024 * 1024;
+    const std::uintmax_t available = fs::space(admission_a).available;
+    require(available != std::uintmax_t(-1) && available > window,
+            "Insufficient fixture filesystem space for admission test");
+    setCacheMinimumFreeBytes(available - window);
+    {
+        std::barrier start(2);
+        CacheDiskWriteReservation first, second;
+        std::thread one([&]() { start.arrive_and_wait(); first = reserveCacheDiskWrite(admission_a, amount); });
+        std::thread two([&]() { start.arrive_and_wait(); second = reserveCacheDiskWrite(admission_b, amount); });
+        one.join();
+        two.join();
+        require(bool(first) != bool(second), "Concurrent reservations overcommitted shared free space");
+        CacheDiskWriteReservation retained = first ? first : second;
+        first.reset();
+        second.reset();
+        require(!reserveCacheDiskWrite(admission_b, amount), "Copy did not retain reservation");
+        retained.reset();
+        require(bool(reserveCacheDiskWrite(admission_b, amount)), "Released capacity not reusable");
+    }
+    setCacheMinimumFreeBytes(std::numeric_limits<std::uint64_t>::max());
+    require(!reserveCacheDiskWrite(admission_a, 1), "Free-space floor not enforced");
+    setCacheMinimumFreeBytes(0);
+    require(!reserveCacheDiskWrite(admission_a, std::numeric_limits<std::uint64_t>::max()),
+            "Zero floor must still enforce actual availability and reject overflow");
+    require(!reserveCacheDiskWrite(temporary.path / "missing", 1), "Unknown destination accepted");
+    require(!reserveCacheDiskWrite({}, 1), "Empty destination accepted");
+    require(bool(reserveCacheDiskWrite(admission_a, 1)), "Zero floor rejected available space");
+    setCacheMinimumFreeBytes(DefaultCacheMinimumFreeBytes);
+
     const fs::path raster = temporary.path / "maptiles";
     const fs::path normalized = temporary.path / "terrain" / "normalized";
     const fs::path sources = temporary.path / "terrain" / "providers";

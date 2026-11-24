@@ -197,6 +197,7 @@ Use `ss -ltn | grep ':8122'` locally to confirm the listening socket. From anoth
 | `storage/normalized_terrain_cache_maximum_bytes` | `0` | Soft normalized terrain payload limit; native sources excluded |
 | `storage/cache_cleanup_target_percent` | `85` | Low-water cleanup target as a percentage of each configured limit (1–99) |
 | `storage/cache_prefer_overview_tiles` | `true` | Evict zoom levels above 8 before overview tiles |
+| `storage/cache_minimum_free_bytes` | `268435456` | Minimum filesystem headroom for new cache payload writes; 0 removes the extra reserve, not capacity checks |
 | `storage/permanent_data_directory` | empty | Optional administrator-owned permanent data root |
 | `storage/provider_state_file` | empty | Legacy provider catalog path, read only for one-time migration |
 | `storage/managed_settings_directory` | empty | Optional CONFIG `server-map` owner root (defaults under the service state directory) |

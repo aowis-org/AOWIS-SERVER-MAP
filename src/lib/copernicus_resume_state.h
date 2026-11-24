@@ -1,6 +1,7 @@
 #pragma once
 
 #include "copernicus_download_validation.h"
+#include <aowis/map/cache_storage.h>
 
 #include <QByteArray>
 #include <QFile>
@@ -111,6 +112,12 @@ inline bool appendCopernicusPartialSuffix(const QString &partial_path,
         QFileInfo(incoming_path).size() != suffix_bytes)
         return false;
 
+    // The existing prefix and incoming suffix coexist with the temporary
+    // combined file. Reserve the complete copy and room for its metadata.
+    const CacheDiskWriteReservation reservation = reserveCacheDiskWrite(
+        std::filesystem::path(QFileInfo(partial_path).absolutePath().toStdU16String()),
+        std::uint64_t(old_state.downloaded_bytes) + std::uint64_t(suffix_bytes) + 1024);
+    if (!reservation) return false;
     QFile prefix(partial_path);
     QFile suffix(incoming_path);
     QSaveFile combined(partial_path);

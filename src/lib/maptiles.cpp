@@ -1285,6 +1285,13 @@ bool MapTiles::saveMapTile(const QByteArray &data, const QString &tile_base_path
         return false;
     }
 
+    const Aowis::Map::CacheDiskWriteReservation reservation = Aowis::Map::reserveCacheDiskWrite(
+        std::filesystem::path(dir.absolutePath().toStdU16String()), std::uint64_t(data.size()));
+    if (!reservation)
+    {
+        qWarning() << "Insufficient or unavailable cache disk space:" << tile_path;
+        return false; // worker still delivers the downloaded tile from RAM
+    }
     QSaveFile file(tile_path);
     if (!file.open(QIODevice::WriteOnly))
     {

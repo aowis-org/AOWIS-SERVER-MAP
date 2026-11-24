@@ -12,6 +12,7 @@
 #include <QTemporaryDir>
 
 #include <future>
+#include <limits>
 #include <iostream>
 #include <thread>
 #include <chrono>
@@ -636,6 +637,20 @@ int main(int argc, char **argv)
         !require(!QFile::exists(partial) && !QFile::exists(metadata),
                  "Partial state remained after successful publication"))
         return 1;
+    // Existing native sources remain usable with no write capacity. A missing
+    // source must refuse before attempting the (intentionally unusable) URL.
+    const std::uint64_t previous_floor = Aowis::Map::cacheMinimumFreeBytes();
+    Aowis::Map::setCacheMinimumFreeBytes(std::numeric_limits<std::uint64_t>::max());
+    QString pressure_error;
+    const QUrl unavailable_url(QStringLiteral("http://127.0.0.1:1/source.tif"));
+    const bool cached_ready = Aowis::Map::Internal::fetchCopernicusSourceForIntegrationTest(
+        temp.path(), unavailable_url, &pressure_error);
+    const QString pressure_root = QDir(temp.path()).filePath(QStringLiteral("disk-pressure"));
+    const bool missing_ready = Aowis::Map::Internal::fetchCopernicusSourceForIntegrationTest(
+        pressure_root, unavailable_url, &pressure_error);
+    Aowis::Map::setCacheMinimumFreeBytes(previous_floor);
+    if (!require(cached_ready && !missing_ready && pressure_error.contains(QStringLiteral("disk space")),
+                 "Native source disk admission failed")) return 1;
     QByteArray changed_payload(1000, '\0');
     for (qsizetype i = 0; i < changed_payload.size(); ++i)
         changed_payload[i] = char('a' + i % 26);

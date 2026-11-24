@@ -1241,6 +1241,7 @@ QFuture<QHttpServerResponse> Server::submitTerrainGrid(
 
 bool Server::start()
 {
+    Aowis::Map::setCacheMinimumFreeBytes(this->config.cache_minimum_free_bytes);
     QDir cache_directory;
     if (this->config.cache_directory.trimmed().isEmpty()
         || !cache_directory.mkpath(this->config.cache_directory))

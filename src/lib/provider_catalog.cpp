@@ -1,4 +1,5 @@
 #include <aowis/map/provider_catalog.h>
+#include <aowis/map/cache_storage.h>
 #include <aowis/map/settings_repository.h>
 #include <aowis/map/cascade_upstream_health.h>
 
@@ -374,8 +375,11 @@ void ProviderCatalog::fetch(const MapCascadeUpstream &upstream, bool legacy,
         const QString file_path = cachePath(upstream);
         if (QDir().mkpath(QFileInfo(file_path).absolutePath()))
         {
+            const CacheDiskWriteReservation reservation = reserveCacheDiskWrite(
+                std::filesystem::path(QFileInfo(file_path).absolutePath().toStdU16String()),
+                std::uint64_t(payload.size()));
             QSaveFile snapshot(file_path);
-            if (snapshot.open(QIODevice::WriteOnly))
+            if (reservation && snapshot.open(QIODevice::WriteOnly))
             {
                 snapshot.setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner);
                 if (snapshot.write(payload) != payload.size())

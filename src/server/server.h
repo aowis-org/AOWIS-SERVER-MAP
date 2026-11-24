@@ -85,6 +85,7 @@ public:
         bool cascade_defined_in_admin_ini = false;
         QString cache_directory;
         QString permanent_data_directory;
+        std::uint64_t cache_minimum_free_bytes = Aowis::Map::DefaultCacheMinimumFreeBytes;
         Aowis::Map::CacheStoragePolicy raster_cache_policy;
         Aowis::Map::CacheStoragePolicy terrain_cache_policy;
         QString map_coverage;

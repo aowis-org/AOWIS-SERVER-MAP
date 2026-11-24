@@ -391,8 +391,16 @@ SourceLoadResult downloadSourceTile(const QString &provider_cache_directory,
         QFile::remove(metadata_path);
     }
     QFile::remove(incoming_path);
+    const std::filesystem::path staging_directory(QFileInfo(incoming_path).absolutePath().toStdU16String());
+    // Avoid initiating a native download when even a minimal write cannot fit.
+    if (!reserveCacheDiskWrite(staging_directory, 1))
+    {
+        result.status = SourceLoadStatus::ReadError;
+        result.error_message = QStringLiteral("Insufficient or unavailable cache disk space for Copernicus source");
+        return result;
+    }
     QFile output(incoming_path);
-    if (!output.open(QIODevice::WriteOnly | QIODevice::Truncate))
+    if (!output.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Unbuffered))
     {
         result.status = SourceLoadStatus::ReadError;
         result.error_message = QStringLiteral("Failed to stage Copernicus source %1: %2")
@@ -488,11 +496,29 @@ SourceLoadResult downloadSourceTile(const QString &provider_cache_directory,
         reply->abort();
     });
     bool write_failed = false;
+    bool admission_denied = false;
     qint64 downloaded_bytes = 0;
+    // Unknown/chunked HTTP lengths are safe too. Reserve each incoming chunk,
+    // hold through its unbuffered write and flush, then let the next space
+    // query account for the bytes already written. No whole-file RAM buffer.
+    const std::function<bool(const QByteArray &)> stage_bytes =
+        [&output, &staging_directory, &admission_denied](const QByteArray &data)
+    {
+        if (data.isEmpty()) return true;
+        const CacheDiskWriteReservation reservation = reserveCacheDiskWrite(
+            staging_directory, std::uint64_t(data.size()));
+        if (!reservation)
+        {
+            admission_denied = true;
+            return false;
+        }
+        return output.write(data) == data.size() && output.flush();
+    };
 
-    QObject::connect(reply, &QNetworkReply::readyRead, &event_loop, [&output, reply,
+    QObject::connect(reply, &QNetworkReply::readyRead, &event_loop, [reply,
                                                                  &write_failed,
-                                                                 &downloaded_bytes]()
+                                                                 &downloaded_bytes,
+                                                                 &stage_bytes]()
     {
         if (write_failed)
         {
@@ -502,8 +528,7 @@ SourceLoadResult downloadSourceTile(const QString &provider_cache_directory,
 
         const QByteArray data = reply->readAll();
         downloaded_bytes += data.size();
-        if (downloaded_bytes > MaximumSourceDownloadBytes ||
-            output.write(data) != data.size())
+        if (downloaded_bytes > MaximumSourceDownloadBytes || !stage_bytes(data))
         {
             write_failed = true;
             reply->abort();
@@ -532,8 +557,7 @@ SourceLoadResult downloadSourceTile(const QString &provider_cache_directory,
     {
         const QByteArray trailing = reply->readAll();
         downloaded_bytes += trailing.size();
-        if (downloaded_bytes > MaximumSourceDownloadBytes ||
-            output.write(trailing) != trailing.size())
+        if (downloaded_bytes > MaximumSourceDownloadBytes || !stage_bytes(trailing))
             write_failed = true;
     }
 
@@ -566,7 +590,9 @@ SourceLoadResult downloadSourceTile(const QString &provider_cache_directory,
     {
         discard_incoming();
         result.status = SourceLoadStatus::ReadError;
-        result.error_message = downloaded_bytes > MaximumSourceDownloadBytes
+        result.error_message = admission_denied
+            ? QStringLiteral("Insufficient or unavailable cache disk space for Copernicus source: %1").arg(incoming_path)
+            : downloaded_bytes > MaximumSourceDownloadBytes
             ? QStringLiteral("Copernicus source tile exceeded the %1 MiB safety limit: %2")
                   .arg(MaximumSourceDownloadBytes / (1024LL * 1024LL))
                   .arg(request_url.toString())
