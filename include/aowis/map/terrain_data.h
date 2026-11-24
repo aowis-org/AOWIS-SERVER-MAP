@@ -154,6 +154,9 @@ public:
     // Disk scan: run off the event-loop thread. Permanent packages are excluded.
     TerrainCacheStorageStatistics cacheStorageStatistics() const;
     bool flushCacheAccessIndex();
+    // Applies only to ordinary normalized tiles, never native terrain sources.
+    bool setCacheStoragePolicy(const CacheStoragePolicy &policy);
+    CacheCleanupResult lastCacheCleanup() const;
     QString normalizedTilePath(const QString &dataset,
                                const TerrainTileAddress &address) const;
 
@@ -269,6 +272,8 @@ private:
     mutable std::atomic_int cascade_active{0};
     StoragePaths storage_paths;
     std::unique_ptr<CacheAccessIndex> cache_access_index;
+    std::string cacheStorageKey(const QString &path) const;
+    CacheAccessIndex::PayloadLease leaseCachePayload(const QString &path) const;
     void recordCacheUse(const QString &path) const;
     std::vector<std::unique_ptr<TerrainProvider>> providers;
     mutable QMutex normalized_directory_mutex;

@@ -428,6 +428,37 @@ int main(int argc, char **argv)
                 "Selective deletion affected an unrelated tile");
     }
 
+    // Ordinary raster limits must use real access recency and must never
+    // include separately mounted permanent imagery.
+    {
+        QTemporaryDir eviction_cache;
+        QTemporaryDir permanent_cache;
+        require(eviction_cache.isValid() && permanent_cache.isValid(), "Cannot create eviction fixture");
+        const QString relative = QStringLiteral("maptiles/%1/12/1/").arg(provider_id);
+        const QString older = QDir(eviction_cache.path()).filePath(relative + QStringLiteral("1.png"));
+        const QString newer = QDir(eviction_cache.path()).filePath(relative + QStringLiteral("2.png"));
+        const QString permanent = QDir(permanent_cache.path()).filePath(relative + QStringLiteral("3.png"));
+        writeFile(older, QByteArray(100, 'a'));
+        writeFile(newer, QByteArray(100, 'b'));
+        writeFile(permanent, QByteArray(100, 'p'));
+        MapTiles limited(eviction_cache.path(), 2, 8);
+        limited.configureProviders(providers, {}, {});
+        limited.setRemoteFetchEnabled(false);
+        limited.setPermanentDataDirectory(permanent_cache.path());
+        require(limited.getTile(provider_id, 12, 1, 2, QStringLiteral("recent")).data == QByteArray(100, 'b'),
+                "Failed to establish recent cache hit");
+        require(limited.setCacheStoragePolicy({120, 85, false}), "Failed to enable ordinary raster eviction");
+        QElapsedTimer deadline;
+        deadline.start();
+        while (QFile::exists(older) && deadline.elapsed() < 5000) QThread::msleep(10);
+        require(!QFile::exists(older) && QFile::exists(newer) && QFile::exists(permanent),
+                "Raster eviction failed to preserve recent and permanent tiles");
+        require(limited.getTile(provider_id, 12, 1, 3, QStringLiteral("permanent")).data == QByteArray(100, 'p'),
+                "Permanent imagery unavailable after eviction");
+        limited.setPermanentDataDirectory(eviction_cache.path());
+        require(!limited.setCacheStoragePolicy({120, 85, false}), "Overlapping permanent root accepted");
+    }
+
     std::cout << "Permanent raster cache reuse tests passed\n";
     return EXIT_SUCCESS;
 }

@@ -193,6 +193,10 @@ Use `ss -ltn | grep ':8122'` locally to confirm the listening socket. From anoth
 | `terrain/download_deadline_seconds` | `1800` | Absolute Copernicus transfer deadline; also how long a downstream polls a MAP upstream for one terrain tile |
 | `terrain/cache_directory` | empty | Terrain root; defaults below raster cache root |
 | `terrain/coverage` | empty | Terrain download-coverage profile |
+| `storage/raster_cache_maximum_bytes` | `0` | Soft ordinary raster payload limit in bytes; 0 is unlimited |
+| `storage/normalized_terrain_cache_maximum_bytes` | `0` | Soft normalized terrain payload limit; native sources excluded |
+| `storage/cache_cleanup_target_percent` | `85` | Low-water cleanup target as a percentage of each configured limit (1–99) |
+| `storage/cache_prefer_overview_tiles` | `true` | Evict zoom levels above 8 before overview tiles |
 | `storage/permanent_data_directory` | empty | Optional administrator-owned permanent data root |
 | `storage/provider_state_file` | empty | Legacy provider catalog path, read only for one-time migration |
 | `storage/managed_settings_directory` | empty | Optional CONFIG `server-map` owner root (defaults under the service state directory) |
@@ -330,4 +334,4 @@ python3 tools/build_regions.py natural-earth-countries.geojson regions.geojson
 
 Configured permanent raster data can be read from `<permanent_data_directory>/maptiles/<provider-uuid>/<z>/<x>/<y>.png` (or `.jpg`/`.webp`). It is not deleted by the raster-cache DELETE API. Downloaded raster files normally live under `<raster cache>/maptiles/<provider-uuid>/<z>/<x>/<y>.<ext>`, where the extension is the tile's actual format: `.png`, `.jpg` (e.g. a JPEG received from a MAP upstream in slow-link mode, or a JPEG imagery provider) or `.webp`. Caches from older releases stored every tile as `.png` whatever its format; those files are still read, and replaced by the correctly named file when the tile is fetched again; source COGs and normalized tiles live under the terrain cache. The `terrain/offline-packages/` location is reserved; automatic mounting and arbitrary GIS dataset import are **not supported**.
 
-Cached raster tiles do not automatically expire, revalidate or refresh. Cache deletion is the explicit invalidation mechanism. Check upstream licensing and cache-retention obligations before enabling shared storage. For physical layouts and recovery behavior, see [Architecture](architecture.md) and [Terrain sources](terrain-providers.md).
+Cached raster tiles do not expire by age, revalidate or refresh. Explicit deletion invalidates tiles; optional storage-limit eviction removes ordinary cached data by LRU. See [Cache storage](cache-storage.md) for limits, exclusions and ownership requirements. Check upstream licensing and cache-retention obligations before enabling shared storage. For physical layouts and recovery behavior, see [Architecture](architecture.md) and [Terrain sources](terrain-providers.md).

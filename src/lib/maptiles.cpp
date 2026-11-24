@@ -170,11 +170,31 @@ bool MapTiles::flushCacheAccessIndex()
     return this->cache_access_index.flush();
 }
 
-void MapTiles::recordCacheUse(const QString &tile_base_path) const
+std::string MapTiles::cacheStorageKey(const QString &tile_base_path) const
 {
     const QDir root(QDir(this->fscache_base).absoluteFilePath(QStringLiteral("maptiles")));
     const QString key = root.relativeFilePath(QFileInfo(tile_base_path).absoluteFilePath());
-    this->cache_access_index.recordAccess(key.toUtf8().toStdString());
+    return key.toUtf8().toStdString();
+}
+
+void MapTiles::recordCacheUse(const QString &tile_base_path) const
+{
+    this->cache_access_index.recordAccess(this->cacheStorageKey(tile_base_path));
+}
+
+bool MapTiles::setCacheStoragePolicy(const Aowis::Map::CacheStoragePolicy &policy)
+{
+    if (policy.maximum_bytes && !this->permanent_data_directory.isEmpty() &&
+        Aowis::Map::cacheStorageRootsOverlap(
+            std::filesystem::path(QDir(this->fscache_base).absoluteFilePath(QStringLiteral("maptiles")).toStdU16String()),
+            std::filesystem::path(QDir(this->permanent_data_directory).absoluteFilePath(QStringLiteral("maptiles")).toStdU16String())))
+        return false;
+    return this->cache_access_index.setStoragePolicy(Aowis::Map::CacheStorageKind::Raster, policy);
+}
+
+Aowis::Map::CacheCleanupResult MapTiles::lastCacheCleanup() const
+{
+    return this->cache_access_index.lastCleanup();
 }
 
 void MapTiles::recordMemoryCacheUse(const QString &provider, int z, int x, int y,
@@ -190,6 +210,11 @@ void MapTiles::recordMemoryCacheUse(const QString &provider, int z, int x, int y
 
 void MapTiles::setPermanentDataDirectory(const QString &directory)
 {
+    // Stop eviction before mounting an overlapping permanent directory.
+    if (!directory.isEmpty() && Aowis::Map::cacheStorageRootsOverlap(
+        std::filesystem::path(QDir(this->fscache_base).absoluteFilePath(QStringLiteral("maptiles")).toStdU16String()),
+        std::filesystem::path(QDir(directory).absoluteFilePath(QStringLiteral("maptiles")).toStdU16String())))
+        this->setCacheStoragePolicy({});
     ++this->cache_generation;
     this->permanent_data_directory = directory;
     this->permanent_cached_keys.clear();
@@ -467,7 +492,7 @@ MapTiles::TileRequestResult MapTiles::getTile(const QString &provider, int z, in
         }
     }
 
-    // Local tiles never expire. Upstream fetching is only considered when no
+    // Local tiles do not expire by age. Upstream fetching is only considered when no
     // usable tile exists in the memory cache, on disk, or in permanent storage.
     const QByteArray *memory_tile = this->tile_memory_cache.object(canonical_key);
     if (memory_tile != nullptr && !memory_tile->isEmpty())
@@ -476,16 +501,20 @@ MapTiles::TileRequestResult MapTiles::getTile(const QString &provider, int z, in
         return { TileRequestStatus::Ready, *memory_tile };
     }
 
-    QFile file(existingRasterTilePath(tile_base_path));
-    if (!file.fileName().isEmpty() && file.open(QIODevice::ReadOnly))
     {
-        const QByteArray data = file.readAll();
-        if (!data.isEmpty())
+        const Aowis::Map::CacheAccessIndex::PayloadLease lease =
+            this->cache_access_index.leasePayload(this->cacheStorageKey(tile_base_path));
+        QFile file(existingRasterTilePath(tile_base_path));
+        if (!file.fileName().isEmpty() && file.open(QIODevice::ReadOnly))
         {
-            this->tile_memory_cache.insert(
-                canonical_key, new QByteArray(data), tileMemoryCacheCostKiB(data));
-            this->recordCacheUse(tile_base_path);
-            return { TileRequestStatus::Ready, data };
+            const QByteArray data = file.readAll();
+            if (!data.isEmpty())
+            {
+                this->tile_memory_cache.insert(
+                    canonical_key, new QByteArray(data), tileMemoryCacheCostKiB(data));
+                this->recordCacheUse(tile_base_path);
+                return { TileRequestStatus::Ready, data };
+            }
         }
     }
 
@@ -599,6 +628,7 @@ MapTiles::TileRequestResult MapTiles::getTileForHttp(
     }
 
     QString read_path;
+    Aowis::Map::CacheAccessIndex::PayloadLease lease;
     bool permanent = false;
     if (!this->permanent_data_directory.isEmpty())
     {
@@ -615,8 +645,9 @@ MapTiles::TileRequestResult MapTiles::getTileForHttp(
             this->recordMemoryCacheUse(provider, z, wrapped_x, y, canonical_key);
             return { TileRequestStatus::Ready, *cached };
         }
-        read_path = existingRasterTilePath(
-            rasterTileBasePath(providerCachePath(provider), z, wrapped_x, y));
+        const QString tile_base_path = rasterTileBasePath(providerCachePath(provider), z, wrapped_x, y);
+        lease = this->cache_access_index.leasePayload(this->cacheStorageKey(tile_base_path));
+        read_path = existingRasterTilePath(tile_base_path);
     }
 
     // Missing files follow the established download/coverage path unchanged.
@@ -647,8 +678,10 @@ MapTiles::TileRequestResult MapTiles::getTileForHttp(
     const quint64 generation = this->cache_generation;
     QFutureWatcher<QByteArray> *watcher = new QFutureWatcher<QByteArray>(this);
     connect(watcher, &QFutureWatcher<QByteArray>::finished, this,
-            [this, watcher, read_key, canonical_key, generation, permanent, provider, z, wrapped_x, y, file_size, cascade_trace, read_path]()
+            [this, watcher, read_key, canonical_key, generation, permanent, provider, z, wrapped_x, y, file_size, cascade_trace, read_path, lease]()
     {
+        // The captured lease survives the worker and completion callback.
+        (void)lease;
         this->pending_cache_read_bytes -= file_size;
         const QStringList request_keys = this->cache_reads_pending.take(read_key);
         const QByteArray data = watcher->result();
@@ -684,8 +717,9 @@ MapTiles::TileRequestResult MapTiles::getTileForHttp(
                 emit tileFailed(response_key, TileFailureReason::UpstreamError);
         }
     });
-    watcher->setFuture(QtConcurrent::run(&this->cache_read_pool, [read_path, file_size]()
+    watcher->setFuture(QtConcurrent::run(&this->cache_read_pool, [read_path, file_size, lease]()
     {
+        (void)lease;
         QFile file(read_path);
         if (!file.open(QIODevice::ReadOnly)) return QByteArray();
         // An externally modified file can grow after admission; cap the actual
@@ -824,6 +858,8 @@ int MapTiles::deleteTiles(const QString &provider, int zoom, int tile_x_min, int
                 continue;
 
             const QString tile_path = x_directory.filePath(tile_file_name);
+            const Aowis::Map::CacheAccessIndex::PayloadLease lease = this->cache_access_index.leasePayload(
+                this->cacheStorageKey(tile_path.left(tile_path.lastIndexOf(QLatin1Char('.')))));
             if (!QFile::remove(tile_path))
             {
                 qWarning() << "Failed to delete cached tile:" << tile_path;
@@ -1101,6 +1137,8 @@ void MapTiles::attemptMapTileDownload(const QueuedDownload &download, int source
             QMutexLocker locker(&write_state->mutex);
             if (write_state->invalidated.load(std::memory_order_acquire))
                 return true; // deletion intentionally discarded persistence
+            const Aowis::Map::CacheAccessIndex::PayloadLease lease =
+                this->cache_access_index.leasePayload(this->cacheStorageKey(tile_path));
             const bool saved = MapTiles::saveMapTile(data, tile_path);
             if (saved) this->recordCacheUse(tile_path);
             return saved;

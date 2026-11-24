@@ -101,6 +101,10 @@ public:
     // Disk scan: run off the event-loop thread. Permanent data is excluded.
     Aowis::Map::CacheStorageStatistics cacheStorageStatistics() const;
     bool flushCacheAccessIndex();
+    // Opt-in soft limit of ordinary raster payloads only. Call on the
+    // MapTiles thread; policy changes may wait for current maintenance.
+    bool setCacheStoragePolicy(const Aowis::Map::CacheStoragePolicy &policy);
+    Aowis::Map::CacheCleanupResult lastCacheCleanup() const;
 
 private:
     friend class MapTilesCacheWriteTestAccess;
@@ -164,6 +168,7 @@ private:
     static bool saveMapTile(const QByteArray &data, const QString &tile_base_path);
 
     QString domainRandomizer(const QString &url) const;
+    std::string cacheStorageKey(const QString &tile_base_path) const;
     void recordCacheUse(const QString &tile_base_path) const;
     void recordMemoryCacheUse(const QString &provider, int z, int x, int y,
                               const QString &canonical_key) const;

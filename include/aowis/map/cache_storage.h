@@ -24,11 +24,37 @@ struct CacheStorageStatistics
     std::optional<std::uint64_t> available_bytes;
 };
 
+// Soft payload-byte limit per cache root. Zero disables eviction. Native
+// sources, permanent data and auxiliary files are not subject to this limit.
+struct CacheStoragePolicy
+{
+    std::uint64_t maximum_bytes = 0;
+    unsigned cleanup_target_percent = 85;
+    bool prefer_overview_tiles = true;
+};
+
+struct CacheCleanupResult
+{
+    std::uint64_t before_bytes = 0;
+    std::uint64_t remaining_bytes = 0;
+    std::uint64_t deleted_files = 0;
+    std::uint64_t deleted_bytes = 0;
+    std::uint64_t skipped_files = 0;
+    std::uint64_t errors = 0;
+    bool target_reached = true;
+    bool shared_root = false; // another cooperating MAP instance owns the root, or lock unavailable
+};
+
 struct TerrainCacheStorageStatistics
 {
     CacheStorageStatistics normalized;
     CacheStorageStatistics sources;
 };
+
+// Reject overlapping ordinary and permanent roots before enabling eviction.
+// Unknown/canonicalization errors conservatively count as overlap.
+bool cacheStorageRootsOverlap(const std::filesystem::path &first,
+                              const std::filesystem::path &second);
 
 // Potentially expensive: call from a worker, not a rendering/event-loop thread.
 CacheStorageStatistics scanCacheStorage(const std::filesystem::path &root,
@@ -39,7 +65,7 @@ CacheStorageStatistics scanCacheStorage(const std::filesystem::path &root,
 // changes and legacy .png files share the same identity. No tile payloads are
 // stored in the database. Missing rows mean unknown recency, not zero age.
 // No disk I/O on recordAccess(); flushes are batched on a worker. The database
-// is not an authority for file existence or size and never deletes tile files.
+// is not an authority for file existence or size. Optional eviction uses actual files.
 class CacheAccessIndex final
 {
 public:
@@ -47,6 +73,17 @@ public:
     ~CacheAccessIndex();
     CacheAccessIndex(const CacheAccessIndex &) = delete;
     CacheAccessIndex &operator=(const CacheAccessIndex &) = delete;
+
+    // A copyable, cross-thread lifetime token. Keep it until all reads or
+    // publications for this key finish. Eviction never removes leased files.
+    using PayloadLease = std::shared_ptr<void>;
+    PayloadLease leasePayload(const std::string &relative_key) const;
+    // Policy is opt-in and applies to an exclusively owned ordinary cache
+    // root. No automatic eviction of native source files is supported.
+    bool setStoragePolicy(CacheStorageKind kind, const CacheStoragePolicy &policy);
+    CacheCleanupResult lastCleanup() const;
+    // Synchronous maintenance for tests/administration; call on a worker.
+    CacheCleanupResult cleanupNow();
 
     void recordAccess(const std::string &relative_key);
     // Explicit synchronization point for tests, shutdown and maintenance.

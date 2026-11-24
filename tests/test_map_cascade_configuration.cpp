@@ -200,6 +200,22 @@ int main(int argc, char **argv)
     QTemporaryDir directory;
     if (!check(directory.isValid(), "Temporary directory failed")) return 1;
     const QString path = QDir(directory.path()).filePath(QStringLiteral("config.ini"));
+    {
+        Server::Config limits;
+        QString error;
+        if (!check(loadIni(path, QByteArrayLiteral("[storage]\nraster_cache_maximum_bytes=10737418240\n"
+                     "normalized_terrain_cache_maximum_bytes=2147483648\ncache_cleanup_target_percent=80\n"
+                     "cache_prefer_overview_tiles=false\n"), &limits, &error) &&
+                   limits.raster_cache_policy.maximum_bytes == 10737418240ULL &&
+                   limits.terrain_cache_policy.maximum_bytes == 2147483648ULL &&
+                   limits.raster_cache_policy.cleanup_target_percent == 80 &&
+                   limits.terrain_cache_policy.cleanup_target_percent == 80 &&
+                   !limits.terrain_cache_policy.prefer_overview_tiles,
+                   "Valid cache storage limits rejected")) return 1;
+        if (!check(!loadIni(path, QByteArrayLiteral("[storage]\nraster_cache_maximum_bytes=-1\n"), &limits, &error) &&
+                   !loadIni(path, QByteArrayLiteral("[storage]\ncache_cleanup_target_percent=100\n"), &limits, &error),
+                   "Invalid cache storage policy accepted")) return 1;
+    }
     StubHttpServer primary;
     StubHttpServer secondary;
     StubHttpServer direct_origin;

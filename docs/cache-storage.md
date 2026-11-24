@@ -1,9 +1,10 @@
-# Cache storage accounting
+# Cache storage and eviction
 
 MAP records ordinary raster and normalized terrain cache access recency in a
 SQLite index. The tile bytes and existing on-disk layouts are unchanged.
-This is the foundation for storage limits and eviction, not an eviction policy.
-No files are automatically removed by this feature.
+Optional soft storage limits enable background LRU eviction. By default both
+limits are zero (unlimited), so existing installations do not delete any files
+automatically.
 
 ## Storage areas
 
@@ -30,7 +31,8 @@ Failed batches are retried; overload can drop hints rather than grow memory
 without bound. `CacheAccessIndex::lastError()` and `droppedAccessCount()` expose
 these diagnostics. Existing caches need no migration: unknown recency remains
 unknown until a successful access. The index can also contain rows for deleted
-files; use real filesystem inventory for any future eviction decision.
+files; eviction uses the real filesystem inventory and prunes rows for the
+logical tiles it deletes.
 
 ## C++ API
 
@@ -43,6 +45,14 @@ files; use real filesystem inventory for any future eviction decision.
   Native terrain payloads currently include completed TIFF files.
 - `MapTiles::flushCacheAccessIndex()` and `TerrainData::flushCacheAccessIndex()`
   explicitly synchronize pending access metadata.
+- `MapTiles::setCacheStoragePolicy()` and `TerrainData::setCacheStoragePolicy()`
+  enable or disable each independent limit. The policy uses bytes and a
+  cleanup-target percentage (1–99); an invalid policy or overlap with permanent
+  data is rejected. Calls can wait for ongoing cleanup; use from initialization
+  or a suitable management thread (respect MapTiles thread affinity).
+- `lastCacheCleanup()` reports the last pass's before/remaining bytes, deleted
+  file and byte counts, skipped files, errors, shared-root status and whether the
+  target was reached. Counts describe that pass, not lifetime counters.
 
 Statistics walk the actual directory tree on demand, including existing and
 inactive provider variants. Run these operations on a worker thread, not the
@@ -60,10 +70,57 @@ Embedded consumers must provide a target-architecture SQLite library and
 headers to CMake (`SQLite::SQLite3` via `FindSQLite3`). Android/iOS and Windows
 cross-build images must include it before updating to this MAP revision.
 
+## Automatic cleanup
+
+For a dedicated server, configure the administrator-owned INI and restart:
+
+```ini
+[storage]
+; 10 GiB ordinary imagery; 2 GiB normalized terrain
+raster_cache_maximum_bytes=10737418240
+normalized_terrain_cache_maximum_bytes=2147483648
+cache_cleanup_target_percent=85
+cache_prefer_overview_tiles=true
+```
+
+The worker checks limits at startup/policy change and roughly every 30 seconds.
+A cache exceeding its limit is trimmed toward 85% of that limit (configurable).
+If active files or the bounded selection batch prevent reaching that target, a
+later pass continues toward it. At most 32,768 candidates are retained per pass;
+large caches may take multiple passes. Selection uses the persistent last-access
+index, including pending access updates. Unknown legacy entries are considered
+older than known entries; file modification time breaks ties. If overview
+preference is enabled, zoom levels 0–8 are considered only after higher zoom
+levels. This is a preference, not a permanent pin.
+
+Only recognized XYZ raster or normalized terrain payloads are eligible. Raster
+HTTP sidecars belonging to removed files are removed too. The worker checks the
+file's size, modification time, symlink status, active request leases and newer
+access hints immediately before unlinking. Normalized fills using `.lock` files
+are also skipped. Files recently published or read during a pass can be skipped
+until the next pass. RAM caches remain valid and are not covered by these disk
+limits. If metadata cannot be read reliably, cleanup fails closed.
+
+Current MAP instances hold a shared advisory ownership lock per cache root.
+Eviction requires exclusive ownership and pauses while another participating
+instance is using the root. The lock files are not stale-marker files: never
+remove them while MAP is running. Use local filesystems with working advisory
+locks, private writable cache roots, and do not share an eviction-enabled root
+with older MAP versions or external writers that do not participate in the
+ownership protocol. Permanent data must use separate roots. An overlapping
+permanent path disables or rejects automatic eviction.
+
+These are **soft payload limits**, not filesystem quotas. Native GeoTIFFs,
+permanent/offline package data, SQLite files, partial files and other auxiliary
+files are not evicted. Writes continue during cleanup and can temporarily exceed
+the limit. An unreachable target is reported instead of deleting unrelated or
+active data. Disk-free-space admission, explicit offline-region pins, and native
+source retention are not yet implemented. Available disk space is still exposed
+by storage statistics; do not set a payload limit equal to total free space.
+
 ## Next steps
 
-Enforce configurable byte limits with a high/low-water policy, protection for
-explicit offline regions and active requests, and a reconciliation mechanism
-for stale or missing index rows. Native terrain source eviction needs its own
-coordination with readers, partial downloads and shared source dependencies.
-Expose management via the C++ and REST APIs only after safe eviction is in place.
+Add persistent protected tile/region references and a disk-free-space admission
+policy, then expose management via the MAP settings API and REST. Native source
+eviction needs independent coordination with readers, partial downloads and
+shared source dependencies. GUI and Mobile can then use these common APIs.

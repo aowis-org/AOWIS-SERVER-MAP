@@ -8,6 +8,8 @@
 #include <QTemporaryDir>
 
 #include <iostream>
+#include <chrono>
+#include <thread>
 
 namespace
 {
@@ -226,5 +228,32 @@ int main()
         return 1;
     }
 
+    // A standalone cache uses the same background policy for normalized
+    // terrain. Native sources are never candidates, even under pressure.
+    {
+        QTemporaryDir eviction_directory;
+        TerrainData::Config eviction_config = config;
+        eviction_config.cache_directory = eviction_directory.path();
+        TerrainData limited(eviction_config);
+        if (!require(eviction_directory.isValid() && limited.initialize(&error_message),
+                     "Cannot initialize terrain eviction fixture")) return 1;
+        const TerrainTile old = makeTile(dataset, zoom, 500, 300);
+        const TerrainTile recent = makeTile(dataset, zoom, 500, 301);
+        const QString native = QDir(limited.storagePaths().providers).filePath(QStringLiteral("native.tif"));
+        if (!require(writeTile(limited, old) && writeTile(limited, recent) && writeFile(native),
+                     "Cannot write terrain eviction fixture")) return 1;
+        const QString old_path = limited.normalizedTilePath(dataset, old.address);
+        const QString recent_path = limited.normalizedTilePath(dataset, recent.address);
+        const std::uint64_t recent_size = std::uint64_t(QFileInfo(recent_path).size());
+        if (!require(limited.terrainTile(dataset, recent.address, false).status == TerrainTileLookupStatus::Ready &&
+                     limited.setCacheStoragePolicy({recent_size + recent_size / 4, 85, false}),
+                     "Cannot enable terrain eviction after cache hit")) return 1;
+        const std::chrono::steady_clock::time_point deadline =
+            std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (QFile::exists(old_path) && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        if (!require(!QFile::exists(old_path) && QFile::exists(recent_path) && QFile::exists(native),
+                     "Normalized eviction did not preserve recent tile and native source")) return 1;
+    }
     return 0;
 }

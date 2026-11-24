@@ -85,6 +85,8 @@ public:
         bool cascade_defined_in_admin_ini = false;
         QString cache_directory;
         QString permanent_data_directory;
+        Aowis::Map::CacheStoragePolicy raster_cache_policy;
+        Aowis::Map::CacheStoragePolicy terrain_cache_policy;
         QString map_coverage;
         Aowis::Map::DownloadCoverage download_coverage;
         QVector<Aowis::Map::MapProvider> map_providers = Aowis::Map::defaultMapProviders();

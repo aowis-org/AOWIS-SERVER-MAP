@@ -1279,6 +1279,17 @@ bool Server::start()
         return false;
     }
 
+    if (!this->maptiles->setCacheStoragePolicy(this->config.raster_cache_policy) ||
+        (this->terrain_data->isEnabled() &&
+         !this->terrain_data->setCacheStoragePolicy(this->config.terrain_cache_policy)))
+    {
+        this->maptiles->setCacheStoragePolicy({});
+        this->terrain_data->setCacheStoragePolicy({});
+        qCritical() << "Invalid cache storage policy, unavailable ownership lock or overlapping permanent data";
+        this->tcp->close();
+        return false;
+    }
+
     const Aowis::Map::TerrainData::StoragePaths terrain_paths = this->terrain_data->storagePaths();
     const QString terrain_status = !this->terrain_data->isEnabled()
         ? QStringLiteral("terrain subsystem disabled")

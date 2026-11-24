@@ -370,12 +370,37 @@ bool TerrainData::flushCacheAccessIndex()
     return !this->cache_access_index || this->cache_access_index->flush();
 }
 
-void TerrainData::recordCacheUse(const QString &path) const
+std::string TerrainData::cacheStorageKey(const QString &path) const
 {
-    if (!this->cache_access_index) return;
     const QDir root(QDir(this->storage_paths.normalized).absolutePath());
     const QString key = root.relativeFilePath(QFileInfo(path).absoluteFilePath());
-    this->cache_access_index->recordAccess(key.toUtf8().toStdString());
+    return key.toUtf8().toStdString();
+}
+
+CacheAccessIndex::PayloadLease TerrainData::leaseCachePayload(const QString &path) const
+{
+    return this->cache_access_index ? this->cache_access_index->leasePayload(this->cacheStorageKey(path))
+                                    : CacheAccessIndex::PayloadLease();
+}
+
+void TerrainData::recordCacheUse(const QString &path) const
+{
+    if (this->cache_access_index) this->cache_access_index->recordAccess(this->cacheStorageKey(path));
+}
+
+bool TerrainData::setCacheStoragePolicy(const CacheStoragePolicy &policy)
+{
+    if (!this->cache_access_index) return policy.maximum_bytes == 0;
+    if (policy.maximum_bytes && cacheStorageRootsOverlap(
+        std::filesystem::path(QDir(this->storage_paths.normalized).absolutePath().toStdU16String()),
+        std::filesystem::path(QDir(this->storage_paths.offline_packages).absolutePath().toStdU16String())))
+        return false;
+    return this->cache_access_index->setStoragePolicy(CacheStorageKind::NormalizedTerrain, policy);
+}
+
+CacheCleanupResult TerrainData::lastCacheCleanup() const
+{
+    return this->cache_access_index ? this->cache_access_index->lastCleanup() : CacheCleanupResult();
 }
 
 void TerrainData::setCascadeInstanceId(const QByteArray &instance_id)
@@ -625,6 +650,7 @@ TerrainCacheDeletionResult TerrainData::deleteNormalizedTiles(
             // while the file is missing or corrupt and replaces it atomically
             // (QSaveFile): removing it underneath is safe either way.
             const QString tile_path = x_directory.filePath(tile_file_name);
+            const CacheAccessIndex::PayloadLease lease = this->leaseCachePayload(tile_path);
             if (QFile::remove(tile_path))
             {
                 ++result.deleted_count;
@@ -1079,6 +1105,7 @@ TerrainProviderFetchResult TerrainData::acquireTileSources(
         result.status = TerrainProviderFetchStatus::UnsupportedAddress;
         return result;
     }
+    const CacheAccessIndex::PayloadLease lease = this->leaseCachePayload(normalizedTilePath(dataset, address));
     // A normalized cache hit requires no provider-native acquisition.
     if (readNormalizedTile(dataset, address).status == TerrainTileLookupStatus::Ready)
         return result;
@@ -1214,6 +1241,7 @@ TerrainTileLookupResult TerrainData::terrainTile(const QString &dataset,
         return result;
     }
 
+    const CacheAccessIndex::PayloadLease lease = this->leaseCachePayload(normalizedTilePath(dataset, address));
     result = readNormalizedTile(dataset, address);
     if (result.status == TerrainTileLookupStatus::Ready ||
         result.status == TerrainTileLookupStatus::TileReadError)
@@ -1295,6 +1323,7 @@ TerrainTileLookupResult TerrainData::readNormalizedTile(
 {
     TerrainTileLookupResult result;
     const QString path = normalizedTilePath(dataset, address);
+    const CacheAccessIndex::PayloadLease lease = this->leaseCachePayload(path);
     const QFileInfo file_info(path);
     if (!file_info.exists())
     {

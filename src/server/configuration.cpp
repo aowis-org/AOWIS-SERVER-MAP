@@ -169,6 +169,22 @@ bool readPositiveInt(QSettings *settings, const QString &key, int maximum, int *
     return true;
 }
 
+bool readCacheByteLimit(QSettings *settings, const QString &key, std::uint64_t *value,
+                        QString *error_message)
+{
+    if (!settings->contains(key)) return true;
+    const QString text = settings->value(key).toString().trimmed();
+    bool ok = false;
+    const qulonglong number = text.toULongLong(&ok);
+    if (!ok || !QRegularExpression(QStringLiteral("^[0-9]+$")).match(text).hasMatch())
+    {
+        *error_message = QStringLiteral("Invalid nonnegative byte limit for '%1': %2").arg(key, text);
+        return false;
+    }
+    *value = number;
+    return true;
+}
+
 bool readBoolean(QSettings *settings, const QString &key, bool *value, QString *error_message)
 {
     if (!settings->contains(key))
@@ -669,6 +685,21 @@ bool MapServerConfiguration::loadConfigFile(const QString &path, Server::Config 
         }
     }
 
+    if (!readCacheByteLimit(&settings, QStringLiteral("storage/raster_cache_maximum_bytes"),
+                            &config->raster_cache_policy.maximum_bytes, error_message) ||
+        !readCacheByteLimit(&settings, QStringLiteral("storage/normalized_terrain_cache_maximum_bytes"),
+                            &config->terrain_cache_policy.maximum_bytes, error_message))
+        return false;
+    int cleanup_target = int(config->raster_cache_policy.cleanup_target_percent);
+    if (!readPositiveInt(&settings, QStringLiteral("storage/cache_cleanup_target_percent"),
+                         99, &cleanup_target, error_message) ||
+        !readBoolean(&settings, QStringLiteral("storage/cache_prefer_overview_tiles"),
+                     &config->raster_cache_policy.prefer_overview_tiles, error_message))
+        return false;
+    config->raster_cache_policy.cleanup_target_percent = unsigned(cleanup_target);
+    config->terrain_cache_policy.cleanup_target_percent = unsigned(cleanup_target);
+    config->terrain_cache_policy.prefer_overview_tiles = config->raster_cache_policy.prefer_overview_tiles;
+
     if (settings.contains(QStringLiteral("storage/permanent_data_directory")))
     {
         const QString value = settings.value(QStringLiteral("storage/permanent_data_directory"))
@@ -923,6 +954,9 @@ QByteArray MapServerConfiguration::defaultConfigText()
         "connect_timeout_seconds=30\ninactivity_timeout_seconds=120\n"
         "download_deadline_seconds=1800\ncache_directory=\ncoverage=\n\n"
         "[storage]\n"
+        "; Soft ordinary-cache payload limits in bytes; 0 = unlimited.\n"
+        "raster_cache_maximum_bytes=0\nnormalized_terrain_cache_maximum_bytes=0\n"
+        "cache_cleanup_target_percent=85\ncache_prefer_overview_tiles=true\n"
         "; Permanent imported tiles and terrain packages; not a disposable cache.\n"
         "; Empty means <terrain cache>/offline-packages for legacy terrain packages.\n"
         "permanent_data_directory=\n"

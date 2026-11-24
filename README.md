@@ -169,7 +169,7 @@ The package installs a dedicated `aowis-server-map` systemd service, preserves e
 | [Debian package build](docs/debian-package-build.md) | Docker builds, isolated installation and upgrade qualification |
 | [Configuration](docs/configuration.md) | INI, CLI, providers, region/zoom policies, state-file precedence |
 | [HTTP API](docs/http-api.md) | Requests, responses, cache and upstream operations |
-| [Cache storage accounting](docs/cache-storage.md) | Persistent last-access index, disk usage and future eviction prerequisites |
+| [Cache storage and eviction](docs/cache-storage.md) | Persistent last-access index, disk usage and optional LRU limits |
 | [MAP-to-MAP cascading](docs/map-cascading.md) | Ordered upstreams, optional direct fetch, adaptive JPEG and zstd terrain transfer |
 | [Architecture and resource limits](docs/architecture.md) | Execution model, concurrency, memory, cancellation, test and benchmark tools |
 | [Terrain sources](docs/terrain-providers.md) | Copernicus GLO-30, cache fill, resumable download, data provenance |

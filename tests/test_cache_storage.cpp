@@ -144,5 +144,122 @@ int main()
         fs::remove(blocked);
         require(index.flush() && index.lastError().empty(), "Index did not recover after failure");
     }
+    // Opt-in high/low water policy. Unknown legacy tiles first, then old
+    // tracked tiles, while overview data and in-flight leases take priority.
+    const fs::path eviction = temporary.path / "eviction";
+    writeFile(eviction / "provider/12/1/1.png", 100);
+    writeFile(eviction / "provider/variants/fingerprint/12/1/2.jpg", 100);
+    writeFile(eviction / "provider/12/1/3.webp", 100);
+    writeFile(eviction / "provider/4/1/4.png", 100);
+    writeFile(eviction / "provider/12/1/1.png.http.json", 10);
+    writeFile(eviction / "other/important.png", 1);
+    writeFile(eviction / "provider/12/1/4.png.partial", 70);
+    {
+        CacheAccessIndex index(eviction);
+        index.recordAccess("provider/variants/fingerprint/12/1/2");
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        index.recordAccess("provider/12/1/3");
+        require(index.flush(), "Cannot flush LRU fixture");
+        require(index.cleanupNow().deleted_files == 0, "Default policy must not evict");
+        require(!index.setStoragePolicy(CacheStorageKind::TerrainSources, {300, 85, true}),
+                "Native source eviction must be rejected");
+        require(!index.setStoragePolicy(CacheStorageKind::Raster, {300, 100, true}),
+                "Invalid cleanup target accepted");
+        CacheAccessIndex::PayloadLease lease = index.leasePayload("provider/variants/fingerprint/12/1/2");
+        require(index.setStoragePolicy(CacheStorageKind::Raster, {300, 85, true}), "Cannot enable raster limit");
+        index.cleanupNow(); // may already have been executed by the worker
+        require(!fs::exists(eviction / "provider/12/1/1.png") &&
+                !fs::exists(eviction / "provider/12/1/1.png.http.json"), "Unknown old tile and sidecar not removed");
+        require(fs::exists(eviction / "provider/variants/fingerprint/12/1/2.jpg"), "Active lease was evicted");
+        require(!fs::exists(eviction / "provider/12/1/3.webp"), "Eligible high zoom tile not evicted");
+        require(fs::exists(eviction / "provider/4/1/4.png") &&
+                fs::exists(eviction / "other/important.png") &&
+                fs::exists(eviction / "provider/12/1/4.png.partial"), "Overview or unrelated file removed");
+        require(scanCacheStorage(eviction, CacheStorageKind::Raster).payload_bytes == 201,
+                "Did not reach low-water target");
+        require(!index.lastAccess("provider/12/1/3"), "Evicted key not pruned");
+        // A second owner must prevent automatic eviction altogether.
+        {
+            CacheAccessIndex other_owner(eviction);
+            require(index.setStoragePolicy(CacheStorageKind::Raster, {50, 85, false}), "Cannot update limit");
+            const CacheCleanupResult shared = index.cleanupNow();
+            require(shared.shared_root && !shared.target_reached && shared.deleted_files == 0,
+                    "Shared cache root must not be evicted");
+        }
+        const CacheCleanupResult blocked_cleanup = index.cleanupNow();
+        require(!blocked_cleanup.target_reached && fs::exists(eviction / "provider/variants/fingerprint/12/1/2.jpg"),
+                "Active tile should make low-water target temporarily unreachable");
+        lease.reset();
+        index.cleanupNow();
+        require(!fs::exists(eviction / "provider/variants/fingerprint/12/1/2.jpg"), "Released tile was not evicted");
+        require(fs::exists(eviction / "other/important.png"), "Unrecognized path was removed");
+    }
+    const fs::path lru = temporary.path / "lru";
+    writeFile(lru / "provider/12/1/1.png", 100);
+    writeFile(lru / "provider/12/1/2.png", 100);
+    writeFile(lru / "provider/12/1/3.png", 100);
+    {
+        CacheAccessIndex index(lru);
+        index.recordAccess("provider/12/1/2");
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        index.recordAccess("provider/12/1/1");
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        index.recordAccess("provider/12/1/3");
+        require(index.flush(), "LRU order fixture flush failed");
+    }
+    {
+        CacheAccessIndex index(lru);
+        require(index.setStoragePolicy(CacheStorageKind::Raster, {250, 85, false}), "Cannot enable LRU after restart");
+        index.cleanupNow();
+        require(!fs::exists(lru / "provider/12/1/2.png") && fs::exists(lru / "provider/12/1/1.png") &&
+                fs::exists(lru / "provider/12/1/3.png"), "Durable LRU order not respected");
+    }
+    const fs::path terrain_evict = temporary.path / "terrain_evict";
+    writeFile(terrain_evict / "v1/r1/dataset/12/1/1.aowterrain", 100);
+    writeFile(terrain_evict / "v1/r1/dataset/12/1/2.aowterrain", 100);
+    writeFile(terrain_evict / "v1/r1/dataset/12/1/2.aowterrain.lock", 1);
+    writeFile(terrain_evict / "provider/native.tif", 200);
+    {
+        CacheAccessIndex index(terrain_evict);
+        require(index.setStoragePolicy(CacheStorageKind::NormalizedTerrain, {120, 85, false}), "Cannot enable terrain limit");
+        index.cleanupNow();
+        require(!fs::exists(terrain_evict / "v1/r1/dataset/12/1/1.aowterrain") &&
+                fs::exists(terrain_evict / "v1/r1/dataset/12/1/2.aowterrain") &&
+                fs::exists(terrain_evict / "provider/native.tif"), "Normalized eviction removed locked or native data");
+    }
+    const fs::path broken_index = temporary.path / "broken_index";
+    writeFile(broken_index / "provider/12/1/1.png", 100);
+    writeFile(broken_index / ".aowis-cache-access-v1.sqlite3", 100);
+    {
+        CacheAccessIndex index(broken_index);
+        require(index.setStoragePolicy(CacheStorageKind::Raster, {10, 85, false}), "Cannot set policy for broken index");
+        const CacheCleanupResult failed = index.cleanupNow();
+        require(failed.errors > 0 && !failed.target_reached && fs::exists(broken_index / "provider/12/1/1.png"),
+                "Corrupt index must fail closed");
+    }
+    // Setting a policy starts cleanup automatically. No synchronous maintenance
+    // call is needed; a lease can move to a different thread and outlive its
+    // original owner while a background read completes.
+    const fs::path background = temporary.path / "background_eviction";
+    writeFile(background / "provider/12/1/1.png", 100);
+    writeFile(background / "provider/12/1/2.png", 100);
+    {
+        CacheAccessIndex index(background);
+        CacheAccessIndex::PayloadLease lease = index.leasePayload("provider/12/1/1");
+        require(index.setStoragePolicy(CacheStorageKind::Raster, {120, 85, false}), "Cannot enable background eviction");
+        const std::chrono::steady_clock::time_point deadline =
+            std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (fs::exists(background / "provider/12/1/2.png") && std::chrono::steady_clock::now() < deadline)
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        require(fs::exists(background / "provider/12/1/1.png") &&
+                !fs::exists(background / "provider/12/1/2.png"), "Background cleanup ignored lease or did not run");
+        std::thread release([lease = std::move(lease)]() mutable { lease.reset(); });
+        release.join();
+        require(index.setStoragePolicy(CacheStorageKind::Raster, {50, 85, false}), "Cannot lower background limit");
+        index.cleanupNow();
+        require(!fs::exists(background / "provider/12/1/1.png"), "Cross-thread release left a stuck lease");
+    }
+    require(cacheStorageRootsOverlap(eviction, eviction / "permanent") &&
+            !cacheStorageRootsOverlap(eviction, permanent), "Root overlap check failed");
     std::cout << "Cache storage and access index tests passed\n";
 }
