@@ -6,6 +6,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace Aowis::Map
 {
@@ -33,6 +34,33 @@ struct CacheStoragePolicy
     bool prefer_overview_tiles = true;
 };
 
+// Inclusive XYZ rectangle within a specific on-disk provider variant or
+// terrain format/revision/dataset namespace. A single tile is a 1x1 range.
+// Ranges also protect matching files published after the group is saved.
+struct CacheTileRange
+{
+    std::string source_namespace;
+    int zoom = 0;
+    int min_x = 0;
+    int max_x = 0;
+    int min_y = 0;
+    int max_y = 0;
+    bool operator==(const CacheTileRange &) const = default;
+};
+
+struct CacheProtectionGroup
+{
+    std::string id;
+    std::vector<CacheTileRange> ranges;
+};
+
+// Convert a WGS84 rectangle into compact Web Mercator XYZ ranges. West > east
+// crosses the antimeridian. Both corner tiles are included. Coordinates must
+// be within the Web Mercator domain, zooms 0..30. No downloads are performed.
+std::optional<std::vector<CacheTileRange>> cacheRegionTileRanges(
+    const std::string &source_namespace, double west, double south,
+    double east, double north, int min_zoom, int max_zoom);
+
 struct CacheCleanupResult
 {
     std::uint64_t before_bytes = 0;
@@ -40,6 +68,10 @@ struct CacheCleanupResult
     std::uint64_t deleted_files = 0;
     std::uint64_t deleted_bytes = 0;
     std::uint64_t skipped_files = 0;
+    // Protected payloads encountered during an over-limit selection scan.
+    // Includes all encodings; overlapping groups are counted only once.
+    std::uint64_t protected_files = 0;
+    std::uint64_t protected_bytes = 0;
     std::uint64_t errors = 0;
     bool target_reached = true;
     bool shared_root = false; // another cooperating MAP instance owns the root, or lock unavailable
@@ -84,6 +116,16 @@ public:
     CacheCleanupResult lastCleanup() const;
     // Synchronous maintenance for tests/administration; call on a worker.
     CacheCleanupResult cleanupNow();
+
+    // Persistent protection, not best-effort access hints. A successful
+    // replace atomically replaces all ranges in a named group. An empty
+    // range list is rejected; use removeProtectionGroup to unprotect it.
+    // Groups may overlap and cover missing/future tiles. These calls can wait
+    // for maintenance and perform disk I/O; use a suitable management thread.
+    // False/nullopt means failure, not an empty group list.
+    bool replaceProtectionGroup(CacheStorageKind kind, const CacheProtectionGroup &group);
+    bool removeProtectionGroup(const std::string &id);
+    std::optional<std::vector<CacheProtectionGroup>> protectionGroups(CacheStorageKind kind) const;
 
     void recordAccess(const std::string &relative_key);
     // Explicit synchronization point for tests, shutdown and maintenance.

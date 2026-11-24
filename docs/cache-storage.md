@@ -1,7 +1,7 @@
 # Cache storage and eviction
 
 MAP records ordinary raster and normalized terrain cache access recency in a
-SQLite index. The tile bytes and existing on-disk layouts are unchanged.
+SQLite index, which also stores durable protection groups. The tile bytes and existing on-disk layouts are unchanged.
 Optional soft storage limits enable background LRU eviction. By default both
 limits are zero (unlimited), so existing installations do not delete any files
 automatically.
@@ -51,7 +51,8 @@ logical tiles it deletes.
   data is rejected. Calls can wait for ongoing cleanup; use from initialization
   or a suitable management thread (respect MapTiles thread affinity).
 - `lastCacheCleanup()` reports the last pass's before/remaining bytes, deleted
-  file and byte counts, skipped files, errors, shared-root status and whether the
+  file and byte counts, skipped files, protected files/bytes (over-limit scans),
+  errors, shared-root status and whether the
   target was reached. Counts describe that pass, not lifetime counters.
 
 Statistics walk the actual directory tree on demand, including existing and
@@ -114,13 +115,86 @@ These are **soft payload limits**, not filesystem quotas. Native GeoTIFFs,
 permanent/offline package data, SQLite files, partial files and other auxiliary
 files are not evicted. Writes continue during cleanup and can temporarily exceed
 the limit. An unreachable target is reported instead of deleting unrelated or
-active data. Disk-free-space admission, explicit offline-region pins, and native
+active or protected data. Disk-free-space admission and native
 source retention are not yet implemented. Available disk space is still exposed
 by storage statistics; do not set a payload limit equal to total free space.
 
+## Persistent protection groups
+
+Both ordinary cache roots support named protection groups, independent of the
+storage policy. A group is a list of inclusive Web Mercator XYZ rectangles;
+a 1×1 rectangle protects one tile. A geographic region can be represented by
+one or two rectangles per zoom and source namespace, even if it spans millions
+of tiles. No payload files need to exist when a group is created.
+
+- Raster protection applies to the exact provider/URL-variant namespace and
+  covers all raster encodings of a matching tile. Normalized terrain protection
+  applies to the exact format/revision/dataset namespace.
+- A tile covered by any group is excluded from automatic eviction before
+  candidate selection. Overlapping groups count each payload file once.
+- Removing a group removes its protection only; it neither deletes the region
+  nor releases protection belonging to another group. Replacing a group is an
+  atomic transaction. Invalid requests leave previous groups intact.
+- Protection survives restarts, is not subject to batched access-hint loss,
+  and applies to matching files acquired in the future. Changes are serialized
+  with cleanup and use the same cache ownership protocol as eviction.
+- Protection counts toward the payload limit. If it prevents cleanup reaching
+  the target, `target_reached` remains false and protected bytes/files are
+  reported in that pass. New writes are not yet refused based on this condition.
+
+The C++ APIs on `MapTiles` and `TerrainData` are:
+
+- `cacheProtectionNamespace(provider/dataset)` resolves the current ordinary
+  cache namespace. Resolve a raster namespace on the MapTiles thread.
+- `replaceCacheProtectionGroup(group)` durably creates or replaces the complete
+  group. Group IDs are nonempty (up to 256 bytes, no ASCII control characters);
+  each group must contain 1–16,384 valid ranges. A false result means failure.
+- `cacheProtectionGroups()` returns an optional list; `nullopt` indicates failure,
+  not an empty list.
+- `removeCacheProtectionGroup(id)` removes a group by ID, idempotently. Unpinning
+  schedules a policy recheck; no direct payload deletion is performed by this API.
+
+Example (raster; terrain uses the same group and range types):
+
+```cpp
+const std::string source = tiles.cacheProtectionNamespace(providerId);
+const std::optional<std::vector<Aowis::Map::CacheTileRange>> ranges =
+    Aowis::Map::cacheRegionTileRanges(source, 18.0, 11.0, 18.2, 11.2, 8, 17);
+if (ranges && tiles.replaceCacheProtectionGroup({"project-area", *ranges})) {
+    // Protection is committed. Downloads may now populate the selected ranges.
+}
+```
+
+`cacheRegionTileRanges` accepts longitude in [-180,180], latitude within Web
+Mercator's ±85.0511287798066° domain and zooms 0–30. West greater than east
+selects across the antimeridian. Both corner tiles are included. The helper
+only constructs ranges; it does not download tiles, check provider download
+rights, or certify completeness of a region. Namespace validity is checked
+when saving groups. Management calls can perform disk I/O or wait for cleanup;
+keep them off rendering and HTTP event-loop threads where possible, respecting
+object lifetime and thread affinity.
+
+Raster and normalized terrain groups live in separate cache databases. A shared
+region ID can be used for both, but each root commits independently. Groups
+remain bound to their original namespace after URL/normalization changes;
+new variants are not silently substituted. Native GeoTIFFs and permanent data
+are outside this policy. Existing explicit administrative tile deletion APIs
+are unchanged and can still delete selected protected payloads; future cache
+management UI must preserve protected regions by default.
+
+The access database now contains durable protection metadata: **do not delete
+it as disposable cache metadata**. The legacy index is migrated transactionally
+on first protection access or over-limit cleanup. An unreadable database or
+missing protection table in a migrated database blocks automatic eviction.
+Back up the database with its cache if protection is to survive external
+cache maintenance. Do not downgrade to an older MAP version with eviction
+enabled: it does not understand these protection groups.
+
 ## Next steps
 
-Add persistent protected tile/region references and a disk-free-space admission
-policy, then expose management via the MAP settings API and REST. Native source
-eviction needs independent coordination with readers, partial downloads and
-shared source dependencies. GUI and Mobile can then use these common APIs.
+Add disk-free-space admission and protected-storage statistics independent of
+cleanup, then expose management via the MAP settings API and REST. Native
+source eviction needs independent coordination with readers, partial downloads
+and shared source dependencies. GUI and Mobile can then use these common APIs.
+Offline download scheduling, progress and completeness verification are later
+stages, separate from protection.

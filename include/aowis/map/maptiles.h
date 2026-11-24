@@ -105,6 +105,12 @@ public:
     // MapTiles thread; policy changes may wait for current maintenance.
     bool setCacheStoragePolicy(const Aowis::Map::CacheStoragePolicy &policy);
     Aowis::Map::CacheCleanupResult lastCacheCleanup() const;
+    // Resolve the current ordinary provider variant on the MapTiles thread.
+    // Empty means unknown provider. Existing pins stay with their old variant.
+    std::string cacheProtectionNamespace(const QString &provider) const;
+    bool replaceCacheProtectionGroup(const Aowis::Map::CacheProtectionGroup &group);
+    bool removeCacheProtectionGroup(const std::string &id);
+    std::optional<std::vector<Aowis::Map::CacheProtectionGroup>> cacheProtectionGroups() const;
 
 private:
     friend class MapTilesCacheWriteTestAccess;

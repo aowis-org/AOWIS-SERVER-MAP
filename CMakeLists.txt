@@ -130,7 +130,7 @@ include(CTest)
 if(BUILD_TESTING)
     add_executable(aowis-server-map-cache-storage-test
         tests/test_cache_storage.cpp)
-    target_link_libraries(aowis-server-map-cache-storage-test PRIVATE AOWIS::Map)
+    target_link_libraries(aowis-server-map-cache-storage-test PRIVATE AOWIS::Map SQLite::SQLite3)
     add_test(NAME aowis-server-map-cache-storage COMMAND aowis-server-map-cache-storage-test)
     # Optional benchmark is available in test builds, not release packages.
     add_executable(aowis-server-map-transfer-benchmark

@@ -12,6 +12,8 @@
 #include <vector>
 #include <charconv>
 #include <exception>
+#include <cmath>
+#include <numbers>
 #ifdef _WIN32
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -31,6 +33,7 @@ namespace
 constexpr std::size_t FlushThreshold = 1024;
 constexpr std::size_t MaximumPending = 16384;
 constexpr std::size_t MaximumEvictionCandidates = 32768;
+constexpr std::size_t MaximumProtectionRangesPerGroup = 16384;
 constexpr std::chrono::seconds FlushInterval(30);
 constexpr std::chrono::seconds RetryInterval(30);
 constexpr const char *IndexFilename = ".aowis-cache-access-v1.sqlite3";
@@ -237,8 +240,15 @@ bool payloadFile(const std::filesystem::path &path, CacheStorageKind kind)
 }
 // Only recognize actual XYZ payload paths, not arbitrary image files placed
 // in the cache tree. Inactive raster variants and old terrain revisions count.
+struct TileIdentity
+{
+    std::string source_namespace;
+    int zoom = 0;
+    int x = 0;
+    int y = 0;
+};
 bool tileKey(const std::filesystem::path &relative, CacheStorageKind kind,
-             std::string &key, int &zoom)
+             std::string &key, TileIdentity &tile)
 {
     std::filesystem::path base = relative;
     base.replace_extension();
@@ -265,11 +275,97 @@ bool tileKey(const std::filesystem::path &relative, CacheStorageKind kind,
         if (parsed.ec != std::errc() || parsed.ptr != part.data() + part.size() || coordinates[i] < 0)
             return false;
     }
-    zoom = coordinates[0];
-    if (zoom > 30 || coordinates[1] >= (1 << zoom) || coordinates[2] >= (1 << zoom)) return false;
+    tile.zoom = coordinates[0];
+    tile.x = coordinates[1];
+    tile.y = coordinates[2];
+    if (tile.zoom > 30 || tile.x >= (1 << tile.zoom) || tile.y >= (1 << tile.zoom)) return false;
+    tile.source_namespace.clear();
+    for (std::size_t i = 0; i < parts.size() - 3; ++i)
+    {
+        if (i) tile.source_namespace += '/';
+        tile.source_namespace += parts[i];
+    }
     const std::u8string utf8 = (kind == CacheStorageKind::Raster ? base : relative).generic_u8string();
     key.assign(reinterpret_cast<const char *>(utf8.data()), utf8.size());
     return validKey(key);
+}
+
+bool validGroupId(const std::string &id)
+{
+    return !id.empty() && id.size() <= 256 &&
+        std::none_of(id.begin(), id.end(), [](unsigned char c) { return c < 32 || c == 127; });
+}
+
+bool validRange(CacheStorageKind kind, const CacheTileRange &range)
+{
+    if (!validKey(range.source_namespace) || range.zoom < 0 || range.zoom > 30 ||
+        range.min_x < 0 || range.min_y < 0 || range.min_x > range.max_x || range.min_y > range.max_y ||
+        range.max_x >= (1 << range.zoom) || range.max_y >= (1 << range.zoom)) return false;
+    // Match tileKey's namespace grammar without filesystem conversion (which
+    // may throw on untrusted non-UTF-8 input on Windows).
+    const std::string &source = range.source_namespace;
+    const std::size_t first = source.find('/');
+    if (first == std::string::npos) return kind == CacheStorageKind::Raster;
+    const std::size_t second = source.find('/', first + 1);
+    if (second == std::string::npos || source.find('/', second + 1) != std::string::npos) return false;
+    if (kind == CacheStorageKind::Raster)
+        return source.compare(first + 1, second - first - 1, "variants") == 0;
+    return kind == CacheStorageKind::NormalizedTerrain && source.front() == 'v' && source[first + 1] == 'r';
+}
+
+// The access index predates protection. Migrate version 0 transactionally.
+// Once marked migrated, a missing protection table is an error, not an
+// empty set of pins. The index is now durable protection metadata as well.
+bool openProtectionDatabase(Database &database, const std::filesystem::path &path)
+{
+    if (!database.open(path, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE) ||
+        !database.execute("PRAGMA synchronous=FULL") || !database.execute("BEGIN IMMEDIATE")) return false;
+    int version;
+    {
+        Statement query;
+        if (sqlite3_prepare_v2(database.handle, "PRAGMA user_version", -1, &query.handle, nullptr) != SQLITE_OK ||
+            sqlite3_step(query.handle) != SQLITE_ROW) return false;
+        version = sqlite3_column_int(query.handle, 0);
+    }
+    if (version == 0)
+    {
+        if (!database.execute("CREATE TABLE IF NOT EXISTS tile_access ("
+                              "tile_key TEXT PRIMARY KEY NOT NULL, last_access_ms INTEGER NOT NULL) WITHOUT ROWID") ||
+            !database.execute("CREATE TABLE cache_protection ("
+                "group_id TEXT NOT NULL, source_namespace TEXT NOT NULL, zoom INTEGER NOT NULL, "
+                "min_x INTEGER NOT NULL, max_x INTEGER NOT NULL, min_y INTEGER NOT NULL, max_y INTEGER NOT NULL, "
+                "PRIMARY KEY(group_id,source_namespace,zoom,min_x,max_x,min_y,max_y), "
+                "CHECK(zoom BETWEEN 0 AND 30 AND min_x>=0 AND min_y>=0 AND "
+                "max_x>=min_x AND max_y>=min_y AND max_x<(1<<zoom) AND max_y<(1<<zoom))) WITHOUT ROWID") ||
+            !database.execute("CREATE INDEX cache_protection_lookup ON cache_protection(source_namespace,zoom,min_x)") ||
+            !database.execute("PRAGMA user_version=1")) return false;
+    }
+    else if (version != 1) return false;
+    // Verify the table's required columns even when no tiles match.
+    {
+        Statement check;
+        if (sqlite3_prepare_v2(database.handle,
+            "SELECT group_id,source_namespace,zoom,min_x,max_x,min_y,max_y FROM cache_protection LIMIT 0",
+            -1, &check.handle, nullptr) != SQLITE_OK || sqlite3_step(check.handle) != SQLITE_DONE) return false;
+    }
+    return database.execute("COMMIT");
+}
+
+bool bindText(sqlite3_stmt *statement, int column, const std::string &value)
+{
+    return sqlite3_bind_text(statement, column, value.data(), int(value.size()), SQLITE_TRANSIENT) == SQLITE_OK;
+}
+
+std::optional<bool> tileProtected(Statement &query, const TileIdentity &tile)
+{
+    if (!bindText(query.handle, 1, tile.source_namespace) ||
+        sqlite3_bind_int(query.handle, 2, tile.zoom) != SQLITE_OK ||
+        sqlite3_bind_int(query.handle, 3, tile.x) != SQLITE_OK ||
+        sqlite3_bind_int(query.handle, 4, tile.y) != SQLITE_OK) return std::nullopt;
+    const int status = sqlite3_step(query.handle);
+    if ((status != SQLITE_ROW && status != SQLITE_DONE) || sqlite3_reset(query.handle) != SQLITE_OK)
+        return std::nullopt;
+    return status == SQLITE_ROW;
 }
 
 // Recheck the entire path before removing anything. The ordinary cache root
@@ -309,6 +405,37 @@ bool olderCandidate(const EvictionCandidate &a, const EvictionCandidate &b)
 }
 
 } // namespace
+
+std::optional<std::vector<CacheTileRange>> cacheRegionTileRanges(
+    const std::string &source_namespace, double west, double south,
+    double east, double north, int min_zoom, int max_zoom)
+{
+    constexpr double latitude_limit = 85.0511287798066;
+    if (!validKey(source_namespace) || !std::isfinite(west) || !std::isfinite(east) ||
+        !std::isfinite(south) || !std::isfinite(north) || west < -180 || west > 180 ||
+        east < -180 || east > 180 || south < -latitude_limit || north > latitude_limit ||
+        south > north || min_zoom < 0 || max_zoom > 30 || min_zoom > max_zoom) return std::nullopt;
+    std::vector<CacheTileRange> ranges;
+    for (int zoom = min_zoom; zoom <= max_zoom; ++zoom)
+    {
+        const int count = 1 << zoom;
+        const int min_y = std::clamp(int(std::floor((1 - std::asinh(std::tan(north * std::numbers::pi / 180)) /
+            std::numbers::pi) * 0.5 * count)), 0, count - 1);
+        const int max_y = std::clamp(int(std::floor((1 - std::asinh(std::tan(south * std::numbers::pi / 180)) /
+            std::numbers::pi) * 0.5 * count)), 0, count - 1);
+        const int min_x = std::clamp(int(std::floor((west + 180) / 360 * count)), 0, count - 1);
+        const int max_x = std::clamp(int(std::floor((east + 180) / 360 * count)), 0, count - 1);
+        if (west <= east || min_x <= max_x)
+            ranges.push_back({source_namespace, zoom, west <= east ? min_x : 0,
+                              west <= east ? max_x : count - 1, min_y, max_y});
+        else
+        {
+            ranges.push_back({source_namespace, zoom, min_x, count - 1, min_y, max_y});
+            ranges.push_back({source_namespace, zoom, 0, max_x, min_y, max_y});
+        }
+    }
+    return ranges;
+}
 
 bool cacheStorageRootsOverlap(const std::filesystem::path &first,
                               const std::filesystem::path &second)
@@ -519,6 +646,85 @@ public:
         return true;
     }
 
+    bool changeProtection(const std::string &id, const std::vector<CacheTileRange> &ranges)
+    {
+        // Same-instance maintenance mutex serializes protection commits with
+        // the entire eviction pass. Shared ownership blocks another instance
+        // from evicting until this index is destroyed.
+        std::lock_guard<std::mutex> maintenance(this->cleanup_mutex);
+        {
+            std::lock_guard<std::mutex> gate_lock(this->gate->mutex);
+            if (!this->gate->ownership.ensure(this->root)) return false;
+        }
+        std::lock_guard<std::mutex> disk_lock(this->disk_mutex);
+        Database database;
+        if (!openProtectionDatabase(database, this->database_path) || !database.execute("BEGIN IMMEDIATE")) return false;
+        Statement erase;
+        if (sqlite3_prepare_v2(database.handle, "DELETE FROM cache_protection WHERE group_id=?1", -1,
+            &erase.handle, nullptr) != SQLITE_OK || !bindText(erase.handle, 1, id) ||
+            sqlite3_step(erase.handle) != SQLITE_DONE) return false;
+        if (!ranges.empty())
+        {
+            Statement insert;
+            if (sqlite3_prepare_v2(database.handle,
+                "INSERT INTO cache_protection(group_id,source_namespace,zoom,min_x,max_x,min_y,max_y) "
+                "VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT DO NOTHING", -1,
+                &insert.handle, nullptr) != SQLITE_OK) return false;
+            for (const CacheTileRange &range : ranges)
+            {
+                if (!bindText(insert.handle, 1, id) || !bindText(insert.handle, 2, range.source_namespace) ||
+                    sqlite3_bind_int(insert.handle, 3, range.zoom) != SQLITE_OK ||
+                    sqlite3_bind_int(insert.handle, 4, range.min_x) != SQLITE_OK ||
+                    sqlite3_bind_int(insert.handle, 5, range.max_x) != SQLITE_OK ||
+                    sqlite3_bind_int(insert.handle, 6, range.min_y) != SQLITE_OK ||
+                    sqlite3_bind_int(insert.handle, 7, range.max_y) != SQLITE_OK ||
+                    sqlite3_step(insert.handle) != SQLITE_DONE || sqlite3_reset(insert.handle) != SQLITE_OK) return false;
+            }
+        }
+        if (!database.execute("COMMIT")) return false;
+        // A removal may let a previously blocked cleanup reach its target.
+        {
+            std::lock_guard<std::mutex> lock(this->mutex);
+            this->policy_changed = true;
+        }
+        this->condition.notify_one();
+        return true;
+    }
+
+    std::optional<std::vector<CacheProtectionGroup>> protectionGroups(CacheStorageKind kind)
+    {
+        if (kind == CacheStorageKind::TerrainSources) return std::nullopt;
+        std::lock_guard<std::mutex> maintenance(this->cleanup_mutex);
+        {
+            std::lock_guard<std::mutex> gate_lock(this->gate->mutex);
+            if (!this->gate->ownership.ensure(this->root)) return std::nullopt;
+        }
+        std::lock_guard<std::mutex> disk_lock(this->disk_mutex);
+        Database database;
+        Statement query;
+        if (!openProtectionDatabase(database, this->database_path) || sqlite3_prepare_v2(database.handle,
+            "SELECT group_id,source_namespace,zoom,min_x,max_x,min_y,max_y FROM cache_protection "
+            "ORDER BY group_id,source_namespace,zoom,min_x,max_x,min_y,max_y", -1,
+            &query.handle, nullptr) != SQLITE_OK) return std::nullopt;
+        std::vector<CacheProtectionGroup> groups;
+        int status;
+        while ((status = sqlite3_step(query.handle)) == SQLITE_ROW)
+        {
+            const unsigned char *id_text = sqlite3_column_text(query.handle, 0);
+            const unsigned char *namespace_text = sqlite3_column_text(query.handle, 1);
+            if (!id_text || !namespace_text) return std::nullopt;
+            const std::string id(reinterpret_cast<const char *>(id_text), sqlite3_column_bytes(query.handle, 0));
+            CacheTileRange range{std::string(reinterpret_cast<const char *>(namespace_text), sqlite3_column_bytes(query.handle, 1)),
+                sqlite3_column_int(query.handle, 2), sqlite3_column_int(query.handle, 3), sqlite3_column_int(query.handle, 4),
+                sqlite3_column_int(query.handle, 5), sqlite3_column_int(query.handle, 6)};
+            if (!validGroupId(id) || !validRange(kind, range)) return std::nullopt;
+            if (groups.empty() || groups.back().id != id) groups.push_back({id, {}});
+            groups.back().ranges.push_back(std::move(range));
+        }
+        if (status != SQLITE_DONE) return std::nullopt;
+        return groups;
+    }
+
     bool setPolicy(CacheStorageKind kind, const CacheStoragePolicy &policy)
     {
         if (kind == CacheStorageKind::TerrainSources || policy.cleanup_target_percent == 0 ||
@@ -575,11 +781,13 @@ public:
         Database database;
         Statement statement;
         std::error_code error;
-        const bool database_exists = std::filesystem::exists(this->database_path, error);
-        if (error || (database_exists &&
-            (!database.open(this->database_path, SQLITE_OPEN_READONLY) ||
-             sqlite3_prepare_v2(database.handle, "SELECT last_access_ms FROM tile_access WHERE tile_key=?1", -1,
-                                &statement.handle, nullptr) != SQLITE_OK)))
+        Statement protection;
+        if (!openProtectionDatabase(database, this->database_path) ||
+            sqlite3_prepare_v2(database.handle, "SELECT last_access_ms FROM tile_access WHERE tile_key=?1", -1,
+                               &statement.handle, nullptr) != SQLITE_OK ||
+            sqlite3_prepare_v2(database.handle, "SELECT 1 FROM cache_protection WHERE source_namespace=?1 AND "
+                "zoom=?2 AND min_x<=?3 AND max_x>=?3 AND min_y<=?4 AND max_y>=?4 LIMIT 1", -1,
+                &protection.handle, nullptr) != SQLITE_OK)
         { ++result.errors; result.target_reached = false; return this->publish(result); }
         std::uint64_t initial_dropped;
         { std::lock_guard<std::mutex> lock(this->mutex); initial_dropped = this->dropped; }
@@ -594,14 +802,23 @@ public:
             {
                 EvictionCandidate candidate;
                 candidate.relative = entry.path().lexically_relative(this->root);
-                int zoom = 0;
-                if (tileKey(candidate.relative, kind, candidate.key, zoom))
+                TileIdentity tile;
+                if (tileKey(candidate.relative, kind, candidate.key, tile))
                 {
                     candidate.size = entry.file_size(error);
                     if (error) break;
+                    const std::optional<bool> protected_tile = tileProtected(protection, tile);
+                    if (!protected_tile) { ++result.errors; break; }
+                    if (*protected_tile)
+                    {
+                        ++result.protected_files;
+                        result.protected_bytes += candidate.size;
+                        it.increment(error);
+                        continue;
+                    }
                     candidate.modified = entry.last_write_time(error);
                     if (error) break;
-                    candidate.overview = policy.prefer_overview_tiles && zoom <= 8;
+                    candidate.overview = policy.prefer_overview_tiles && tile.zoom <= 8;
                     if (statement.handle)
                     {
                         if (sqlite3_bind_text(statement.handle, 1, candidate.key.data(), int(candidate.key.size()), SQLITE_TRANSIENT) != SQLITE_OK)
@@ -688,7 +905,7 @@ public:
         // Prune rows for our own evictions in one transaction. Newly published
         // files have pending hints, which are subsequently flushed as usual.
         // A crash between unlink and pruning merely leaves a stale hint.
-        if (database_exists && !removed_keys.empty())
+        if (!removed_keys.empty())
         {
             Database writer;
             Statement erase;
@@ -783,6 +1000,18 @@ bool CacheAccessIndex::setStoragePolicy(CacheStorageKind kind, const CacheStorag
 CacheCleanupResult CacheAccessIndex::lastCleanup() const
 { std::lock_guard<std::mutex> lock(this->impl->mutex); return this->impl->last_cleanup; }
 CacheCleanupResult CacheAccessIndex::cleanupNow() { return this->impl->cleanup(); }
+bool CacheAccessIndex::replaceProtectionGroup(CacheStorageKind kind, const CacheProtectionGroup &group)
+{
+    if (!validGroupId(group.id) || group.ranges.empty() || group.ranges.size() > MaximumProtectionRangesPerGroup ||
+        !std::all_of(group.ranges.begin(), group.ranges.end(), [kind](const CacheTileRange &range) {
+            return validRange(kind, range);
+        })) return false;
+    return this->impl->changeProtection(group.id, group.ranges);
+}
+bool CacheAccessIndex::removeProtectionGroup(const std::string &id)
+{ return validGroupId(id) && this->impl->changeProtection(id, {}); }
+std::optional<std::vector<CacheProtectionGroup>> CacheAccessIndex::protectionGroups(CacheStorageKind kind) const
+{ return this->impl->protectionGroups(kind); }
 void CacheAccessIndex::recordAccess(const std::string &key) { this->impl->record(key); }
 bool CacheAccessIndex::flush() { return this->impl->flush(); }
 std::optional<std::int64_t> CacheAccessIndex::lastAccess(const std::string &key) const

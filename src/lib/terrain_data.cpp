@@ -403,6 +403,29 @@ CacheCleanupResult TerrainData::lastCacheCleanup() const
     return this->cache_access_index ? this->cache_access_index->lastCleanup() : CacheCleanupResult();
 }
 
+std::string TerrainData::cacheProtectionNamespace(const QString &dataset) const
+{
+    const QString path = normalizedTerrainTileRelativePath(dataset, {0, 0, 0});
+    return path.isEmpty() ? std::string() : path.section(QLatin1Char('/'), 0, 2).toUtf8().toStdString();
+}
+
+bool TerrainData::replaceCacheProtectionGroup(const CacheProtectionGroup &group)
+{
+    return this->cache_access_index && this->cache_access_index->replaceProtectionGroup(
+        CacheStorageKind::NormalizedTerrain, group);
+}
+
+bool TerrainData::removeCacheProtectionGroup(const std::string &id)
+{
+    return this->cache_access_index && this->cache_access_index->removeProtectionGroup(id);
+}
+
+std::optional<std::vector<CacheProtectionGroup>> TerrainData::cacheProtectionGroups() const
+{
+    return this->cache_access_index ? this->cache_access_index->protectionGroups(CacheStorageKind::NormalizedTerrain)
+                                    : std::nullopt;
+}
+
 void TerrainData::setCascadeInstanceId(const QByteArray &instance_id)
 {
     this->cascade_instance_id = instance_id;

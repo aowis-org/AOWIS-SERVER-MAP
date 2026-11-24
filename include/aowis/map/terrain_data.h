@@ -157,6 +157,12 @@ public:
     // Applies only to ordinary normalized tiles, never native terrain sources.
     bool setCacheStoragePolicy(const CacheStoragePolicy &policy);
     CacheCleanupResult lastCacheCleanup() const;
+    // Current normalized format/revision/dataset namespace, or empty if the
+    // dataset identifier is invalid. Native sources are not covered by pins.
+    std::string cacheProtectionNamespace(const QString &dataset) const;
+    bool replaceCacheProtectionGroup(const CacheProtectionGroup &group);
+    bool removeCacheProtectionGroup(const std::string &id);
+    std::optional<std::vector<CacheProtectionGroup>> cacheProtectionGroups() const;
     QString normalizedTilePath(const QString &dataset,
                                const TerrainTileAddress &address) const;
 

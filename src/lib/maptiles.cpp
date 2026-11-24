@@ -197,6 +197,27 @@ Aowis::Map::CacheCleanupResult MapTiles::lastCacheCleanup() const
     return this->cache_access_index.lastCleanup();
 }
 
+std::string MapTiles::cacheProtectionNamespace(const QString &provider) const
+{
+    const QString path = this->providerCachePath(provider);
+    return path.isEmpty() ? std::string() : this->cacheStorageKey(path);
+}
+
+bool MapTiles::replaceCacheProtectionGroup(const Aowis::Map::CacheProtectionGroup &group)
+{
+    return this->cache_access_index.replaceProtectionGroup(Aowis::Map::CacheStorageKind::Raster, group);
+}
+
+bool MapTiles::removeCacheProtectionGroup(const std::string &id)
+{
+    return this->cache_access_index.removeProtectionGroup(id);
+}
+
+std::optional<std::vector<Aowis::Map::CacheProtectionGroup>> MapTiles::cacheProtectionGroups() const
+{
+    return this->cache_access_index.protectionGroups(Aowis::Map::CacheStorageKind::Raster);
+}
+
 void MapTiles::recordMemoryCacheUse(const QString &provider, int z, int x, int y,
                                    const QString &canonical_key) const
 {

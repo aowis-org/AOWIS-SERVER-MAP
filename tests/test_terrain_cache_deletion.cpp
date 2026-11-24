@@ -239,20 +239,27 @@ int main()
                      "Cannot initialize terrain eviction fixture")) return 1;
         const TerrainTile old = makeTile(dataset, zoom, 500, 300);
         const TerrainTile recent = makeTile(dataset, zoom, 500, 301);
+        const TerrainTile pinned = makeTile(dataset, zoom, 500, 302);
         const QString native = QDir(limited.storagePaths().providers).filePath(QStringLiteral("native.tif"));
-        if (!require(writeTile(limited, old) && writeTile(limited, recent) && writeFile(native),
+        if (!require(writeTile(limited, old) && writeTile(limited, recent) && writeTile(limited, pinned) && writeFile(native),
                      "Cannot write terrain eviction fixture")) return 1;
         const QString old_path = limited.normalizedTilePath(dataset, old.address);
         const QString recent_path = limited.normalizedTilePath(dataset, recent.address);
         const std::uint64_t recent_size = std::uint64_t(QFileInfo(recent_path).size());
+        const std::string protection_namespace = limited.cacheProtectionNamespace(dataset);
+        if (!require(!protection_namespace.empty() &&
+                     limited.replaceCacheProtectionGroup({"offline", {{protection_namespace, zoom, 500, 500, 302, 302}}}) &&
+                     limited.cacheProtectionGroups().value_or(std::vector<CacheProtectionGroup>()).size() == 1,
+                     "Cannot protect normalized terrain through TerrainData API")) return 1;
         if (!require(limited.terrainTile(dataset, recent.address, false).status == TerrainTileLookupStatus::Ready &&
-                     limited.setCacheStoragePolicy({recent_size + recent_size / 4, 85, false}),
+                     limited.setCacheStoragePolicy({2 * recent_size + recent_size / 2, 85, false}),
                      "Cannot enable terrain eviction after cache hit")) return 1;
         const std::chrono::steady_clock::time_point deadline =
             std::chrono::steady_clock::now() + std::chrono::seconds(5);
         while (QFile::exists(old_path) && std::chrono::steady_clock::now() < deadline)
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
-        if (!require(!QFile::exists(old_path) && QFile::exists(recent_path) && QFile::exists(native),
+        if (!require(!QFile::exists(old_path) && QFile::exists(recent_path) && QFile::exists(native) &&
+                     QFile::exists(limited.normalizedTilePath(dataset, pinned.address)),
                      "Normalized eviction did not preserve recent tile and native source")) return 1;
     }
     return 0;

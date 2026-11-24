@@ -438,20 +438,27 @@ int main(int argc, char **argv)
         const QString older = QDir(eviction_cache.path()).filePath(relative + QStringLiteral("1.png"));
         const QString newer = QDir(eviction_cache.path()).filePath(relative + QStringLiteral("2.png"));
         const QString permanent = QDir(permanent_cache.path()).filePath(relative + QStringLiteral("3.png"));
+        const QString pinned = QDir(eviction_cache.path()).filePath(relative + QStringLiteral("4.png"));
         writeFile(older, QByteArray(100, 'a'));
         writeFile(newer, QByteArray(100, 'b'));
         writeFile(permanent, QByteArray(100, 'p'));
+        writeFile(pinned, QByteArray(100, 'q'));
         MapTiles limited(eviction_cache.path(), 2, 8);
         limited.configureProviders(providers, {}, {});
         limited.setRemoteFetchEnabled(false);
         limited.setPermanentDataDirectory(permanent_cache.path());
         require(limited.getTile(provider_id, 12, 1, 2, QStringLiteral("recent")).data == QByteArray(100, 'b'),
                 "Failed to establish recent cache hit");
-        require(limited.setCacheStoragePolicy({120, 85, false}), "Failed to enable ordinary raster eviction");
+        const std::string protection_namespace = limited.cacheProtectionNamespace(provider_id);
+        require(protection_namespace == provider_id.toUtf8().toStdString() &&
+                limited.replaceCacheProtectionGroup({"offline", {{protection_namespace, 12, 1, 1, 4, 4}}}) &&
+                limited.cacheProtectionGroups().value_or(std::vector<Aowis::Map::CacheProtectionGroup>()).size() == 1,
+                "Cannot protect ordinary raster tile through MapTiles API");
+        require(limited.setCacheStoragePolicy({240, 85, false}), "Failed to enable ordinary raster eviction");
         QElapsedTimer deadline;
         deadline.start();
         while (QFile::exists(older) && deadline.elapsed() < 5000) QThread::msleep(10);
-        require(!QFile::exists(older) && QFile::exists(newer) && QFile::exists(permanent),
+        require(!QFile::exists(older) && QFile::exists(newer) && QFile::exists(permanent) && QFile::exists(pinned),
                 "Raster eviction failed to preserve recent and permanent tiles");
         require(limited.getTile(provider_id, 12, 1, 3, QStringLiteral("permanent")).data == QByteArray(100, 'p'),
                 "Permanent imagery unavailable after eviction");

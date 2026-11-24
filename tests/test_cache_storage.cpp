@@ -1,4 +1,6 @@
 #include <aowis/map/cache_storage.h>
+#include <sqlite3.h>
+#include <limits>
 
 #include <chrono>
 #include <cstdlib>
@@ -258,6 +260,126 @@ int main()
         require(index.setStoragePolicy(CacheStorageKind::Raster, {50, 85, false}), "Cannot lower background limit");
         index.cleanupNow();
         require(!fs::exists(background / "provider/12/1/1.png"), "Cross-thread release left a stuck lease");
+    }
+    // Geographic ranges stay compact even at zoom 30 and split the date line.
+    const std::optional<std::vector<CacheTileRange>> world = cacheRegionTileRanges(
+        "provider", -180, -85, 180, 85, 0, 30);
+    require(world && world->size() == 31 && world->back().max_x == (1 << 30) - 1,
+            "World range should use one rectangle per zoom, not enumerate tiles");
+    const std::optional<std::vector<CacheTileRange>> dateline = cacheRegionTileRanges(
+        "provider", 170, -10, -170, 10, 2, 2);
+    require(dateline && dateline->size() == 2 && (*dateline)[0] == CacheTileRange{"provider", 2, 3, 3, 1, 2} &&
+            (*dateline)[1] == CacheTileRange{"provider", 2, 0, 0, 1, 2}, "Antimeridian split is wrong");
+    const std::optional<std::vector<CacheTileRange>> coarse = cacheRegionTileRanges(
+        "provider", 170, -10, -170, 10, 0, 0);
+    require(coarse && coarse->size() == 1 && coarse->front() == CacheTileRange{"provider", 0, 0, 0, 0, 0},
+            "Antimeridian must not duplicate zoom-zero tile");
+    require(!cacheRegionTileRanges("provider", 0, 10, 1, -10, 0, 1) &&
+            !cacheRegionTileRanges("provider", 0, 0, 1, 90, 0, 1) &&
+            !cacheRegionTileRanges("provider", 0, 0, 1, 1, 0, 31) &&
+            !cacheRegionTileRanges("provider", std::numeric_limits<double>::quiet_NaN(), 0, 1, 1, 0, 1),
+            "Invalid geographic bounds accepted");
+
+    const fs::path protected_raster = temporary.path / "protected_raster";
+    writeFile(protected_raster / "provider/12/1/1.png", 100);
+    writeFile(protected_raster / "provider/12/1/1.jpg", 100);
+    writeFile(protected_raster / "provider/12/1/2.png", 100);
+    writeFile(protected_raster / "provider/variants/new/12/1/1.png", 100);
+    writeFile(protected_raster / "other/12/1/1.png", 100);
+    {
+        CacheAccessIndex index(protected_raster);
+        // First migrate an existing access-only database, then save protection.
+        index.recordAccess("provider/12/1/1");
+        require(index.flush(), "Cannot establish pre-protection index");
+        require(index.replaceProtectionGroup(CacheStorageKind::Raster, {"region A", {{"provider", 12, 1, 1, 1, 2}}}) &&
+                index.replaceProtectionGroup(CacheStorageKind::Raster, {"region B", {{"provider", 12, 1, 1, 1, 1},
+                    {"provider", 12, 1, 1, 3, 3}}}), "Cannot save overlapping regions");
+        require(!index.replaceProtectionGroup(CacheStorageKind::Raster, {"region A", {{"provider", 12, 1, 1, 1, 1},
+                    {"../invalid", 12, 1, 1, 1, 1}}}) &&
+                !index.replaceProtectionGroup(CacheStorageKind::Raster, {"region A", {}}) &&
+                !index.replaceProtectionGroup(CacheStorageKind::Raster, {"bad", {{"provider", 1, 0, 2, 0, 0}}}) &&
+                !index.replaceProtectionGroup(CacheStorageKind::TerrainSources, {"bad", {{"provider", 1, 0, 0, 0, 0}}}),
+                "Invalid group replacement must be rejected");
+        const std::optional<std::vector<CacheProtectionGroup>> groups = index.protectionGroups(CacheStorageKind::Raster);
+        require(groups && groups->size() == 2 && groups->front().ranges.front().max_y == 2,
+                "Invalid replacement changed original group");
+        // A real SQL failure after deleting the old group must roll back.
+        sqlite3 *db = nullptr;
+        require(sqlite3_open((protected_raster / ".aowis-cache-access-v1.sqlite3").string().c_str(), &db) == SQLITE_OK,
+                "Cannot open transaction fixture");
+        require(sqlite3_exec(db, "CREATE TRIGGER reject_pin BEFORE INSERT ON cache_protection "
+            "WHEN NEW.group_id='region A' BEGIN SELECT RAISE(ABORT,'test'); END", nullptr, nullptr, nullptr) == SQLITE_OK,
+            "Cannot create transaction failure fixture");
+        require(!index.replaceProtectionGroup(CacheStorageKind::Raster, {"region A", {{"provider", 12, 1, 1, 3, 3}}}),
+                "Injected transaction failure reported success");
+        require(sqlite3_exec(db, "DROP TRIGGER reject_pin", nullptr, nullptr, nullptr) == SQLITE_OK, "Cannot remove trigger");
+        sqlite3_close(db);
+        require(index.protectionGroups(CacheStorageKind::Raster)->front().ranges.front().max_y == 2,
+                "Failed transaction lost original protection");
+    }
+    // This file did not exist when the group was defined.
+    writeFile(protected_raster / "provider/12/1/3.webp", 100);
+    {
+        CacheAccessIndex index(protected_raster);
+        const std::optional<std::vector<CacheProtectionGroup>> groups = index.protectionGroups(CacheStorageKind::Raster);
+        require(groups && groups->size() == 2, "Protection did not survive restart");
+        require(index.setStoragePolicy(CacheStorageKind::Raster, {150, 85, false}), "Cannot enable protected eviction");
+        const CacheCleanupResult blocked = index.cleanupNow();
+        require(!blocked.target_reached && blocked.errors == 0 && blocked.protected_bytes == 400 &&
+                blocked.protected_files == 4 && blocked.remaining_bytes == 400,
+                "Protected data must count toward limit once per file and block unreachable target");
+        require(fs::exists(protected_raster / "provider/12/1/1.png") &&
+                fs::exists(protected_raster / "provider/12/1/1.jpg") &&
+                fs::exists(protected_raster / "provider/12/1/2.png") &&
+                fs::exists(protected_raster / "provider/12/1/3.webp") &&
+                !fs::exists(protected_raster / "provider/variants/new/12/1/1.png") &&
+                !fs::exists(protected_raster / "other/12/1/1.png"), "Pin identity or future tile protection failed");
+        // Another cooperating instance may save a group, but eviction cannot
+        // run while both hold shared ownership.
+        {
+            CacheAccessIndex other(protected_raster);
+            require(other.removeProtectionGroup("region A"), "Cannot remove group from second index");
+            const CacheCleanupResult shared = index.cleanupNow();
+            require(shared.shared_root && fs::exists(protected_raster / "provider/12/1/2.png"),
+                    "Shared root eviction must remain disabled");
+        }
+        index.cleanupNow();
+        require(!fs::exists(protected_raster / "provider/12/1/2.png") &&
+                fs::exists(protected_raster / "provider/12/1/1.png") &&
+                fs::exists(protected_raster / "provider/12/1/3.webp"), "Removing one region lost overlapping protection");
+        require(index.removeProtectionGroup("region B") && index.removeProtectionGroup("region B"),
+                "Removal should be idempotent");
+        index.cleanupNow();
+        require(scanCacheStorage(protected_raster, CacheStorageKind::Raster).payload_bytes <= 127,
+                "Unpinned tiles did not become evictable");
+    }
+    const fs::path protected_terrain = temporary.path / "protected_terrain";
+    writeFile(protected_terrain / "v1/r2/dataset/12/1/1.aowterrain", 100);
+    writeFile(protected_terrain / "v1/r1/dataset/12/1/1.aowterrain", 100);
+    writeFile(protected_terrain / "v1/r2/other/12/1/1.aowterrain", 100);
+    {
+        CacheAccessIndex index(protected_terrain);
+        require(index.replaceProtectionGroup(CacheStorageKind::NormalizedTerrain, {"DEM", {{"v1/r2/dataset", 12, 1, 1, 1, 1}}}) &&
+                index.setStoragePolicy(CacheStorageKind::NormalizedTerrain, {110, 85, false}), "Cannot pin terrain");
+        index.cleanupNow();
+        require(fs::exists(protected_terrain / "v1/r2/dataset/12/1/1.aowterrain") &&
+                !fs::exists(protected_terrain / "v1/r1/dataset/12/1/1.aowterrain") &&
+                !fs::exists(protected_terrain / "v1/r2/other/12/1/1.aowterrain"), "Terrain revision/dataset isolation failed");
+    }
+    // A migrated database that has lost its protection table is not equivalent
+    // to a legacy index without pins. Cleanup must refuse to remove payloads.
+    {
+        sqlite3 *db = nullptr;
+        require(sqlite3_open((protected_terrain / ".aowis-cache-access-v1.sqlite3").string().c_str(), &db) == SQLITE_OK &&
+                sqlite3_exec(db, "DROP TABLE cache_protection", nullptr, nullptr, nullptr) == SQLITE_OK,
+                "Cannot create missing protection table fixture");
+        sqlite3_close(db);
+        CacheAccessIndex index(protected_terrain);
+        require(!index.protectionGroups(CacheStorageKind::NormalizedTerrain) &&
+                index.setStoragePolicy(CacheStorageKind::NormalizedTerrain, {10, 85, false}), "Missing pin table not detected");
+        const CacheCleanupResult failed = index.cleanupNow();
+        require(failed.errors && !failed.target_reached && fs::exists(protected_terrain / "v1/r2/dataset/12/1/1.aowterrain"),
+                "Missing protection table must fail closed");
     }
     require(cacheStorageRootsOverlap(eviction, eviction / "permanent") &&
             !cacheStorageRootsOverlap(eviction, permanent), "Root overlap check failed");
