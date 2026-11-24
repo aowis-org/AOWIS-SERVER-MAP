@@ -342,6 +342,9 @@ TerrainData::TerrainData(const Config &config, QObject *parent)
     this->storage_paths.offline_packages = config.permanent_data_directory.isEmpty()
         ? QDir(this->storage_paths.root).filePath(QStringLiteral("offline-packages"))
         : QDir(config.permanent_data_directory).filePath(QStringLiteral("terrain"));
+    if (!this->storage_paths.root.isEmpty())
+        this->cache_access_index = std::make_unique<CacheAccessIndex>(std::filesystem::path(
+            QDir(this->storage_paths.normalized).absolutePath().toStdU16String()));
     if (config.copernicus_enabled)
         this->providers.push_back(std::make_unique<CopernicusTerrainProvider>(
             config.connect_timeout_seconds, config.inactivity_timeout_seconds,
@@ -349,6 +352,31 @@ TerrainData::TerrainData(const Config &config, QObject *parent)
 }
 
 TerrainData::~TerrainData() = default;
+
+TerrainCacheStorageStatistics TerrainData::cacheStorageStatistics() const
+{
+    if (this->storage_paths.root.isEmpty()) return {
+        scanCacheStorage({}, CacheStorageKind::NormalizedTerrain),
+        scanCacheStorage({}, CacheStorageKind::TerrainSources)};
+    return {
+        scanCacheStorage(std::filesystem::path(QDir(this->storage_paths.normalized)
+            .absolutePath().toStdU16String()), CacheStorageKind::NormalizedTerrain),
+        scanCacheStorage(std::filesystem::path(QDir(this->storage_paths.providers)
+            .absolutePath().toStdU16String()), CacheStorageKind::TerrainSources)};
+}
+
+bool TerrainData::flushCacheAccessIndex()
+{
+    return !this->cache_access_index || this->cache_access_index->flush();
+}
+
+void TerrainData::recordCacheUse(const QString &path) const
+{
+    if (!this->cache_access_index) return;
+    const QDir root(QDir(this->storage_paths.normalized).absolutePath());
+    const QString key = root.relativeFilePath(QFileInfo(path).absoluteFilePath());
+    this->cache_access_index->recordAccess(key.toUtf8().toStdString());
+}
 
 void TerrainData::setCascadeInstanceId(const QByteArray &instance_id)
 {
@@ -1024,6 +1052,7 @@ TerrainProviderFetchResult TerrainData::fetchNormalizedFromUpstreams(
                 file.cancelWriting();
                 return result;
             }
+            this->recordCacheUse(file_path);
             result.status = TerrainProviderFetchStatus::Ready;
             result.origin = TerrainDataOrigin::Cache;
             result.error_message.clear();
@@ -1331,6 +1360,7 @@ TerrainTileLookupResult TerrainData::readNormalizedTile(
         return result;
     }
 
+    this->recordCacheUse(path);
     result.status = TerrainTileLookupStatus::Ready;
     result.data = data;
     result.origin = TerrainDataOrigin::Cache;
@@ -1458,6 +1488,7 @@ TerrainTileLookupResult TerrainData::fetchAndStoreNormalizedTile(
             return result;
         }
 
+        this->recordCacheUse(path);
         result.status = TerrainTileLookupStatus::Ready;
         result.data = encoded;
         result.origin = provider_result.origin;

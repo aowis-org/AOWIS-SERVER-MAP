@@ -213,10 +213,10 @@ bool readMapProviderCatalog(QSettings *settings, Server::Config *config,
             QString id = stored_id;
             // Existing pre-UUID provider sections are accepted without rewriting
             // their administrator-owned configuration on startup.
-            if (stored_id == QStringLiteral("openstreetmap")) id = defaults.at(0).id;
-            else if (stored_id == QStringLiteral("osmcyclo")) id = defaults.at(1).id;
+            if (stored_id == QStringLiteral("openstreetmap")) id = defaults.at(1).id;
+            else if (stored_id == QStringLiteral("osmcyclo")) id = defaults.at(3).id;
             else if (stored_id == QStringLiteral("opentopomap")) id = defaults.at(2).id;
-            else if (stored_id == QStringLiteral("arcgis")) id = defaults.at(3).id;
+            else if (stored_id == QStringLiteral("arcgis")) id = defaults.at(4).id;
             if (QUuid(id).isNull())
             {
                 *error_message = QStringLiteral("Map provider id must be a UUID: %1").arg(stored_id);
@@ -379,6 +379,8 @@ bool MapServerConfiguration::loadManagedSettings(Server::Config *config, bool mi
         if (!loadProviderStateFile(config->provider_state_file, &legacy, error_message))
             return false;
         managed_providers = legacy.map_providers;
+        if (migrate_legacy)
+            Aowis::Map::addGoogleSatelliteToLegacyPresets(&managed_providers);
         // Validate coverage before writing the imported record. A failed
         // migration must not leave an unusable CONFIG record behind.
         for (const Aowis::Map::MapProvider &provider : managed_providers)
@@ -397,6 +399,13 @@ bool MapServerConfiguration::loadManagedSettings(Server::Config *config, bool mi
                                            &provider_revision, error_message))
                 return false;
         }
+    }
+
+    if (migrate_legacy)
+    {
+        if (!repository->migrateGoogleSatellitePreset(error_message) ||
+            !repository->readProviders(&managed_providers, &provider_revision, error_message))
+            return false;
     }
 
     if (!provider_revision.isEmpty() || QFileInfo::exists(config->provider_state_file))
@@ -936,16 +945,19 @@ QByteArray MapServerConfiguration::defaultConfigText()
         "; Regions from that GeoJSON are named by their ISO_A2 (or id) property.\n\n"
         "; Provider list is authoritative once any [map_provider.*] section exists.\n"
         "; Deleting/commenting one of these sections removes that default provider.\n"
+        "[map_provider.c84ccc10-ff57-54d7-babf-e2e68a4dc7d2]\nname=Google Satellite\n"
+        "url=https://mt0.google.com/vt/lyrs=s&x={x}&y={y}&z={z}\n"
+        "min_zoom=0\nmax_zoom=21\nenabled=true\nremote_fetch_enabled=true\n\n"
         "[map_provider.0381bc44-67e9-5af9-aeb0-023ccba36658]\nname=OpenStreetMap\n"
         "url=https://tile.openstreetmap.org/{z}/{x}/{y}.png\n"
         "min_zoom=0\nmax_zoom=19\nenabled=true\nremote_fetch_enabled=true\n"
         "; allow_lossy_transfer=false to protect fine map labels\n\n"
-        "[map_provider.49bda1b9-15aa-55e6-8933-2172c785e775]\nname=CyclOSM\n"
-        "url=https://{s}.tile-cyclosm.openstreetmap.fr/cyclosm/{z}/{x}/{y}.png\n"
-        "min_zoom=0\nmax_zoom=20\nenabled=true\nremote_fetch_enabled=true\n\n"
         "[map_provider.178a60e6-178a-507b-af86-f45427150986]\nname=OpenTopoMap\n"
         "url=https://tile.opentopomap.org/{z}/{x}/{y}.png\n"
         "min_zoom=0\nmax_zoom=17\nenabled=true\nremote_fetch_enabled=true\n\n"
+        "[map_provider.49bda1b9-15aa-55e6-8933-2172c785e775]\nname=CyclOSM\n"
+        "url=https://{s}.tile-cyclosm.openstreetmap.fr/cyclosm/{z}/{x}/{y}.png\n"
+        "min_zoom=0\nmax_zoom=20\nenabled=true\nremote_fetch_enabled=true\n\n"
         "[map_provider.a0d790c2-f231-55fd-b95e-23c9bd6cb3fc]\nname=ArcGIS World Imagery\n"
         "url=https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}\n"
         "min_zoom=0\nmax_zoom=17\nenabled=true\nremote_fetch_enabled=true\n\n"

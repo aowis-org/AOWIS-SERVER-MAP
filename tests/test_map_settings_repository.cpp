@@ -197,7 +197,7 @@ int main(int argc, char **argv)
     QVector<Aowis::Map::MapProvider> providers;
     QString providers_revision;
     if (!require(store->readProviders(&providers, &providers_revision, &error) &&
-                 providers_revision.isEmpty() && providers.size() == 4,
+                 providers_revision.isEmpty() && providers.size() == 5,
                  "Default MAP provider catalog"))
         return 1;
     providers[0].name = QStringLiteral("Provider, with % and \"quotes\"");

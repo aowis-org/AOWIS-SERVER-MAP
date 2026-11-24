@@ -71,6 +71,7 @@ install_debian_dependencies()
         libzstd-dev
         libpng-dev
         libturbojpeg0-dev
+        libsqlite3-dev
     )
 
     if ! command -v apt-get >/dev/null 2>&1; then

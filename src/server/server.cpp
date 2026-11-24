@@ -1928,7 +1928,7 @@ void Server::setupRoutes()
     this->http.route("/terrain/v1/<arg>/<arg>/<arg>/<arg>.aowterrain",
                      QHttpServerRequest::Method::Get,
                      [this](const QString &dataset, int zoom, int tile_x, int tile_y,
-                            const QHttpServerRequest &) -> QFuture<QHttpServerResponse>
+                            const QHttpServerRequest &request) -> QFuture<QHttpServerResponse>
     {
 
         Aowis::Map::TerrainTileAddress address;
@@ -1965,7 +1965,7 @@ void Server::setupRoutes()
 
     this->http.route("/<arg>/<arg>/<arg>/<arg>.png", QHttpServerRequest::Method::Get,
                      [this](const QString &provider, int z, int x, int y,
-                            const QHttpServerRequest &) -> QFuture<QHttpServerResponse>
+                            const QHttpServerRequest &request) -> QFuture<QHttpServerResponse>
     {
 
         const QByteArray expected_source = this->maptiles->rasterSourceFingerprint(provider);

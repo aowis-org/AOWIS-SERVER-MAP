@@ -2,6 +2,7 @@
 #define AOWIS_MAP_TERRAIN_DATA_H
 
 #include <aowis/map/terrain_tile.h>
+#include <aowis/map/cache_storage.h>
 #include <aowis/map/map_cascade_config.h>
 #include <aowis/map/cascade_upstream_health.h>
 #include <aowis/map/terrain_provider.h>
@@ -150,6 +151,9 @@ public:
     bool isInitialized() const;
     bool isRemoteFetchEnabled() const;
     StoragePaths storagePaths() const;
+    // Disk scan: run off the event-loop thread. Permanent packages are excluded.
+    TerrainCacheStorageStatistics cacheStorageStatistics() const;
+    bool flushCacheAccessIndex();
     QString normalizedTilePath(const QString &dataset,
                                const TerrainTileAddress &address) const;
 
@@ -264,6 +268,8 @@ private:
     std::atomic_uint64_t cascade_cancel_generation{0};
     mutable std::atomic_int cascade_active{0};
     StoragePaths storage_paths;
+    std::unique_ptr<CacheAccessIndex> cache_access_index;
+    void recordCacheUse(const QString &path) const;
     std::vector<std::unique_ptr<TerrainProvider>> providers;
     mutable QMutex normalized_directory_mutex;
     bool initialized = false;

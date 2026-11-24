@@ -115,6 +115,18 @@ int main()
         return 1;
     }
 
+    const TerrainTile access_tile = makeTile(dataset, zoom, 501, 300);
+    const TerrainTileLookupResult cached = terrain_data.terrainTile(dataset, access_tile.address, false);
+    if (!require(cached.status == TerrainTileLookupStatus::Ready && terrain_data.flushCacheAccessIndex(),
+                 "Cached terrain read did not complete and flush")) return 1;
+    CacheAccessIndex index(std::filesystem::path(terrain_data.storagePaths().normalized.toStdU16String()));
+    const QString relative = normalizedTerrainTileRelativePath(dataset, access_tile.address);
+    if (!require(index.lastAccess(relative.toUtf8().toStdString()).has_value(),
+                 "Normalized terrain cache read did not record access")) return 1;
+    const TerrainCacheStorageStatistics before = terrain_data.cacheStorageStatistics();
+    if (!require(before.normalized.payload_files == 12 && before.normalized.scan_errors == 0,
+                 "Normalized storage statistics did not count existing files")) return 1;
+
     // The inner column and rows 300..301 only.
     TerrainCacheDeletionResult result =
         terrain_data.deleteNormalizedTiles(dataset, zoom, 501, 501, 300, 301);
@@ -129,6 +141,9 @@ int main()
     {
         return 1;
     }
+
+    if (!require(terrain_data.cacheStorageStatistics().normalized.payload_files == 10,
+                 "Deleted normalized tiles still counted in storage statistics")) return 1;
 
     // A range starting west of column 0 wraps to the last column.
     result = terrain_data.deleteNormalizedTiles(dataset, zoom, -1, 0, 301, 301);

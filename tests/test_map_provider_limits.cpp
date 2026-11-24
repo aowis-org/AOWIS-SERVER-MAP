@@ -26,17 +26,32 @@ int main(int argc, char **argv)
 {
     QCoreApplication application(argc, argv);
     const QVector<Aowis::Map::MapProvider> defaults = Aowis::Map::defaultMapProviders();
-    require(defaults.size() == 4, "Four built-in 2D providers expected");
+    require(defaults.size() == 5, "Five built-in 2D providers expected");
+    require(defaults.at(0).name == QStringLiteral("Google Satellite") &&
+            defaults.at(0).url_template.contains(QStringLiteral("lyrs=s")),
+            "Google Satellite must be first");
     for (const Aowis::Map::MapProvider &provider : defaults)
         require(!QUuid(provider.id).isNull(), "Every provider must have a UUID");
-    require(defaults.at(3).maximum_zoom == 17, "ArcGIS conservative zoom maximum changed");
+    require(defaults.at(4).maximum_zoom == 17, "ArcGIS conservative zoom maximum changed");
     require(defaults.at(2).maximum_zoom == 17, "OpenTopoMap zoom maximum changed");
-    require(defaults.at(1).maximum_zoom >= 19, "CyclOSM high-detail fallback unavailable");
+    require(defaults.at(3).maximum_zoom >= 19, "CyclOSM high-detail fallback unavailable");
+    QVector<Aowis::Map::MapProvider> legacy{defaults.at(1), defaults.at(3), defaults.at(2), defaults.at(4)};
+    legacy[1].name = QStringLiteral("Retitled CyclOSM");
+    require(Aowis::Map::addGoogleSatelliteToLegacyPresets(&legacy) &&
+            legacy.size() == 5 && legacy.first().id == defaults.first().id &&
+            legacy.at(2).name == QStringLiteral("Retitled CyclOSM"),
+            "Existing full preset catalog gets Google without altering edits");
+    require(!Aowis::Map::addGoogleSatelliteToLegacyPresets(&legacy) && legacy.size() == 5,
+            "Google preset migration is idempotent");
+    legacy.removeFirst();
+    legacy.removeLast();
+    require(!Aowis::Map::addGoogleSatelliteToLegacyPresets(&legacy),
+            "Deliberately incomplete presets are preserved");
 
     QTemporaryDir cache;
     require(cache.isValid(), "Temporary cache directory unavailable");
     MapTiles tiles(cache.path(), 2, 4);
-    const QString arcgis = defaults.at(3).id;
+    const QString arcgis = defaults.at(4).id;
     const MapTiles::TileRequestResult unavailable =
         tiles.getTile(arcgis, 18, 12345, 12345, QStringLiteral("overzoom"));
     require(unavailable.status == MapTiles::TileRequestStatus::InvalidRequest,

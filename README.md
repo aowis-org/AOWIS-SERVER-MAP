@@ -8,7 +8,7 @@ It is a C++/Qt 6 HTTP server for Linux, usable as a local desktop companion, a s
 
 ## Start here
 
-Build dependencies are a C++ compiler, CMake, Ninja, Qt 6 (Core, Network, HttpServer, WebSockets and Concurrent) and libtiff. On Debian-based Linux:
+Build dependencies are a C++ compiler, CMake, Ninja, Qt 6 (Core, Network, HttpServer, WebSockets and Concurrent) and libtiff, libpng, libjpeg-turbo, Zstandard and SQLite 3.24 or newer. On Debian-based Linux:
 
 ```bash
 ./compile_linux.sh --install-dependencies --no-run
@@ -169,6 +169,7 @@ The package installs a dedicated `aowis-server-map` systemd service, preserves e
 | [Debian package build](docs/debian-package-build.md) | Docker builds, isolated installation and upgrade qualification |
 | [Configuration](docs/configuration.md) | INI, CLI, providers, region/zoom policies, state-file precedence |
 | [HTTP API](docs/http-api.md) | Requests, responses, cache and upstream operations |
+| [Cache storage accounting](docs/cache-storage.md) | Persistent last-access index, disk usage and future eviction prerequisites |
 | [MAP-to-MAP cascading](docs/map-cascading.md) | Ordered upstreams, optional direct fetch, adaptive JPEG and zstd terrain transfer |
 | [Architecture and resource limits](docs/architecture.md) | Execution model, concurrency, memory, cancellation, test and benchmark tools |
 | [Terrain sources](docs/terrain-providers.md) | Copernicus GLO-30, cache fill, resumable download, data provenance |

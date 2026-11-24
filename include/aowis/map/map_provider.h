@@ -20,5 +20,8 @@ struct MapProvider
 };
 
 QVector<MapProvider> defaultMapProviders();
+// One-time upgrade for existing complete (four-provider) preset catalogs.
+// Does not override individual settings or add back a deliberately removed preset.
+bool addGoogleSatelliteToLegacyPresets(QVector<MapProvider> *providers);
 }
 #endif

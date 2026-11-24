@@ -16,6 +16,7 @@ RUN apt-get update -o APT::Update::Error-Mode=any \
       libzstd-dev \
       libpng-dev \
       libturbojpeg0-dev \
+      libsqlite3-dev \
       ninja-build \
       pkg-config \
       qt6-base-dev \

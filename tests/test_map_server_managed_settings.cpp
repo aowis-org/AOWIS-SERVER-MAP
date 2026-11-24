@@ -67,6 +67,15 @@ QByteArray readFile(const QString &path)
     return file.open(QIODevice::ReadOnly) ? file.readAll() : QByteArray();
 }
 
+const Aowis::Map::MapProvider *findProvider(
+    const QVector<Aowis::Map::MapProvider> &providers, const QString &id)
+{
+    for (const Aowis::Map::MapProvider &provider : providers)
+        if (provider.id == id)
+            return &provider;
+    return nullptr;
+}
+
 bool loadServerConfig(const QString &path, Server::Config *config, bool migrate,
                       QString *error)
 {
@@ -100,9 +109,16 @@ int main(int argc, char **argv)
                writeFile(without_upstream, no_upstream_ini), "Write administrator INI"))
         return 1;
 
-    QVector<Aowis::Map::MapProvider> legacy = Aowis::Map::defaultMapProviders();
+    // The legacy providers.ini fixture predates the Google Satellite preset.
+    // Using current defaults unchanged would include Google already and fail
+    // to exercise the real four-provider upgrade path.
+    const QVector<Aowis::Map::MapProvider> defaults = Aowis::Map::defaultMapProviders();
+    QVector<Aowis::Map::MapProvider> legacy = defaults;
+    legacy.removeFirst();
     legacy[0].name = QStringLiteral("Imported provider");
     legacy[0].allow_lossy_transfer = false;
+    const QString imported_id = legacy[0].id;
+    const QString google_id = defaults[0].id;
     QString error;
     if (!check(MapServerConfiguration::saveMapProvidersToState(legacy_path, legacy, &error),
                "Write old provider state", error)) return 1;
@@ -111,8 +127,12 @@ int main(int argc, char **argv)
     Server::Config config;
     if (!check(loadServerConfig(admin_path, &config, true, &error),
                "Import legacy providers", error)) return 1;
-    if (!check(config.map_providers[0].name == QStringLiteral("Imported provider") &&
-               !config.map_providers[0].allow_lossy_transfer &&
+    const Aowis::Map::MapProvider *imported = findProvider(config.map_providers, imported_id);
+    if (!check(config.map_providers.size() == 5 &&
+               config.map_providers[0].id == google_id &&
+               imported != nullptr &&
+               imported->name == QStringLiteral("Imported provider") &&
+               !imported->allow_lossy_transfer &&
                !config.provider_revision.isEmpty() &&
                !config.cascade.allow_direct_fetch &&
                config.cascade_defined_in_admin_ini &&
@@ -126,8 +146,14 @@ int main(int argc, char **argv)
     if (!check(store != nullptr, "Open MAP-owned CONFIG", error)) return 1;
     QVector<Aowis::Map::MapProvider> saved;
     QString first_revision;
-    if (!check(store->readProviders(&saved, &first_revision, &error) &&
-               first_revision == config.provider_revision && saved[0].name == legacy[0].name,
+    if (!check(store->readProviders(&saved, &first_revision, &error),
+               "Read imported catalog from CONFIG", error)) return 1;
+    const Aowis::Map::MapProvider *saved_imported = findProvider(saved, imported_id);
+    if (!check(first_revision == config.provider_revision &&
+               saved.size() == 5 && saved[0].id == google_id &&
+               saved_imported != nullptr &&
+               saved_imported->name == legacy[0].name &&
+               !saved_imported->allow_lossy_transfer,
                "Legacy catalog committed to CONFIG", error)) return 1;
     saved[0].name = QStringLiteral("Edited in CONFIG");
     QString new_revision;
@@ -177,9 +203,15 @@ int main(int argc, char **argv)
                MapServerConfiguration::saveMapProvidersToState(other_legacy, legacy, &error),
                "Setup validation-only migration", error)) return 1;
     Server::Config check_only;
-    if (!check(loadServerConfig(other_ini, &check_only, false, &error) &&
-               check_only.provider_revision.isEmpty() &&
-               check_only.map_providers[0].name == legacy[0].name,
+    if (!check(loadServerConfig(other_ini, &check_only, false, &error),
+               "Load configuration without migration write", error)) return 1;
+    const Aowis::Map::MapProvider *checked_imported =
+        findProvider(check_only.map_providers, imported_id);
+    if (!check(check_only.provider_revision.isEmpty() &&
+               check_only.map_providers.size() == 4 &&
+               findProvider(check_only.map_providers, google_id) == nullptr &&
+               checked_imported != nullptr && checked_imported->name == legacy[0].name &&
+               !checked_imported->allow_lossy_transfer,
                "Check configuration without migration write", error)) return 1;
     std::unique_ptr<Aowis::Map::SettingsRepository> other_store =
         Aowis::Map::SettingsRepository::openAtOwnerRoot(
@@ -245,9 +277,16 @@ int main(int argc, char **argv)
         return 1;
     QVector<Aowis::Map::MapProvider> persisted_catalog;
     if (!check(Aowis::Map::decodeProviderCatalog(catalog_reply->readAll(), {},
-                                                 &persisted_catalog, &error) &&
-               persisted_catalog.size() == http_edit.size() &&
-               persisted_catalog[1].url_template == http_edit[1].url_template &&
+                                                 &persisted_catalog, &error),
+               "Decode REST provider catalog", error)) return 1;
+    const QString cyclosm_id = defaults[3].id;
+    const Aowis::Map::MapProvider *persisted_cyclosm =
+        findProvider(persisted_catalog, cyclosm_id);
+    const Aowis::Map::MapProvider *edited_cyclosm = findProvider(http_edit, cyclosm_id);
+    if (!check(persisted_catalog.size() == http_edit.size() &&
+               persisted_cyclosm != nullptr && edited_cyclosm != nullptr &&
+               persisted_cyclosm->url_template.contains(QStringLiteral("{s}")) &&
+               persisted_cyclosm->url_template == edited_cyclosm->url_template &&
                persisted_catalog[0].name == http_edit[0].name,
                "REST round-trip preserved hostname templates", error)) return 1;
     catalog_reply->deleteLater();

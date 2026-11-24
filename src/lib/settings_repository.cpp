@@ -228,7 +228,8 @@ QJsonObject encodeProviderObject(const QVector<MapProvider> &providers)
     for (const MapProvider &provider : providers)
         entries.append(providerObject(provider));
     return QJsonObject{{QStringLiteral("version"), SettingsVersion},
-                       {QStringLiteral("providers"), entries}};
+                       {QStringLiteral("providers"), entries},
+                       {QStringLiteral("google_satellite_preset_migrated"), true}};
 }
 
 bool decodeProviderObject(const QJsonObject &stored, QVector<MapProvider> *providers,
@@ -525,7 +526,9 @@ std::unique_ptr<SettingsRepository> SettingsRepository::openStandaloneForCurrent
 {
     std::unique_ptr<SettingsRepository> repository =
         openForCurrentUser(QStringLiteral("standalone-map"), error);
-    if (repository && !repository->migrateLegacyStandaloneGuiPreferences(error))
+    if (repository &&
+        (!repository->migrateLegacyStandaloneGuiPreferences(error) ||
+         !repository->migrateGoogleSatellitePreset(error)))
         repository.reset();
     return repository;
 }
@@ -840,6 +843,30 @@ bool SettingsRepository::saveProviderAcquisitionModes(
                            QJsonObject{{QStringLiteral("version"), 1},
                                        {QStringLiteral("modes"), entries}},
                            expected_revision, revision, error);
+}
+
+bool SettingsRepository::migrateGoogleSatellitePreset(QString *error) const
+{
+    Record record;
+    if (!readCollection(this->implementation_->store, "providers", &record, error))
+        return false;
+    if (record.revision.isEmpty() ||
+        record.json.value(QStringLiteral("google_satellite_preset_migrated")).toBool())
+    {
+        if (error != nullptr) error->clear();
+        return true;
+    }
+    QVector<MapProvider> providers;
+    if (!decodeProviderObject(record.json, &providers, error))
+        return false;
+    if (!addGoogleSatelliteToLegacyPresets(&providers))
+    {
+        if (error != nullptr) error->clear();
+        return true;
+    }
+    // The revision check prevents overwriting a concurrent provider edit.
+    return writeCollection(this->implementation_->store, "providers",
+                           encodeProviderObject(providers), record.revision, nullptr, error);
 }
 
 bool SettingsRepository::readProviders(QVector<MapProvider> *value, QString *revision,

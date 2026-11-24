@@ -208,10 +208,23 @@ Raster provider identifiers are **stable UUIDs**, not display names. The default
 
 | Provider | UUID | Default zoom range |
 | --- | --- | --- |
+| Google Satellite | `c84ccc10-ff57-54d7-babf-e2e68a4dc7d2` | 0–21 |
 | OpenStreetMap | `0381bc44-67e9-5af9-aeb0-023ccba36658` | 0–19 |
-| CyclOSM | `49bda1b9-15aa-55e6-8933-2172c785e775` | 0–20 |
 | OpenTopoMap | `178a60e6-178a-507b-af86-f45427150986` | 0–17 |
+| CyclOSM | `49bda1b9-15aa-55e6-8933-2172c785e775` | 0–20 |
 | ArcGIS World Imagery | `a0d790c2-f231-55fd-b95e-23c9bd6cb3fc` | 0–17 |
+
+The Google Satellite preset uses an unofficial unauthenticated tile endpoint;
+Google does not grant unrestricted third-party access or offline caching merely
+because it answers requests. Deployments must assess provider terms and remove
+or disable any imagery source they are not entitled to use. The preset is
+editable and can be disabled without removing generic XYZ support.
+
+On startup, MAP adds Google Satellite once to persisted catalogs containing all
+four pre-Google presets. Existing provider settings and custom entries remain
+untouched. Catalogs intentionally missing a legacy preset are not modified;
+after removing Google through the GUI it stays removed. `--check-config` does
+not perform this migration.
 
 These conservative defaults are configurable, not guarantees of upstream imagery availability at every location or zoom. Providers enforce their configured range. A GUI may magnify a tile or use a per-user fallback; the server does **not** choose fallback imagery providers.
 

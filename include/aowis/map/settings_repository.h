@@ -37,6 +37,9 @@ public:
     SettingsRepository &operator=(const SettingsRepository &) = delete;
 
     bool migrateLegacyStandaloneGuiPreferences(QString *error = nullptr) const;
+    // Upgrade an already persisted four-preset catalog once, retaining edits.
+    // Explicitly invoked only at startup, not by readProviders/check-config.
+    bool migrateGoogleSatellitePreset(QString *error = nullptr) const;
 
     bool readCascade(MapCascadeConfig *value, QString *revision = nullptr,
                      QString *error = nullptr) const;

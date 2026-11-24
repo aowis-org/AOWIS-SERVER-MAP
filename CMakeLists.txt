@@ -31,6 +31,8 @@ option(
 find_package(Qt6 REQUIRED COMPONENTS Core Network Concurrent)
 find_package(TIFF REQUIRED)
 find_package(PNG REQUIRED)
+find_package(SQLite3 3.24 REQUIRED)
+find_package(Threads REQUIRED)
 find_path(AOWIS_TURBOJPEG_INCLUDE_DIR NAMES turbojpeg.h REQUIRED)
 find_library(AOWIS_TURBOJPEG_LIBRARY NAMES turbojpeg REQUIRED)
 # zstd: prefer its CMake package (installed by zstd's own CMake build, e.g.
@@ -51,6 +53,8 @@ endif()
 
 add_library(aowis-server-map-core STATIC
     src/lib/maptiles.cpp
+    src/lib/cache_storage.cpp
+    include/aowis/map/cache_storage.h
     src/lib/cascade_upstream_health.cpp
     include/aowis/map/cascade_upstream_health.h
     src/lib/download_coverage.cpp
@@ -99,6 +103,8 @@ target_link_libraries(aowis-server-map-core
         aowis::config
     PRIVATE
         TIFF::TIFF
+        SQLite::SQLite3
+        Threads::Threads
         ${AOWIS_ZSTD_TARGET}
         PNG::PNG
         "${AOWIS_TURBOJPEG_LIBRARY}"
@@ -122,6 +128,10 @@ target_link_libraries(aowis-server-map
 
 include(CTest)
 if(BUILD_TESTING)
+    add_executable(aowis-server-map-cache-storage-test
+        tests/test_cache_storage.cpp)
+    target_link_libraries(aowis-server-map-cache-storage-test PRIVATE AOWIS::Map)
+    add_test(NAME aowis-server-map-cache-storage COMMAND aowis-server-map-cache-storage-test)
     # Optional benchmark is available in test builds, not release packages.
     add_executable(aowis-server-map-transfer-benchmark
         tools/benchmark_cascade_transfer.cpp)
@@ -499,6 +509,7 @@ if(BUILD_TESTING)
         PROPERTIES LABELS "aowis")
     set(AOWIS_SERVER_MAP_TEST_TARGETS
         aowis-server-map-transfer-benchmark
+        aowis-server-map-cache-storage-test
         aowis-server-map-settings-repository-test
         aowis-server-map-legacy-standalone-migration-test
         aowis-server-map-provider-limits-test

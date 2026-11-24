@@ -120,10 +120,23 @@ int main(int argc, char **argv)
         read_loop.exec();
         require(first_result == old_bytes && second_result == old_bytes,
                 "Asynchronous cold disk read did not complete both requests");
+        require(async_reader.flushCacheAccessIndex(), "Cannot flush asynchronous raster access");
+        Aowis::Map::CacheAccessIndex index(std::filesystem::path(
+            QDir(cache.path()).filePath(QStringLiteral("maptiles")).toStdU16String()));
+        const std::string index_key = (provider_id + QStringLiteral("/6/31/20")).toUtf8().toStdString();
+        const std::optional<std::int64_t> cold_access = index.lastAccess(index_key);
+        require(cold_access.has_value(), "HTTP disk hit did not record cache access");
+        QThread::msleep(10);
         const MapTiles::TileRequestResult warm =
             async_reader.getTileForHttp(provider_id, 6, 31, 20, QStringLiteral("async-warm"));
         require(warm.status == MapTiles::TileRequestStatus::Ready && warm.data == old_bytes,
                 "Asynchronous disk completion did not warm the RAM cache");
+        require(async_reader.flushCacheAccessIndex(), "Cannot flush warm raster access");
+        require(index.lastAccess(index_key).value_or(0) > cold_access.value(),
+                "Warm HTTP RAM hit did not refresh cache access");
+        const Aowis::Map::CacheStorageStatistics storage = async_reader.cacheStorageStatistics();
+        require(storage.payload_files == 1 && storage.payload_bytes == std::uint64_t(old_bytes.size()) &&
+                storage.scan_errors == 0, "Raster storage statistics did not include legacy tile");
         require(async_reader.upstreamActivity().active == 0 &&
                 async_reader.upstreamActivity().queued == 0,
                 "Asynchronous disk hit unexpectedly contacted upstream");

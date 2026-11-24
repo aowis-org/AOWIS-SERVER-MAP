@@ -3,6 +3,7 @@
 
 #include <QObject>
 #include <aowis/map/map_provider.h>
+#include <aowis/map/cache_storage.h>
 #include <aowis/map/map_cascade_config.h>
 #include <aowis/map/cascade_upstream_health.h>
 #include <aowis/map/download_coverage.h>
@@ -97,6 +98,9 @@ public:
     // Reachability, cooldown and learned instance ID per upstream name.
     QHash<QString, Aowis::Map::CascadeUpstreamState> upstreamHealth() const;
     void cancelUpstreamDownloads();
+    // Disk scan: run off the event-loop thread. Permanent data is excluded.
+    Aowis::Map::CacheStorageStatistics cacheStorageStatistics() const;
+    bool flushCacheAccessIndex();
 
 private:
     friend class MapTilesCacheWriteTestAccess;
@@ -160,8 +164,12 @@ private:
     static bool saveMapTile(const QByteArray &data, const QString &tile_base_path);
 
     QString domainRandomizer(const QString &url) const;
+    void recordCacheUse(const QString &tile_base_path) const;
+    void recordMemoryCacheUse(const QString &provider, int z, int x, int y,
+                              const QString &canonical_key) const;
 
     QString fscache_base;
+    mutable Aowis::Map::CacheAccessIndex cache_access_index;
     QString permanent_data_directory;
     bool remote_fetch_enabled = true;
     Aowis::Map::MapCascadeConfig cascade_config;
