@@ -3,6 +3,7 @@
 #include "copernicus_resume_state.h"
 #include "copernicus_source_publish.h"
 #include "copernicus_decoded_block_cache.h"
+#include "terrain_geometric_error_accumulator.h"
 
 #include <QDir>
 #include <QElapsedTimer>
@@ -1516,6 +1517,97 @@ public:
         return true;
     }
 
+    // A second, block-wise pass after the normalized grid exists. Compare
+    // only native pixel centres inside the tile, not the averaging halo.
+    // Precompute fractional grid coordinates per source row/column to avoid
+    // Mercator transcendental functions in the per-pixel loop.
+    std::optional<TerrainGeometricError> measureGeometricError(
+        const TerrainTile &tile, double west, double south, double east, double north)
+    {
+        if (this->fatal_status.has_value())
+            return std::nullopt;
+        Detail::TerrainGeometricErrorAccumulator accumulator;
+        std::uint32_t missing_cells = 0;
+        const double tile_count = std::ldexp(1.0, tile.address.zoom);
+        const double grid_cells = double(TerrainTileCellCount);
+        const float *grid = tile.elevations_m.constData();
+        const int first_south = std::max(-90, int(std::ceil(south)) - 1);
+        const int last_south = std::min(89, int(std::ceil(north)) - 1);
+        const int first_west = int(std::floor(west));
+        const int last_west = int(std::floor(east));
+        for (int cell_south = first_south; cell_south <= last_south; ++cell_south)
+        {
+            for (int unwrapped_west = first_west; unwrapped_west <= last_west; ++unwrapped_west)
+            {
+                CopernicusSourceAddress address;
+                address.south_deg = cell_south;
+                address.west_deg = wrappedSourceWest(unwrapped_west);
+                CopernicusRaster *source_raster = raster(address);
+                if (this->fatal_status.has_value())
+                    return std::nullopt;
+                if (source_raster == nullptr)
+                {
+                    ++missing_cells;
+                    continue;
+                }
+                const int width = source_raster->pixelWidth();
+                const int height = source_raster->pixelHeight();
+                const double cell_west = double(unwrapped_west);
+                const double cell_north = double(cell_south + 1);
+                // Expand by one index for floating-point boundary rounding;
+                // then test the geographic centre itself before visiting.
+                const auto longitude = [&](int column) { return cell_west + double(column) / width; };
+                const auto latitude = [&](int row) { return cell_north - double(row) / height; };
+                int first_column = std::max(0, int(std::floor((west - cell_west) * width)));
+                int last_column = std::min(width - 1, int(std::ceil((east - cell_west) * width)));
+                int first_row = std::max(0, int(std::floor((cell_north - north) * height)));
+                int last_row = std::min(height - 1, int(std::ceil((cell_north - south) * height)));
+                while (first_column <= last_column && longitude(first_column) < west)
+                    ++first_column;
+                while (first_column <= last_column && longitude(last_column) > east)
+                    --last_column;
+                while (first_row <= last_row && latitude(first_row) > north)
+                    ++first_row;
+                while (first_row <= last_row && latitude(last_row) < south)
+                    --last_row;
+                if (first_column > last_column || first_row > last_row)
+                    continue;
+                std::vector<double> xs(std::size_t(last_column - first_column + 1));
+                std::vector<double> ys(std::size_t(last_row - first_row + 1));
+                for (int column = first_column; column <= last_column; ++column)
+                    xs[std::size_t(column - first_column)] = std::clamp(
+                        (longitude(column) - west) / (east - west) * grid_cells, 0.0, grid_cells);
+                for (int row = first_row; row <= last_row; ++row)
+                {
+                    const double radians = latitude(row) * std::numbers::pi / 180.0;
+                    const double y = (1.0 - std::asinh(std::tan(radians)) / std::numbers::pi) * 0.5;
+                    ys[std::size_t(row - first_row)] = std::clamp(
+                        (y * tile_count - double(tile.address.y)) * grid_cells, 0.0, grid_cells);
+                }
+                const CopernicusRaster::RowRunVisitor visitor =
+                    [&](int row, int column, const float *values, int count)
+                {
+                    const double y = ys[std::size_t(row - first_row)];
+                    for (int i = 0; i < count; ++i)
+                    {
+                        const double x = xs[std::size_t(column + i - first_column)];
+                        accumulator.observe(values[i], Detail::triangularGridElevation(
+                            grid, TerrainTileCellCount, x, y));
+                    }
+                };
+                QString read_error;
+                if (!source_raster->visitWindow(first_column, last_column, first_row, last_row,
+                                                visitor, &read_error))
+                    return std::nullopt;
+            }
+        }
+        auto result = accumulator.result();
+        result.missing_source_cells = missing_cells;
+        if (result.compared_pixel_count == 0)
+            return std::nullopt;
+        return result;
+    }
+
     // Optional statistics must not trigger additional upstream downloads.
     void disableRemoteFetch() { this->allow_remote_fetch = false; }
 
@@ -2065,6 +2157,15 @@ TerrainProviderFetchResult CopernicusTerrainProvider::fetchTile(
     }
     if (statistics_ready && source_statistics.valid_pixel_count != 0)
         result.source_statistics = source_statistics;
+
+    // Error metadata is optional, just like native extrema. Never fetch
+    // additional sources or invalidate an already successful tile for it.
+    double north = 0.0, west = 0.0, south = 0.0, east = 0.0;
+    coordinateForNormalizedGridSample(address, 0, 0, &north, &west);
+    coordinateForNormalizedGridSample(address, TerrainTileCellCount,
+                                      TerrainTileCellCount, &south, &east);
+    raster_set.disableRemoteFetch();
+    result.geometric_error = raster_set.measureGeometricError(tile, west, south, east, north);
     return result;
 }
 

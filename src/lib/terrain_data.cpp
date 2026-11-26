@@ -1563,6 +1563,7 @@ TerrainTileLookupResult TerrainData::fetchAndStoreNormalizedTile(
         result.data = encoded;
         result.origin = provider_result.origin;
         result.source_statistics = provider_result.source_statistics;
+        result.geometric_error = provider_result.geometric_error;
         return result;
     }
 

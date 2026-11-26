@@ -51,6 +51,8 @@ struct TerrainTileLookupResult
     // Available on fresh local normalization only; v1 cache/HTTP data does
     // not carry source statistics. Absence never means zero relief.
     std::optional<TerrainSourceStatistics> source_statistics;
+    // Fresh local normalization only; absent on v1 cache/HTTP hits.
+    std::optional<TerrainGeometricError> geometric_error;
 };
 
 QString terrainTileLookupStatusId(TerrainTileLookupStatus status);

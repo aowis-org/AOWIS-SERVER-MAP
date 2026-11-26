@@ -2,6 +2,7 @@
 #define AOWIS_MAP_TERRAIN_PROVIDER_H
 
 #include <aowis/map/terrain_dataset.h>
+#include <aowis/map/terrain_geometric_error.h>
 #include <aowis/map/terrain_tile.h>
 
 #include <QString>
@@ -54,6 +55,7 @@ struct TerrainProviderFetchResult
     TerrainDataOrigin origin = TerrainDataOrigin::Unknown;
     QString error_message;
     std::optional<TerrainSourceStatistics> source_statistics;
+    std::optional<TerrainGeometricError> geometric_error;
 };
 
 QString terrainProviderFetchStatusId(TerrainProviderFetchStatus status);

@@ -92,6 +92,8 @@ add_library(aowis-server-map-core STATIC
     include/aowis/map/terrain_elevation.h
     include/aowis/map/terrain_tile.h
     include/aowis/map/terrain_provider.h
+    include/aowis/map/terrain_geometric_error.h
+    src/lib/terrain_geometric_error_accumulator.h
     include/aowis/map/terrain_dataset.h
     include/aowis/map/terrain_data.h
 )
@@ -287,6 +289,15 @@ if(BUILD_TESTING)
         NAME aowis-server-map-terrain-area-average
         COMMAND aowis-server-map-terrain-area-average-test
     )
+
+    add_executable(aowis-server-map-terrain-geometric-error-test
+        tests/test_terrain_geometric_error.cpp
+    )
+    set_target_properties(aowis-server-map-terrain-geometric-error-test PROPERTIES AUTOMOC OFF)
+    target_include_directories(aowis-server-map-terrain-geometric-error-test PRIVATE include)
+    target_compile_features(aowis-server-map-terrain-geometric-error-test PRIVATE cxx_std_20)
+    add_test(NAME aowis-server-map-terrain-geometric-error
+             COMMAND aowis-server-map-terrain-geometric-error-test)
 
     add_executable(aowis-server-map-terrain-elevation-sampling-test
         tests/test_terrain_elevation_sampling.cpp
@@ -538,6 +549,7 @@ if(BUILD_TESTING)
         aowis-server-map-terrain-dataset-catalog-test
         aowis-server-map-terrain-cache-deletion-test
         aowis-server-map-terrain-area-average-test
+        aowis-server-map-terrain-geometric-error-test
     )
     if(AOWIS_SERVER_MAP_BUILD_SERVER)
         # Compiling only the unit tests misses API errors in server.cpp.

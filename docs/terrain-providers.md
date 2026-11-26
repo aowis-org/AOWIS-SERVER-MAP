@@ -142,3 +142,27 @@ Coverage rules govern **requested XYZ tiles that may trigger new downloads**. A 
 Copernicus values are EGM2008-referenced. AOWIS records source datum metadata in normalized tiles and point-elevation responses and does **not** silently perform EGM2008 ↔ EGM96 ↔ WGS84-ellipsoid transformations. A datum requiring a real conversion is rejected. See [Terrain and elevation contract](terrain-elevation-contract.md).
 
 Copernicus GLO-30 Public is distributed under the Copernicus DEM licence. Respect the provider's terms and preserve attribution/provenance for externally packaged datasets. The `.aowterrain` binary format intentionally excludes licensing text; attribution must be maintained by surrounding dataset, package or application metadata.
+
+## Local terrain approximation diagnostics
+
+Fresh Copernicus normalization returns optional native source statistics and
+`TerrainGeometricError` in the provider and tile lookup results. The error is
+measured by a second local, block-wise scan of native pixel **centres inside the
+XYZ tile**, excluding the averaging halo. It compares the source height with
+piecewise-linear interpolation of the unquantized 65 × 65 grid in Web Mercator
+coordinates, using the NE–SW diagonal of Render's globe surface index buffer.
+It records maximum positive and negative residual magnitudes, unweighted RMS
+and counts of compared centres, source no-data centres, centres without a
+finite triangle and unavailable candidate source cells. Missing data is not a
+zero-height sample. No compared centres or a scan failure produces absent
+error metadata, not zero error. The extra scan cannot download sources or
+invalidate a successfully normalized tile; it uses bounded raster block
+caching and per-axis coordinate arrays rather than a full native raster copy.
+It does add local CPU and possibly raster decode work for newly generated tiles.
+
+These values are observed vertical errors, not conservative continuous or
+ECEF bounds; they exclude quantization, ellipsoid curvature, polar edge
+flattening, vertical exaggeration, skirts, hole filling and ancestor fallback.
+The source extrema and error metadata are not persisted or sent over HTTP yet;
+existing v1 cache hits do not carry them. Tile bytes, cache revision, analysis
+sampling and rendering behavior are unchanged.
