@@ -7,7 +7,9 @@
 #include <aowis/map/terrain_provider.h>
 #include <aowis/map/terrain_tile.h>
 
+#include <QCoreApplication>
 #include <QDir>
+#include <QFile>
 #include <QFileInfo>
 #include <QTemporaryDir>
 
@@ -332,8 +334,9 @@ bool insideCell(const TerrainTileAddress &address, int south_deg, int west_deg)
 }
 }
 
-int main()
+int main(int argc, char **argv)
 {
+    QCoreApplication app(argc, argv);
     QTemporaryDir temporary_directory;
     if (!require(temporary_directory.isValid(), "temporary directory"))
         return 1;
@@ -499,6 +502,54 @@ int main()
                      .contains(QStringLiteral("/v2/r2/copernicus-glo30/10/")),
                  "normalized cache path lacks the normalization revision"))
         return 1;
+
+    // A normalized-format upgrade must not invalidate provider-native files.
+    // Exercise a cold v2 cache with remote acquisition enabled, but with a
+    // loopback-only source URL so a regression cannot contact Copernicus.
+    {
+        QTemporaryDir upgrade_directory;
+        TerrainData::Config upgrade_config = config;
+        upgrade_config.cache_directory = upgrade_directory.path();
+        upgrade_config.remote_fetch_enabled = true;
+        upgrade_config.integration_source_url = QUrl(QStringLiteral("http://127.0.0.1:1/source.tif"));
+        upgrade_config.connect_timeout_seconds = 1;
+        upgrade_config.inactivity_timeout_seconds = 1;
+        upgrade_config.download_deadline_seconds = 2;
+        TerrainData upgraded(upgrade_config);
+        if (!require(upgrade_directory.isValid() && upgraded.initialize(&error_message),
+                     "initialize cold v2 cache"))
+            return 1;
+        const QString original = sourcePath(terrain_data, 50, 8);
+        const QString retained = sourcePath(upgraded, 50, 8);
+        if (!require(QDir().mkpath(QFileInfo(retained).absolutePath()) &&
+                         QFile::copy(original, retained), "retain native source across upgrade"))
+            return 1;
+        const QString dataset = QStringLiteral("copernicus-glo30");
+        for (const TerrainTileAddress &address : {centre, native})
+        {
+            const QString path = upgraded.normalizedTilePath(dataset, address);
+            if (!require(!QFileInfo::exists(path) &&
+                             !upgraded.tileNeedsRemoteAcquisition(dataset, address),
+                         "cold v2 tile with cached native source must not need remote acquisition"))
+                return 1;
+            if (!require(upgraded.acquireTileSources(dataset, address).status ==
+                             TerrainProviderFetchStatus::Ready,
+                         "cached native source acquisition must succeed locally"))
+                return 1;
+            const auto rebuilt = upgraded.terrainTile(dataset, address);
+            if (!require(rebuilt.status == TerrainTileLookupStatus::Ready &&
+                             rebuilt.origin == TerrainDataOrigin::Cache &&
+                             rebuilt.source_statistics && rebuilt.geometric_error &&
+                             QFileInfo::exists(path),
+                         "v2 terrain and LOD metadata must rebuild from cached native data"))
+                return 1;
+        }
+        QFile before(original), after(retained);
+        if (!require(before.open(QIODevice::ReadOnly) && after.open(QIODevice::ReadOnly) &&
+                         before.readAll() == after.readAll(),
+                     "v2 rebuilding changed the retained provider-native file"))
+            return 1;
+    }
 
     std::cout << "area average: worst " << worst << " m, largest point-sample difference "
               << largest_point_difference << " m\n";

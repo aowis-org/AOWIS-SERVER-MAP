@@ -62,6 +62,15 @@ On a normalized tile request the server:
 
 Cross-process cache-file locks deduplicate source acquisition even when two server instances share a source cache. The server also single-flights identical in-process terrain HTTP requests. Different tiles and independent native source cells can proceed concurrently subject to admission and worker limits. A damaged normalized file is repaired from locally available native sources; when they are missing, the integrity/read error is reported rather than serving corrupt data. Deleting the damaged normalized tile (`DELETE /terrain/v1/cache/…`) makes the next request acquire its sources again.
 
+Normalized tile format or normalization revision changes must not change the native
+Copernicus cache namespace. Existing readable, nonempty native COGs are reused
+without contacting Copernicus, including when remote acquisition is enabled.
+Optional LOD metadata scans must not acquire additional source files. A cold
+normalized cache may require local regeneration or MAP-to-MAP transfer, not
+a second third-party download of a retained source. New geographic coverage
+can still require source files that were never cached.
+
+
 The samplers assume the GLO-30 grid: *RasterPixelIsPoint*, the centre of pixel (0, 0) on the cell's north-west corner, exactly `width × height` pixels per degree (columns narrow above ±50° latitude, rows are always 1″). A native file that carries GeoTIFF georeferencing (`ModelTiepointTag`, `ModelPixelScaleTag`, `GTRasterTypeGeoKey`) is checked against that grid when opened and rejected as a source read error if it disagrees, so a reprocessed upstream product fails loudly instead of shifting elevations. Files without georeferencing tags are accepted.
 
 ### How normalized samples are derived
