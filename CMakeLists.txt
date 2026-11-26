@@ -32,6 +32,15 @@ find_package(Qt6 REQUIRED COMPONENTS Core Network Concurrent)
 find_package(TIFF REQUIRED)
 find_package(PNG REQUIRED)
 find_package(SQLite3 3.24 REQUIRED)
+# Prefer the current imported target; older FindSQLite3 modules expose only
+# SQLite::SQLite3. Keep compatibility with our CMake 3.21 minimum.
+if(TARGET SQLite3::SQLite3)
+    set(AOWIS_MAP_SQLITE_TARGET SQLite3::SQLite3)
+elseif(TARGET SQLite::SQLite3)
+    set(AOWIS_MAP_SQLITE_TARGET SQLite::SQLite3)
+else()
+    message(FATAL_ERROR "FindSQLite3 did not provide a supported imported target")
+endif()
 find_package(Threads REQUIRED)
 find_path(AOWIS_TURBOJPEG_INCLUDE_DIR NAMES turbojpeg.h REQUIRED)
 find_library(AOWIS_TURBOJPEG_LIBRARY NAMES turbojpeg REQUIRED)
@@ -103,7 +112,7 @@ target_link_libraries(aowis-server-map-core
         aowis::config
     PRIVATE
         TIFF::TIFF
-        SQLite::SQLite3
+        ${AOWIS_MAP_SQLITE_TARGET}
         Threads::Threads
         ${AOWIS_ZSTD_TARGET}
         PNG::PNG
@@ -130,7 +139,7 @@ include(CTest)
 if(BUILD_TESTING)
     add_executable(aowis-server-map-cache-storage-test
         tests/test_cache_storage.cpp)
-    target_link_libraries(aowis-server-map-cache-storage-test PRIVATE AOWIS::Map SQLite::SQLite3)
+    target_link_libraries(aowis-server-map-cache-storage-test PRIVATE AOWIS::Map ${AOWIS_MAP_SQLITE_TARGET})
     add_test(NAME aowis-server-map-cache-storage COMMAND aowis-server-map-cache-storage-test)
     # Optional benchmark is available in test builds, not release packages.
     add_executable(aowis-server-map-transfer-benchmark
