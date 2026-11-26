@@ -1562,6 +1562,7 @@ TerrainTileLookupResult TerrainData::fetchAndStoreNormalizedTile(
         result.status = TerrainTileLookupStatus::Ready;
         result.data = encoded;
         result.origin = provider_result.origin;
+        result.source_statistics = provider_result.source_statistics;
         return result;
     }
 

@@ -79,6 +79,30 @@ Each source block is decoded once per tile however many boxes read it; a zoom-8 
 
 The normalization revision (`TerrainNormalizationRevision`, currently 2) is part of the cache path. Tiles cached by an earlier normalizer (`normalized/v1/<dataset>/…`, revision 1) are never read again; that directory can be deleted.
 
+### Source elevation statistics (LOD groundwork)
+
+Fresh local normalization also returns optional `TerrainSourceStatistics` in the
+C++ `TerrainProviderFetchResult` and `TerrainTileLookupResult`. This records
+minimum/maximum **native** valid elevation, valid and no-data pixel counts, and
+unavailable candidate source cell count. Each visited native pixel is counted
+once, not once per overlapping sample box. At zooms 8–13 the existing area
+average scan includes the half-sample halo; at zoom 14 a separate scan covers
+the tile footprint, reusing decoded blocks and without initiating new remote
+source downloads. Native zoom statistics are omitted if that optional scan fails.
+
+The observations are in the dataset's native vertical datum. They are not yet
+certified conservative culling bounds: missing sources/no-data, interpolation
+support and datum/mesh transformations must be accounted for before using them
+as bounds. A missing candidate count may include a cell with no actual overlap.
+An isolated peak can be represented by these statistics even when lost from the
+averaged 65 × 65 grid.
+
+This is intentionally a provider/normalization-stage change only. Neither the
+v1 binary format, normalization revision, cache layout, cascade protocol nor HTTP
+responses change. Existing and cascaded normalized tiles have no statistics;
+there is no fabricated fallback from their averaged samples. Persistence and
+wire delivery will be introduced explicitly with a compatible versioned contract.
+
 Original native COG files also serve **analysis grids** directly: output grid samples are selected from the containing source pixels, not bilinearly resampled from `.aowterrain`. This distinction matters for Hydrology and other numerical consumers. See the [elevation/analysis contract](terrain-elevation-contract.md) and [tile format](terrain-tile-format.md).
 
 ## Remote acquisition, slow networks and resumption

@@ -48,6 +48,9 @@ struct TerrainTileLookupResult
     QByteArray data;
     TerrainDataOrigin origin = TerrainDataOrigin::Unknown;
     QString error_message;
+    // Available on fresh local normalization only; v1 cache/HTTP data does
+    // not carry source statistics. Absence never means zero relief.
+    std::optional<TerrainSourceStatistics> source_statistics;
 };
 
 QString terrainTileLookupStatusId(TerrainTileLookupStatus status);

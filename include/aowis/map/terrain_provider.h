@@ -10,6 +10,7 @@
 #include <optional>
 #include <atomic>
 #include <memory>
+#include <cstdint>
 
 namespace Aowis::Map
 {
@@ -32,12 +33,27 @@ struct TerrainUpstreamActivity
     int queued = 0;
 };
 
+// Observed native raster values, before averaging or interpolation. The
+// scan covers the normalization window (including the half-sample halo at
+// area-averaged zooms). These are not yet certified culling/error bounds.
+struct TerrainSourceStatistics
+{
+    float minimum_elevation_m = 0.0f;
+    float maximum_elevation_m = 0.0f;
+    std::uint64_t valid_pixel_count = 0;
+    std::uint64_t no_data_pixel_count = 0;
+    // Candidate source cells unavailable during the scan; may include cells
+    // whose exact pixel footprints would not overlap the window.
+    std::uint32_t missing_source_cells = 0;
+};
+
 struct TerrainProviderFetchResult
 {
     TerrainProviderFetchStatus status = TerrainProviderFetchStatus::SourceUnavailable;
     std::optional<TerrainTile> tile;
     TerrainDataOrigin origin = TerrainDataOrigin::Unknown;
     QString error_message;
+    std::optional<TerrainSourceStatistics> source_statistics;
 };
 
 QString terrainProviderFetchStatusId(TerrainProviderFetchStatus status);

@@ -13,6 +13,8 @@
 
 #include <tiffio.h>
 
+#include <algorithm>
+#include <limits>
 #include <cmath>
 #include <functional>
 #include <iostream>
@@ -38,6 +40,17 @@ bool require(bool condition, const std::string &message)
 // these ridges at effectively random phases, an area average does not.
 double sourceElevation(int south_deg, int column, int row)
 {
+    // A separate source cell with a single sharp peak, a deep pit and no-data.
+    if (south_deg == 52)
+    {
+        if (column == 512 && row == 512)
+            return 4500.0;
+        if (column == 513 && row == 512)
+            return -200.0;
+        if (column == 512 && row == 513)
+            return std::numeric_limits<double>::quiet_NaN();
+        return 1000.0;
+    }
     return 1000.0 + double(south_deg) + 0.3 * row + 0.2 * column +
            150.0 * std::sin(column * 0.9) * std::cos(row * 0.7);
 }
@@ -159,7 +172,59 @@ double referenceBilinear(int south_deg, int west_deg, double latitude_deg, doubl
            fx * fy * sourceElevation(south_deg, column + 1, row + 1);
 }
 
-std::optional<TerrainTile> loadTile(TerrainData &terrain_data, const TerrainTileAddress &address)
+// Independent brute-force source pixel footprint scan, without using the
+// provider's overlap tables or its decoded heightfield.
+TerrainSourceStatistics referenceSourceStatistics(const TerrainTileAddress &address,
+                                                 int south_deg, int west_deg,
+                                                 double halo)
+{
+    const double west = longitudeAt(address, -halo);
+    const double east = longitudeAt(address, TerrainTileCellCount + halo);
+    const double north = latitudeAt(address, -halo);
+    const double south = latitudeAt(address, TerrainTileCellCount + halo);
+    TerrainSourceStatistics result;
+    for (int row = 0; row < SourcePixels; ++row)
+    {
+        const double top = south_deg + 1 - (row - 0.5) / SourcePixels;
+        const double bottom = south_deg + 1 - (row + 0.5) / SourcePixels;
+        if (std::min(top, north) <= std::max(bottom, south))
+            continue;
+        for (int column = 0; column < SourcePixels; ++column)
+        {
+            const double left = west_deg + (column - 0.5) / SourcePixels;
+            const double right = west_deg + (column + 0.5) / SourcePixels;
+            if (std::min(right, east) <= std::max(left, west))
+                continue;
+            const float value = float(sourceElevation(south_deg, column, row));
+            if (!std::isfinite(value))
+            {
+                ++result.no_data_pixel_count;
+                continue;
+            }
+            if (result.valid_pixel_count++ == 0)
+                result.minimum_elevation_m = result.maximum_elevation_m = value;
+            else
+            {
+                result.minimum_elevation_m = std::min(result.minimum_elevation_m, value);
+                result.maximum_elevation_m = std::max(result.maximum_elevation_m, value);
+            }
+        }
+    }
+    return result;
+}
+
+bool matchesSourceStatistics(const std::optional<TerrainSourceStatistics> &actual,
+                             const TerrainSourceStatistics &expected)
+{
+    return actual && actual->minimum_elevation_m == expected.minimum_elevation_m &&
+           actual->maximum_elevation_m == expected.maximum_elevation_m &&
+           actual->valid_pixel_count == expected.valid_pixel_count &&
+           actual->no_data_pixel_count == expected.no_data_pixel_count &&
+           actual->missing_source_cells == expected.missing_source_cells;
+}
+
+std::optional<TerrainTile> loadTile(TerrainData &terrain_data, const TerrainTileAddress &address,
+                                    std::optional<TerrainSourceStatistics> *statistics = nullptr)
 {
     const TerrainTileLookupResult result =
         terrain_data.terrainTile(QStringLiteral("copernicus-glo30"), address);
@@ -169,6 +234,8 @@ std::optional<TerrainTile> loadTile(TerrainData &terrain_data, const TerrainTile
                   << " not ready: " << result.error_message.toStdString() << '\n';
         return std::nullopt;
     }
+    if (statistics != nullptr)
+        *statistics = result.source_statistics;
     return decodeTerrainTile(result.data);
 }
 
@@ -196,7 +263,8 @@ int main()
     QString error_message;
     if (!require(terrain_data.initialize(&error_message), "terrain initialization") ||
         !require(writeSource(sourcePath(terrain_data, 50, 8), 50), "synthetic N50 source") ||
-        !require(writeSource(sourcePath(terrain_data, 70, 8), 70), "synthetic N70 source"))
+        !require(writeSource(sourcePath(terrain_data, 70, 8), 70), "synthetic N70 source") ||
+        !require(writeSource(sourcePath(terrain_data, 52, 8), 52), "synthetic N52 source"))
         return 1;
 
     // Zoom 10 at 50.5 N: boxes are ~5.6 x 3.6 source pixels.
@@ -206,9 +274,21 @@ int main()
     if (!require(insideCell(centre, 50, 8) && insideCell(east_neighbour, 50, 8),
                  "test tiles must lie inside the synthetic cell"))
         return 1;
-    const std::optional<TerrainTile> tile = loadTile(terrain_data, centre);
+    std::optional<TerrainSourceStatistics> centre_statistics;
+    const std::optional<TerrainTile> tile = loadTile(terrain_data, centre, &centre_statistics);
     const std::optional<TerrainTile> neighbour = loadTile(terrain_data, east_neighbour);
     if (!require(tile.has_value() && neighbour.has_value(), "zoom 10 tiles decode"))
+        return 1;
+
+    if (!require(matchesSourceStatistics(centre_statistics,
+                     referenceSourceStatistics(centre, 50, 8, 0.5)),
+                 "coarse source statistics differ from independent native scan"))
+        return 1;
+    const TerrainTileLookupResult cached = terrain_data.terrainTile(
+        QStringLiteral("copernicus-glo30"), centre);
+    if (!require(cached.status == TerrainTileLookupStatus::Ready &&
+                     !cached.source_statistics.has_value() && decodeTerrainTile(cached.data),
+                 "v1 cache hit must remain readable and must not invent source statistics"))
         return 1;
 
     // Quantization: 16-bit codes over the tile's elevation range (< 0.01 m).
@@ -245,8 +325,13 @@ int main()
 
     // Zoom 14 (native) keeps bilinear point samples.
     const TerrainTileAddress native = addressFor(50.5, 8.5, 14);
-    const std::optional<TerrainTile> native_tile = loadTile(terrain_data, native);
+    std::optional<TerrainSourceStatistics> native_statistics;
+    const std::optional<TerrainTile> native_tile = loadTile(terrain_data, native, &native_statistics);
     if (!require(native_tile.has_value(), "zoom 14 tile decodes"))
+        return 1;
+    if (!require(matchesSourceStatistics(native_statistics,
+                     referenceSourceStatistics(native, 50, 8, 0.0)),
+                 "native zoom source statistics differ from independent scan"))
         return 1;
     for (int index : {0, 32 * TerrainTileGridSize + 32, TerrainTileSampleCount - 1})
     {
@@ -262,8 +347,13 @@ int main()
     // Zoom 13 at 70.5 N: boxes (0.00069 x 0.00023 deg) are smaller than a
     // source pixel (1/1024 deg), so samples fall back to bilinear points.
     const TerrainTileAddress polar = addressFor(70.5, 8.5, 13);
-    const std::optional<TerrainTile> polar_tile = loadTile(terrain_data, polar);
+    std::optional<TerrainSourceStatistics> polar_statistics;
+    const std::optional<TerrainTile> polar_tile = loadTile(terrain_data, polar, &polar_statistics);
     if (!require(insideCell(polar, 70, 8) && polar_tile.has_value(), "zoom 13 polar tile decodes"))
+        return 1;
+    if (!require(matchesSourceStatistics(polar_statistics,
+                     referenceSourceStatistics(polar, 70, 8, 0.5)),
+                 "sub-pixel box source statistics differ from independent scan"))
         return 1;
     for (int index : {0, 20 * TerrainTileGridSize + 41, TerrainTileSampleCount - 1})
     {
@@ -275,6 +365,32 @@ int main()
                      "sub-pixel boxes did not fall back to bilinear samples"))
             return 1;
     }
+
+    // The isolated peak and pit must survive in the statistics, not in the
+    // averaged render grid. Missing pixels are counted separately.
+    const TerrainTileAddress peak = addressFor(52.5, 8.5, 10);
+    std::optional<TerrainSourceStatistics> peak_statistics;
+    const auto peak_tile = loadTile(terrain_data, peak, &peak_statistics);
+    if (!require(insideCell(peak, 52, 8) && peak_tile &&
+                     matchesSourceStatistics(peak_statistics,
+                         referenceSourceStatistics(peak, 52, 8, 0.5)) &&
+                     peak_statistics->minimum_elevation_m == -200.0f &&
+                     peak_statistics->maximum_elevation_m == 4500.0f &&
+                     peak_statistics->no_data_pixel_count == 1 &&
+                     *std::max_element(peak_tile->elevations_m.begin(),
+                                       peak_tile->elevations_m.end()) < 4500.0f,
+                 "source peak, pit or no-data was lost in the statistics"))
+        return 1;
+
+    // A tile straddling the eastern boundary can still normalize its available
+    // source. The absent neighbouring source must not go unreported.
+    const TerrainTileAddress partial = addressFor(50.5, 8.99, 10);
+    std::optional<TerrainSourceStatistics> partial_statistics;
+    if (!require(loadTile(terrain_data, partial, &partial_statistics).has_value() &&
+                     partial_statistics && partial_statistics->valid_pixel_count > 0 &&
+                     partial_statistics->missing_source_cells > 0,
+                 "missing source cell was not reported"))
+        return 1;
 
     // Tiles of this normalizer live in their own cache namespace.
     if (!require(terrain_data.normalizedTilePath(QStringLiteral("copernicus-glo30"), centre)

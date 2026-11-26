@@ -1335,10 +1335,12 @@ public:
     // is read once, block by block. False only on a fatal source failure.
     bool accumulateAreaAverages(const std::vector<double> &longitude_edges,
                                 const std::vector<double> &latitude_edges,
-                                std::vector<double> *sums, std::vector<double> *weights)
+                                std::vector<double> *sums, std::vector<double> *weights,
+                                TerrainSourceStatistics *statistics)
     {
         const int columns = int(longitude_edges.size()) - 1;
         const int rows = int(latitude_edges.size()) - 1;
+        *statistics = TerrainSourceStatistics{};
         sums->assign(std::size_t(rows) * std::size_t(columns), 0.0);
         weights->assign(std::size_t(rows) * std::size_t(columns), 0.0);
         const double west = longitude_edges.front();
@@ -1379,7 +1381,10 @@ public:
                 if (this->fatal_status.has_value())
                     return false;
                 if (source_raster == nullptr)
+                {
+                    ++statistics->missing_source_cells;
                     continue;
+                }
                 const int pixel_columns = source_raster->pixelWidth();
                 const int pixel_rows = source_raster->pixelHeight();
                 const double cell_west = double(unwrapped_west);
@@ -1453,7 +1458,22 @@ public:
                     {
                         const float value = values[index];
                         if (std::isnan(value))
+                        {
+                            ++statistics->no_data_pixel_count;
                             continue;
+                        }
+                        if (statistics->valid_pixel_count++ == 0)
+                        {
+                            statistics->minimum_elevation_m = value;
+                            statistics->maximum_elevation_m = value;
+                        }
+                        else
+                        {
+                            statistics->minimum_elevation_m =
+                                std::min(statistics->minimum_elevation_m, value);
+                            statistics->maximum_elevation_m =
+                                std::max(statistics->maximum_elevation_m, value);
+                        }
                         const std::size_t local = std::size_t(column + index - column_first);
                         for (int entry = column_begin[local]; entry < column_begin[local + 1]; ++entry)
                         {
@@ -1495,6 +1515,9 @@ public:
         }
         return true;
     }
+
+    // Optional statistics must not trigger additional upstream downloads.
+    void disableRemoteFetch() { this->allow_remote_fetch = false; }
 
     std::optional<TerrainProviderFetchStatus> fatalStatus() const
     {
@@ -1933,11 +1956,12 @@ TerrainProviderFetchResult CopernicusTerrainProvider::fetchTile(
     std::vector<double> latitude_edges;
     std::vector<double> box_sums;
     std::vector<double> box_weights;
+    TerrainSourceStatistics source_statistics;
     if (area_average)
     {
         normalizedTileSampleEdges(address, &longitude_edges, &latitude_edges);
         if (!raster_set.accumulateAreaAverages(longitude_edges, latitude_edges,
-                                               &box_sums, &box_weights))
+                                               &box_sums, &box_weights, &source_statistics))
         {
             result.status = raster_set.fatalStatus().value_or(
                 TerrainProviderFetchStatus::SourceReadError);
@@ -2023,6 +2047,24 @@ TerrainProviderFetchResult CopernicusTerrainProvider::fetchTile(
     result.origin = raster_set.downloadedAnySource()
         ? TerrainDataOrigin::Remote
         : TerrainDataOrigin::Cache;
+
+    // At native zoom the normalized samples are bilinear. Scan the tile's
+    // geographic footprint separately for native extrema, reusing decoded
+    // blocks. This optional diagnostic must not change the successful tile
+    // result or cause new upstream downloads if the extra scan fails.
+    bool statistics_ready = area_average;
+    if (!area_average)
+    {
+        double north = 0.0, west = 0.0, south = 0.0, east = 0.0;
+        coordinateForNormalizedGridSample(address, 0, 0, &north, &west);
+        coordinateForNormalizedGridSample(address, TerrainTileCellCount,
+                                          TerrainTileCellCount, &south, &east);
+        raster_set.disableRemoteFetch();
+        statistics_ready = raster_set.accumulateAreaAverages(
+            {west, east}, {north, south}, &box_sums, &box_weights, &source_statistics);
+    }
+    if (statistics_ready && source_statistics.valid_pixel_count != 0)
+        result.source_statistics = source_statistics;
     return result;
 }
 
