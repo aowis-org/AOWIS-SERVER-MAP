@@ -82,7 +82,7 @@ All endpoints are relative to the configured host and port. Raster provider IDs 
 | `PUT /map/v1/providers/acquisition` | Select Automatic, Cascade or Direct for a raster provider (unauthenticated) |
 | `GET /<provider-uuid>/<z>/<x>/<y>.png` | Raster map tile |
 | `GET /terrain/v1/datasets` | Terrain dataset catalog |
-| `GET /terrain/v1/<dataset>/<z>/<x>/<y>.aowterrain` | Normalized terrain tile |
+| `GET /terrain/v2/<dataset>/<z>/<x>/<y>.aowterrain` | Normalized terrain tile |
 | `GET /terrain/v1/elevation?latitude=…&longitude=…` | Point elevation; optional `vertical_datum` |
 | `GET /terrain/v1/analysis/grid?dataset=…&west=…&south=…&east=…&north=…&columns=…&rows=…` | Float32 DEM window |
 | `GET /upstream/v1/activity` | Raster and terrain upstream activity |

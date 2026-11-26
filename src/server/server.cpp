@@ -1937,7 +1937,7 @@ void Server::setupRoutes()
         return makeOptionsResponse();
     });
 
-    this->http.route("/terrain/v1/<arg>/<arg>/<arg>/<arg>.aowterrain",
+    this->http.route("/terrain/v2/<arg>/<arg>/<arg>/<arg>.aowterrain",
                      QHttpServerRequest::Method::Get,
                      [this](const QString &dataset, int zoom, int tile_x, int tile_y,
                             const QHttpServerRequest &request) -> QFuture<QHttpServerResponse>
@@ -1968,7 +1968,7 @@ void Server::setupRoutes()
         return submitTerrainTile(dataset, zoom, tile_x, tile_y, &request);
     });
 
-    this->http.route("/terrain/v1/<arg>/<arg>/<arg>/<arg>.aowterrain",
+    this->http.route("/terrain/v2/<arg>/<arg>/<arg>/<arg>.aowterrain",
                      QHttpServerRequest::Method::Options,
                      [](const QString &, int, int, int)
     {

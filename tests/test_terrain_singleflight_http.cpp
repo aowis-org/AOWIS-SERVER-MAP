@@ -207,7 +207,7 @@ int main(int argc, char **argv)
     constexpr int request_count = 6;
     QNetworkAccessManager network;
     QList<QNetworkReply *> replies;
-    const QUrl url(QStringLiteral("http://127.0.0.1:%1/terrain/v1/copernicus-glo30/5/11/12.aowterrain")
+    const QUrl url(QStringLiteral("http://127.0.0.1:%1/terrain/v2/copernicus-glo30/5/11/12.aowterrain")
                        .arg(TerrainSingleFlightTestAccess::port(server)));
     for (int index = 0; index < request_count; ++index)
         replies.append(network.get(QNetworkRequest(url)));
@@ -235,7 +235,7 @@ int main(int argc, char **argv)
     QNetworkAccessManager overload_network;
     QNetworkReply *excess_waiter = overload_network.get(QNetworkRequest(url));
     const QUrl other_url(QStringLiteral(
-        "http://127.0.0.1:%1/terrain/v1/copernicus-glo30/5/11/13.aowterrain")
+        "http://127.0.0.1:%1/terrain/v2/copernicus-glo30/5/11/13.aowterrain")
         .arg(TerrainSingleFlightTestAccess::port(server)));
     QNetworkReply *excess_job = overload_network.get(QNetworkRequest(other_url));
     timer.restart();
@@ -436,7 +436,7 @@ int main(int argc, char **argv)
         if (!orphan_server.start())
             return 1;
         const QUrl orphan_url(QStringLiteral(
-            "http://127.0.0.1:%1/terrain/v1/copernicus-glo30/5/11/12.aowterrain")
+            "http://127.0.0.1:%1/terrain/v2/copernicus-glo30/5/11/12.aowterrain")
             .arg(TerrainSingleFlightTestAccess::port(orphan_server)));
         // Reuse the same server and flight key to expose stale callback and
         // admission-accounting errors across repeated disconnect/rejoin waves.
@@ -459,7 +459,7 @@ int main(int argc, char **argv)
             if (connected)
             {
                 abandoned_socket.write(
-                    "GET /terrain/v1/copernicus-glo30/5/11/12.aowterrain HTTP/1.1\r\n"
+                    "GET /terrain/v2/copernicus-glo30/5/11/12.aowterrain HTTP/1.1\r\n"
                     "Host: 127.0.0.1\r\n\r\n");
                 abandoned_socket.flush();
             }
@@ -639,13 +639,13 @@ int main(int argc, char **argv)
                                  TerrainSingleFlightTestAccess::port(live_server));
             if (first.waitForConnected(3000))
             {
-                first.write("GET /terrain/v1/copernicus-glo30/8/101/100.aowterrain HTTP/1.1\r\n"
+                first.write("GET /terrain/v2/copernicus-glo30/8/101/100.aowterrain HTTP/1.1\r\n"
                             "Host: 127.0.0.1\r\n\r\n");
                 first.flush();
             }
             if (second.waitForConnected(3000))
             {
-                second.write("GET /terrain/v1/copernicus-glo30/8/160/100.aowterrain HTTP/1.1\r\n"
+                second.write("GET /terrain/v2/copernicus-glo30/8/160/100.aowterrain HTTP/1.1\r\n"
                              "Host: 127.0.0.1\r\n\r\n");
                 second.flush();
             }
@@ -971,7 +971,7 @@ int main(int argc, char **argv)
 
         QNetworkAccessManager remote_probe_network;
         const QUrl remote_url(QStringLiteral(
-            "http://127.0.0.1:%1/terrain/v1/copernicus-glo30/5/11/13.aowterrain")
+            "http://127.0.0.1:%1/terrain/v2/copernicus-glo30/5/11/13.aowterrain")
             .arg(TerrainSingleFlightTestAccess::port(isolated_server)));
         QNetworkReply *remote_reply =
             remote_probe_network.get(QNetworkRequest(remote_url));
@@ -987,7 +987,7 @@ int main(int argc, char **argv)
 
         QNetworkAccessManager isolation_network;
         const QUrl cached_url(QStringLiteral(
-            "http://127.0.0.1:%1/terrain/v1/copernicus-glo30/5/11/12.aowterrain")
+            "http://127.0.0.1:%1/terrain/v2/copernicus-glo30/5/11/12.aowterrain")
             .arg(TerrainSingleFlightTestAccess::port(isolated_server)));
         QNetworkReply *cached_reply = isolation_network.get(QNetworkRequest(cached_url));
         timer.restart();
@@ -1075,7 +1075,7 @@ int main(int argc, char **argv)
             .arg(TerrainSingleFlightTestAccess::port(mixed_server));
         QNetworkAccessManager mixed_network;
         QNetworkReply *miss_reply = mixed_network.get(QNetworkRequest(QUrl(
-            mixed_base + QStringLiteral("/terrain/v1/copernicus-glo30/5/11/13.aowterrain"))));
+            mixed_base + QStringLiteral("/terrain/v2/copernicus-glo30/5/11/13.aowterrain"))));
         QNetworkReply *elevation_reply = mixed_network.get(QNetworkRequest(QUrl(
             mixed_base + QStringLiteral("/terrain/v1/elevation?latitude=49&longitude=8"))));
         QNetworkReply *grid_reply = mixed_network.get(QNetworkRequest(QUrl(
@@ -1086,7 +1086,7 @@ int main(int argc, char **argv)
         // not consume additional worker admission or create duplicate jobs.
         QNetworkAccessManager duplicate_network;
         QNetworkReply *duplicate_miss = duplicate_network.get(QNetworkRequest(QUrl(
-            mixed_base + QStringLiteral("/terrain/v1/copernicus-glo30/5/11/13.aowterrain"))));
+            mixed_base + QStringLiteral("/terrain/v2/copernicus-glo30/5/11/13.aowterrain"))));
         QNetworkReply *duplicate_elevation = duplicate_network.get(QNetworkRequest(QUrl(
             mixed_base + QStringLiteral("/terrain/v1/elevation?latitude=49&longitude=8"))));
         QNetworkReply *duplicate_grid = duplicate_network.get(QNetworkRequest(QUrl(
@@ -1115,7 +1115,7 @@ int main(int argc, char **argv)
         // limits from masking server responsiveness under three pending requests.
         QNetworkAccessManager cached_network;
         QNetworkReply *cached_reply = cached_network.get(QNetworkRequest(QUrl(
-            mixed_base + QStringLiteral("/terrain/v1/copernicus-glo30/5/11/12.aowterrain"))));
+            mixed_base + QStringLiteral("/terrain/v2/copernicus-glo30/5/11/12.aowterrain"))));
         timer.restart();
         while (!cached_reply->isFinished() && timer.elapsed() < 3000)
         {
@@ -1213,7 +1213,7 @@ int main(int argc, char **argv)
         }
         QNetworkAccessManager handoff_network;
         const QUrl handoff_url(QStringLiteral(
-            "http://127.0.0.1:%1/terrain/v1/copernicus-glo30/5/11/12.aowterrain")
+            "http://127.0.0.1:%1/terrain/v2/copernicus-glo30/5/11/12.aowterrain")
             .arg(TerrainSingleFlightTestAccess::port(handoff_server)));
         QNetworkReply *handoff_reply = handoff_network.get(QNetworkRequest(handoff_url));
         timer.restart();
@@ -1658,7 +1658,7 @@ int main(int argc, char **argv)
         }
         QNetworkAccessManager cached_network;
         QNetworkReply *cached_reply = cached_network.get(QNetworkRequest(QUrl(
-            QStringLiteral("http://127.0.0.1:%1/terrain/v1/copernicus-glo30/8/100/100.aowterrain")
+            QStringLiteral("http://127.0.0.1:%1/terrain/v2/copernicus-glo30/8/100/100.aowterrain")
                 .arg(TerrainSingleFlightTestAccess::port(*live_server)))));
         waiting.restart();
         while (!cached_reply->isFinished() && waiting.elapsed() < 3000)

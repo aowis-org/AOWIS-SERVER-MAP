@@ -16,7 +16,7 @@ constexpr int FixedHeaderBytes = 64;
 constexpr quint32 SupportedFlags = 0;
 constexpr quint8 WebMercatorXyzProjection = 1;
 constexpr quint8 UInt16LinearEncoding = 1;
-constexpr int PayloadBytes = TerrainTileSampleCount * int(sizeof(quint16));
+constexpr int PayloadBytes = TerrainTileMetadataBytes + TerrainTileSampleCount * int(sizeof(quint16));
 constexpr char TerrainTileMagic[8] = {'A', 'O', 'W', 'T', 'R', 'N', '\0', '\0'};
 
 void setError(QString *error_message, const QString &message)
@@ -269,8 +269,15 @@ QByteArray encodeTerrainTile(const TerrainTile &tile, QString *error_message)
         return QByteArray();
     }
 
+    const auto metadata = TerrainWire::encodeMetadata(tile.source_statistics, tile.geometric_error);
+    if (!metadata)
+    {
+        setError(error_message, QStringLiteral("Invalid terrain LOD metadata"));
+        return QByteArray();
+    }
     QByteArray payload;
     payload.reserve(PayloadBytes);
+    payload.append(reinterpret_cast<const char *>(metadata->data()), TerrainTileMetadataBytes);
     for (float elevation_m : tile.elevations_m)
     {
         quint16 code = TerrainTileNoDataCode;
@@ -445,11 +452,19 @@ std::optional<TerrainTile> decodeTerrainTile(const QByteArray &data, QString *er
         return std::nullopt;
     }
 
+    if (!Aowis::TerrainWire::decodeMetadata(
+            reinterpret_cast<const unsigned char *>(payload.constData()),
+            std::size_t(payload.size()), tile.source_statistics, tile.geometric_error))
+    {
+        setError(error_message, QStringLiteral("Invalid terrain LOD metadata"));
+        return std::nullopt;
+    }
+
     tile.elevations_m.resize(TerrainTileSampleCount);
     bool has_finite_sample = false;
     for (int index = 0; index < TerrainTileSampleCount; ++index)
     {
-        const quint16 code = readUInt16(payload, qsizetype(index) * qsizetype(sizeof(quint16)));
+        const quint16 code = readUInt16(payload, TerrainTileMetadataBytes + qsizetype(index) * qsizetype(sizeof(quint16)));
         if (code == TerrainTileNoDataCode)
         {
             tile.elevations_m[index] = std::numeric_limits<float>::quiet_NaN();
@@ -457,6 +472,11 @@ std::optional<TerrainTile> decodeTerrainTile(const QByteArray &data, QString *er
         }
 
         tile.elevations_m[index] = minimum_elevation_m + float(code) * elevation_scale_m;
+        if (!finiteFloat(tile.elevations_m[index]))
+        {
+            setError(error_message, QStringLiteral("Terrain tile elevation overflow"));
+            return std::nullopt;
+        }
         has_finite_sample = true;
     }
 

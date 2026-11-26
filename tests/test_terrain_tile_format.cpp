@@ -42,6 +42,8 @@ int main()
     }
     tile.elevations_m[123] = std::numeric_limits<float>::quiet_NaN();
 
+    tile.source_statistics = TerrainSourceStatistics{-200.0f, 4500.0f, 12345678901ULL, 3, 2};
+    tile.geometric_error = TerrainGeometricError{1234.125, 250.25, 16.5, 9876543210ULL, 4, 5, 6};
     QString error_message;
     const QByteArray encoded = encodeTerrainTile(tile, &error_message);
     if (!require(!encoded.isEmpty(), "Failed to encode terrain tile"))
@@ -56,6 +58,34 @@ int main()
         return 1;
 
     const TerrainTile &round_trip = decoded.value();
+    if (!require(round_trip.source_statistics && round_trip.geometric_error &&
+                 round_trip.source_statistics->minimum_elevation_m == -200.0f &&
+                 round_trip.source_statistics->maximum_elevation_m == 4500.0f &&
+                 round_trip.source_statistics->valid_pixel_count == 12345678901ULL &&
+                 round_trip.source_statistics->no_data_pixel_count == 3 &&
+                 round_trip.source_statistics->missing_source_cells == 2 &&
+                 round_trip.geometric_error->maximum_underestimation_m == 1234.125 &&
+                 round_trip.geometric_error->maximum_overestimation_m == 250.25 &&
+                 round_trip.geometric_error->rms_geometric_error_m == 16.5 &&
+                 round_trip.geometric_error->compared_pixel_count == 9876543210ULL &&
+                 round_trip.geometric_error->no_data_pixel_count == 4 &&
+                 round_trip.geometric_error->missing_surface_pixel_count == 5 &&
+                 round_trip.geometric_error->missing_source_cells == 6,
+                 "LOD metadata round trip failed")) return 1;
+    TerrainTile absent = tile;
+    absent.source_statistics.reset(); absent.geometric_error.reset();
+    const auto absent_round_trip = decodeTerrainTile(encodeTerrainTile(absent));
+    if (!require(absent_round_trip && !absent_round_trip->source_statistics &&
+                 !absent_round_trip->geometric_error, "Absent LOD metadata became present")) return 1;
+    TerrainTile invalid = tile;
+    invalid.geometric_error->maximum_underestimation_m = -1;
+    if (!require(encodeTerrainTile(invalid).isEmpty(), "Negative error was encoded")) return 1;
+    QByteArray old_version = encoded;
+    old_version[8] = char(1);
+    if (!require(!decodeTerrainTile(old_version), "v1 format was accepted")) return 1;
+    QByteArray damaged_metadata = encoded;
+    damaged_metadata[64 + tile.dataset.toUtf8().size() + 4] = char(1);
+    if (!require(!decodeTerrainTile(damaged_metadata), "Damaged metadata passed CRC")) return 1;
     if (!require(round_trip.address.zoom == tile.address.zoom &&
                      round_trip.address.x == tile.address.x &&
                      round_trip.address.y == tile.address.y,
@@ -98,7 +128,7 @@ int main()
         }
     }
 
-    const QString expected_path = QStringLiteral("v1/r2/test-dem/3/4/2.aowterrain");
+    const QString expected_path = QStringLiteral("v2/r2/test-dem/3/4/2.aowterrain");
     if (!require(normalizedTerrainTileRelativePath(tile.dataset, tile.address) == expected_path,
                  "Normalized terrain tile path is not canonical"))
     {

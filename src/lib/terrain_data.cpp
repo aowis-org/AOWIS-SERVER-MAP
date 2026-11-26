@@ -863,7 +863,7 @@ TerrainProviderFetchResult TerrainData::fetchNormalizedFromUpstreams(
     // An upstream whose instance already handled this request is waiting
     // for us: asking it could only end in its loop refusal or a timeout.
     const QList<QByteArray> trace_ids = cascadeTraceIds(cascade_trace);
-    const QString relative_path = QStringLiteral("/terrain/v1/%1/%2/%3/%4.aowterrain")
+    const QString relative_path = QStringLiteral("/terrain/v2/%1/%2/%3/%4.aowterrain")
         .arg(dataset).arg(address.zoom).arg(address.x).arg(address.y);
     const std::function<bool()> canceled = [this, generation, &cancel_requested]() -> bool
     {
@@ -1383,8 +1383,7 @@ TerrainTileLookupResult TerrainData::readNormalizedTile(
     // Normalized tiles have a fixed 65x65 uint16 payload and at most a
     // 128-byte dataset identifier. Never read an arbitrarily large cache file.
     constexpr qint64 maximum_normalized_tile_bytes =
-        64 + TerrainTileMaximumDatasetIdBytes +
-        TerrainTileSampleCount * qint64(sizeof(quint16));
+        MaximumCanonicalTerrainTileBytes;
     if (file.size() > maximum_normalized_tile_bytes)
     {
         result.status = TerrainTileLookupStatus::CorruptTile;
@@ -1425,6 +1424,8 @@ TerrainTileLookupResult TerrainData::readNormalizedTile(
     result.status = TerrainTileLookupStatus::Ready;
     result.data = data;
     result.origin = TerrainDataOrigin::Cache;
+    result.source_statistics = tile->source_statistics;
+    result.geometric_error = tile->geometric_error;
     return result;
 }
 
@@ -1507,7 +1508,10 @@ TerrainTileLookupResult TerrainData::fetchAndStoreNormalizedTile(
         }
 
         QString encode_error;
-        const QByteArray encoded = encodeTerrainTile(provider_result.tile.value(), &encode_error);
+        TerrainTile tile = provider_result.tile.value();
+        tile.source_statistics = provider_result.source_statistics;
+        tile.geometric_error = provider_result.geometric_error;
+        const QByteArray encoded = encodeTerrainTile(tile, &encode_error);
         if (encoded.isEmpty())
         {
             result.status = TerrainTileLookupStatus::ProviderError;

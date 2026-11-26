@@ -30,7 +30,7 @@ Except where noted, successful GETs use HTTP `200`. `OPTIONS` is supported for t
 | DELETE | `/upstream/v1/map-tiles` | Cancel outstanding raster downloads |
 | DELETE | `/upstream/v1/terrain` | Cancel outstanding terrain downloads |
 | GET | `/terrain/v1/datasets` | JSON terrain dataset catalog |
-| GET | `/terrain/v1/<dataset>/<z>/<x>/<y>.aowterrain` | Canonical normalized heightfield bytes |
+| GET | `/terrain/v2/<dataset>/<z>/<x>/<y>.aowterrain` | Canonical normalized heightfield bytes |
 | GET | `/terrain/v1/elevation?latitude=…&longitude=…` | JSON point elevation |
 | GET | `/terrain/v1/analysis/grid?dataset=…&west=…&south=…&east=…&north=…&columns=…&rows=…` | `application/vnd.aowis.dem-f32le` |
 | DELETE | `/terrain/v1/cache/<dataset>/<z>/<xmin>/<xmax>/<ymin>/<ymax>` | Delete normalized tiles in range |
@@ -165,7 +165,7 @@ and offline semantics.
 ```bash
 curl -fsS http://127.0.0.1:8122/terrain/v1/datasets
 curl -f -o tile.aowterrain \
-  http://127.0.0.1:8122/terrain/v1/copernicus-glo30/8/133/86.aowterrain
+  http://127.0.0.1:8122/terrain/v2/copernicus-glo30/8/133/86.aowterrain
 ```
 
 The dataset catalog describes supported terrain sources, zoom ranges, nominal resolution, datum and default dataset. Copernicus GLO-30 is a 30 m nominal DSM in EGM2008 and supports **on-demand normalized tile generation at zooms 8–14**. Normalized `65 × 65` terrain tiles have content type `application/vnd.aowis.terrain`; they carry their own dataset/XYZ identity and payload CRC. The binary structure is defined in the [tile format specification](terrain-tile-format.md).

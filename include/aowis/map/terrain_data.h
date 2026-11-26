@@ -48,10 +48,9 @@ struct TerrainTileLookupResult
     QByteArray data;
     TerrainDataOrigin origin = TerrainDataOrigin::Unknown;
     QString error_message;
-    // Available on fresh local normalization only; v1 cache/HTTP data does
-    // not carry source statistics. Absence never means zero relief.
+    // Persisted in v2 tiles, including cache hits and cascades. Absence never means zero relief.
     std::optional<TerrainSourceStatistics> source_statistics;
-    // Fresh local normalization only; absent on v1 cache/HTTP hits.
+    // Sampled error, not a certified geometric bound.
     std::optional<TerrainGeometricError> geometric_error;
 };
 

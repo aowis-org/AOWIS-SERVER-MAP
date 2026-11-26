@@ -11,7 +11,7 @@ namespace Aowis::Map
 {
 // Maximum canonical r2 tile size, including variable-length dataset ID.
 inline constexpr qsizetype MaximumCanonicalTerrainTileBytes =
-    64 + TerrainTileMaximumDatasetIdBytes + TerrainTileSampleCount * qsizetype(sizeof(quint16));
+    64 + TerrainTileMaximumDatasetIdBytes + TerrainTileMetadataBytes + TerrainTileSampleCount * qsizetype(sizeof(quint16));
 
 // A single zstd frame, with its uncompressed size recorded. No dictionaries,
 // streaming, or changes to the canonical .aowterrain cache representation.

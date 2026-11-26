@@ -11,7 +11,7 @@ Copernicus source COG (native GeoTIFF)
           v
   TerrainTile (65 × 65, float metres)
           v
-  .aowterrain v1 cache
+  .aowterrain v2 cache
           |
           +--> renderer terrain tiles / point elevation
 ```
@@ -47,7 +47,7 @@ On-demand normalization stops at zoom 14 because higher zooms would mostly overs
 ```text
 <terrain cache>/
   providers/copernicus/glo30/         Native downloaded source COGs
-  normalized/v1/r2/copernicus-glo30/ <z>/<x>/<y>.aowterrain
+  normalized/v2/r2/copernicus-glo30/ <z>/<x>/<y>.aowterrain
   offline-packages/                  Reserved; no automatic mounting
 ```
 
@@ -77,7 +77,7 @@ At **zooms 8–13** a sample stands for much more ground than a pixel (about 2.4
 
 Each source block is decoded once per tile however many boxes read it; a zoom-8 tile costs about 20 % more than with point samples, dominated by decoding the same blocks. The source cells acquired for a tile include the half spacing its boxes reach beyond it.
 
-The normalization revision (`TerrainNormalizationRevision`, currently 2) is part of the cache path. Tiles cached by an earlier normalizer (`normalized/v1/<dataset>/…`, revision 1) are never read again; that directory can be deleted.
+The normalization revision (`TerrainNormalizationRevision`, currently 2) is part of the cache path. Tiles cached in the obsolete `normalized/v1/` format namespace are never read again; that directory can be deleted with MAP stopped. Native provider data is reused.
 
 ### Source elevation statistics (LOD groundwork)
 
@@ -97,11 +97,7 @@ as bounds. A missing candidate count may include a cell with no actual overlap.
 An isolated peak can be represented by these statistics even when lost from the
 averaged 65 × 65 grid.
 
-This is intentionally a provider/normalization-stage change only. Neither the
-v1 binary format, normalization revision, cache layout, cascade protocol nor HTTP
-responses change. Existing and cascaded normalized tiles have no statistics;
-there is no fabricated fallback from their averaged samples. Persistence and
-wire delivery will be introduced explicitly with a compatible versioned contract.
+The optional statistics are persisted in the v2 tile payload and preserved through cache hits and cascading MAP servers. Missing statistics remain unknown; they are not fabricated from averaged samples. Normalization revision and height values are unchanged.
 
 Original native COG files also serve **analysis grids** directly: output grid samples are selected from the containing source pixels, not bilinearly resampled from `.aowterrain`. This distinction matters for Hydrology and other numerical consumers. See the [elevation/analysis contract](terrain-elevation-contract.md) and [tile format](terrain-tile-format.md).
 
@@ -163,6 +159,4 @@ It does add local CPU and possibly raster decode work for newly generated tiles.
 These values are observed vertical errors, not conservative continuous or
 ECEF bounds; they exclude quantization, ellipsoid curvature, polar edge
 flattening, vertical exaggeration, skirts, hole filling and ancestor fallback.
-The source extrema and error metadata are not persisted or sent over HTTP yet;
-existing v1 cache hits do not carry them. Tile bytes, cache revision, analysis
-sampling and rendering behavior are unchanged.
+The v2 tile payload carries both optional records, including through HTTP and cascades. Existing v1 normalized tiles are not used. Analysis sampling and rendering behavior are unchanged.

@@ -109,4 +109,4 @@ For an in-process AOWIS Standalone/Hydrology integration, share the existing `Te
 
 ## Binary terrain format
 
-The renderer-oriented `.aowterrain` v1 format is documented separately in the [tile format specification](terrain-tile-format.md). It encodes a 65 × 65 heightfield with quantized uint16 samples, a no-data sentinel, projection and vertical-datum metadata, dataset/XYZ identity and payload CRC. A normalizer must record the **actual** source datum; unknown must remain unknown rather than inventing a conversion. Formats and datasets have independent version/identity semantics.
+The renderer-oriented `.aowterrain` v2 format is documented separately in the [tile format specification](terrain-tile-format.md). It encodes a 65 × 65 heightfield with quantized uint16 samples, a no-data sentinel, projection and vertical-datum metadata, dataset/XYZ identity, optional terrain LOD metadata and payload CRC. A normalizer must record the **actual** source datum; unknown must remain unknown rather than inventing a conversion. Formats and datasets have independent version/identity semantics.

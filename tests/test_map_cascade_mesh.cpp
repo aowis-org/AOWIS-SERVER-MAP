@@ -416,7 +416,7 @@ bool slowHubTerrain(QCoreApplication &application, const QString &root)
     QNetworkAccessManager network;
     const HttpResult result = get(application, network,
         QUrl(baseUrl(*edge).toString() +
-             QStringLiteral("/terrain/v1/copernicus-glo30/8/131/101.aowterrain")), 40000);
+             QStringLiteral("/terrain/v2/copernicus-glo30/8/131/101.aowterrain")), 40000);
     std::fprintf(stderr, "slow hub: edge %d in %lld ms, root polls %d%s%s\n", result.code,
                  static_cast<long long>(result.elapsed_ms),
                  slow_root.count("x-aowis-tile-delivery: cache-first"),
@@ -464,7 +464,7 @@ bool busyUpstream(QCoreApplication &application, const QString &root)
         return httpResponse(503, "Service Unavailable", {}, "proxy cannot reach MAP");
     };
 
-    const QString terrain_route = QStringLiteral("/terrain/v1/copernicus-glo30/8/101/100.aowterrain");
+    const QString terrain_route = QStringLiteral("/terrain/v2/copernicus-glo30/8/101/100.aowterrain");
     QNetworkAccessManager network;
     {
         Server::Config config = serverConfig(root + QStringLiteral("/busy"));

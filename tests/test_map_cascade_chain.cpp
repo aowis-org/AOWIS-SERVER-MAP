@@ -194,6 +194,8 @@ int main(int argc, char **argv)
     tile.vertical_datum = Aowis::Map::TerrainVerticalDatum::Egm2008;
     tile.nominal_resolution_m = 30;
     tile.elevations_m.fill(420.0f, Aowis::Map::TerrainTileSampleCount);
+    tile.source_statistics = Aowis::Map::TerrainSourceStatistics{100.0f, 4500.0f, 10000, 2, 1};
+    tile.geometric_error = Aowis::Map::TerrainGeometricError{4080.0, 320.0, 15.0, 9000, 2, 3, 1};
     const QByteArray terrain = Aowis::Map::encodeTerrainTile(tile);
     if (!require(!terrain.isEmpty() && saveFile(
         MapCascadeChainTestAccess::terrainPath(*root, address), terrain),
@@ -213,7 +215,7 @@ int main(int argc, char **argv)
     const QString raster_route = QStringLiteral("/%1/%2/%3/%4.png")
         .arg(provider).arg(zoom).arg(x).arg(y);
     const QString terrain_route = QStringLiteral(
-        "/terrain/v1/copernicus-glo30/8/130/101.aowterrain");
+        "/terrain/v2/copernicus-glo30/8/130/101.aowterrain");
     const QByteArray reference_trace = QByteArrayLiteral("00000000-0000-4000-8000-000000000001");
     const HttpResult jpeg_reference = get(application, network,
         QUrl(baseUrl(*root).toString() + raster_route), reference_trace,
@@ -264,7 +266,7 @@ int main(int argc, char **argv)
     const QByteArray cyclic_trace = MapCascadeChainTestAccess::identity(*root);
     const QString second_raster_route = QStringLiteral("/%1/12/2100/1391.png").arg(provider);
     const QString second_terrain_route = QStringLiteral(
-        "/terrain/v1/copernicus-glo30/8/130/102.aowterrain");
+        "/terrain/v2/copernicus-glo30/8/130/102.aowterrain");
     const HttpResult loop_raster = get(application, network,
         QUrl(baseUrl(*edge).toString() + second_raster_route), cyclic_trace);
     const HttpResult loop_terrain = get(application, network,

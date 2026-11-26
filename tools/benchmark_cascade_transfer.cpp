@@ -180,7 +180,7 @@ std::optional<CachedTile> cachedTileAddress(const QString &root,
     const QStringList parts = QDir::fromNativeSeparators(
         QDir(root).relativeFilePath(path)).split(QLatin1Char('/'));
     // Raster: provider/z/x/y.png, also provider/variants/hash/z/x/y.png.
-    // Terrain: v1/r2/dataset/z/x/y.aowterrain.
+    // Terrain: v2/r2/dataset/z/x/y.aowterrain.
     if (parts.size() < (raster ? 4 : 6)) return std::nullopt;
     bool zoom_ok = false;
     bool x_ok = false;
@@ -473,7 +473,7 @@ bool selfTest()
     const QString terrain_dir = temporary.path() + QStringLiteral("/terrain/normalized");
     if (image.isEmpty() || canonical.isEmpty() ||
         !writeFile(raster_dir + QStringLiteral("/provider/12/2034/1355.png"), image) ||
-        !writeFile(terrain_dir + QStringLiteral("/v1/r2/copernicus-glo30/12/2034/1355.aowterrain"), canonical))
+        !writeFile(terrain_dir + QStringLiteral("/v2/r2/copernicus-glo30/12/2034/1355.aowterrain"), canonical))
         return false;
     const QJsonObject raster = benchmarkRaster(raster_dir, 75, 10, false);
     const QJsonObject heights = benchmarkTerrain(terrain_dir, 10);
@@ -486,7 +486,7 @@ bool selfTest()
     if (bitkine_canonical.isEmpty() ||
         !writeFile(raster_dir + QStringLiteral("/provider/12/%1/%2.png")
                     .arg(bitkine_x).arg(bitkine_y), image) ||
-        !writeFile(terrain_dir + QStringLiteral("/v1/r2/copernicus-glo30/12/%1/%2.aowterrain")
+        !writeFile(terrain_dir + QStringLiteral("/v2/r2/copernicus-glo30/12/%1/%2.aowterrain")
                     .arg(bitkine_x).arg(bitkine_y), bitkine_canonical))
         return false;
     const QJsonObject region_raster = benchmarkRaster(raster_dir, 75, 10, false, bitkine);

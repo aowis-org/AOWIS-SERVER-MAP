@@ -224,7 +224,7 @@ bool matchesSourceStatistics(const std::optional<TerrainSourceStatistics> &actua
 }
 
 // Independent native-centre reference, using the decoded grid (the provider
-// measures before quantization, so allow the v1 quantization error).
+// measures before quantization, so allow the v2 quantization error).
 TerrainGeometricError referenceGeometricError(const TerrainTile &tile, int south_deg, int west_deg)
 {
     TerrainGeometricError result;
@@ -373,9 +373,10 @@ int main()
     const TerrainTileLookupResult cached = terrain_data.terrainTile(
         QStringLiteral("copernicus-glo30"), centre);
     if (!require(cached.status == TerrainTileLookupStatus::Ready &&
-                     !cached.source_statistics.has_value() && !cached.geometric_error.has_value() &&
+                     matchesSourceStatistics(cached.source_statistics, *centre_statistics) &&
+                     matchesGeometricError(cached.geometric_error, *centre_error) &&
                      decodeTerrainTile(cached.data),
-                 "v1 cache hit must remain readable and must not invent source statistics"))
+                 "v2 cache hit must preserve native statistics and error"))
         return 1;
 
     // Quantization: 16-bit codes over the tile's elevation range (< 0.01 m).
@@ -495,7 +496,7 @@ int main()
 
     // Tiles of this normalizer live in their own cache namespace.
     if (!require(terrain_data.normalizedTilePath(QStringLiteral("copernicus-glo30"), centre)
-                     .contains(QStringLiteral("/v1/r2/copernicus-glo30/10/")),
+                     .contains(QStringLiteral("/v2/r2/copernicus-glo30/10/")),
                  "normalized cache path lacks the normalization revision"))
         return 1;
 

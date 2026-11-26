@@ -93,6 +93,7 @@ add_library(aowis-server-map-core STATIC
     include/aowis/map/terrain_tile.h
     include/aowis/map/terrain_provider.h
     include/aowis/map/terrain_geometric_error.h
+    include/aowis/map/terrain_lod_metadata.h
     src/lib/terrain_geometric_error_accumulator.h
     include/aowis/map/terrain_dataset.h
     include/aowis/map/terrain_data.h

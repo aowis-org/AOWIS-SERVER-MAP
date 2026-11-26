@@ -10,7 +10,7 @@ AOWIS terrain providers normalize their source data into one provider-neutral bi
 
 Provider-native formats such as GeoTIFF/COG must not leak into these consumers.
 
-Format version 1 uses the file extension `.aowterrain` and MIME type `application/vnd.aowis.terrain`.
+Format version 2 uses the file extension `.aowterrain` and MIME type `application/vnd.aowis.terrain`.
 
 ## Addressing and projection
 
@@ -20,26 +20,26 @@ Each terrain tile is addressed as standard Web-Mercator XYZ:
 z/x/y
 ```
 
-The projection is Web Mercator / EPSG:3857 with the usual slippy-map orientation. Consequently v1 covers the standard Web-Mercator latitude range of approximately `-85.05112878° ... +85.05112878°`; this range is part of the v1 projection contract.
+The projection is Web Mercator / EPSG:3857 with the usual slippy-map orientation. Consequently v2 covers the standard Web-Mercator latitude range of approximately `-85.05112878° ... +85.05112878°`; this range is part of the v2 projection contract.
 
 
 - X increases west-to-east;
 - Y increases north-to-south;
 - zoom `z` contains `2^z` tiles on each axis;
 - valid X and Y are in `[0, 2^z - 1]`;
-- format v1 accepts zoom levels 0 through 30.
+- format v2 accepts zoom levels 0 through 30.
 
 The normalized cache path is:
 
 ```text
-normalized/v1/r<revision>/<dataset>/<z>/<x>/<y>.aowterrain
+normalized/v2/r<revision>/<dataset>/<z>/<x>/<y>.aowterrain
 ```
 
 Dataset identifiers are stable lowercase ASCII identifiers containing only letters, digits, `-`, `_` and `.`, beginning with a letter or digit. Examples are `copernicus-glo30` and `nasadem`.
 
 ## Heightfield geometry
 
-Every v1 tile contains exactly a **65 × 65** regular elevation grid:
+Every v2 tile contains exactly a **65 × 65** regular elevation grid:
 
 ```text
 65 samples × 65 samples
@@ -106,12 +106,12 @@ A normalized tile containing no finite elevation samples is invalid and must not
 
 All multibyte integer and IEEE-754 float fields are **little-endian**.
 
-The fixed header is 64 bytes. It is followed immediately by the UTF-8 dataset identifier and then the elevation payload.
+The fixed header is 64 bytes. It is followed immediately by the UTF-8 dataset identifier and then the payload (LOD metadata followed by elevation codes).
 
-| Offset | Size | Type | Field | v1 value / meaning |
+| Offset | Size | Type | Field | v2 value / meaning |
 | ---: | ---: | --- | --- | --- |
 | 0 | 8 | bytes | magic | `AOWTRN\0\0` |
-| 8 | 2 | uint16 | format version | `1` |
+| 8 | 2 | uint16 | format version | `2` |
 | 10 | 2 | uint16 | header bytes | `64 + dataset_id_bytes` |
 | 12 | 4 | uint32 | flags | `0` |
 | 16 | 1 | uint8 | projection | `1` = Web-Mercator XYZ |
@@ -130,12 +130,37 @@ The fixed header is 64 bytes. It is followed immediately by the UTF-8 dataset id
 | 48 | 2 | uint16 | dataset ID bytes | UTF-8 byte count |
 | 50 | 2 | uint16 | reserved | `0` |
 | 52 | 4 | uint32 | sample count | `4225` |
-| 56 | 4 | uint32 | payload bytes | `8450` |
+| 56 | 4 | uint32 | payload bytes | `8534` |
 | 60 | 4 | uint32 | payload CRC32 | standard IEEE CRC32 of payload only |
 | 64 | variable | UTF-8 | dataset ID | canonical dataset identifier |
-| header bytes | 8450 | uint16[] | height payload | 4225 row-major codes |
+| header bytes | 84 | bytes | LOD metadata | layout below |
+| header bytes + 84 | 8450 | uint16[] | height codes | 4225 row-major codes |
 
-The v1 decoder rejects unsupported flags, projection/encoding identifiers, dimensions, malformed addresses, invalid metadata, bad CRCs, unexpected trailing bytes and unknown vertical-datum numeric codes.
+The v2 decoder rejects unsupported flags, projection/encoding identifiers, dimensions, malformed addresses, invalid metadata, bad CRCs, unexpected trailing bytes and unknown vertical-datum numeric codes.
+
+## LOD metadata prefix (v2)
+
+Offsets below are relative to the start of the payload, not the file. The existing payload CRC32 covers the complete prefix and height codes. All fields are little-endian.
+
+| Offset | Type | Meaning |
+| ---: | --- | --- |
+| 0 | uint32 | presence flags: bit 0 = native statistics; bit 1 = sampled geometric error; other bits zero |
+| 4 | float32 | native minimum elevation (m) |
+| 8 | float32 | native maximum elevation (m) |
+| 12 | uint64 | valid source pixels |
+| 20 | uint64 | source no-data pixels |
+| 28 | uint32 | missing source cells in statistics scan |
+| 32 | float64 | maximum underestimation (m) |
+| 40 | float64 | maximum overestimation (m) |
+| 48 | float64 | RMS geometric error (m) |
+| 56 | uint64 | compared source pixels |
+| 64 | uint64 | no-data pixels in error scan |
+| 72 | uint64 | missing surface pixels in error scan |
+| 80 | uint32 | missing source cells in error scan |
+
+An absent block must be all zero. Present statistics require a nonzero valid count, finite ordered extrema; present error requires a nonzero compared count and finite nonnegative residuals. Absent metadata is unknown, never zero error. These are observed source extrema (including the averaging halo) and sampled vertical deviations from the **unquantized** triangular grid, not conservative continuous or ECEF bounds. Nonzero missing/no-data counts indicate incomplete coverage. Native values use the tile's vertical datum. No extra source fetch is triggered just to obtain metadata.
+
+Cascading servers validate and preserve the canonical v2 bytes (including after lossless zstd transfer). MAP caches v2 under `normalized/v2/r2/`; existing v1 cache files are logically invalidated, not automatically erased. Render requests `/terrain/v2/...aowterrain`. The dataset catalog, point-elevation, analysis and cache-deletion endpoints retain their independent `/terrain/v1/` contracts.
 
 ## Vertical datum codes
 
@@ -162,15 +187,15 @@ A normalizer must record the actual datum of its source. It must not infer or in
 
 The payload carries a standard IEEE CRC32. This is intended to detect truncated or corrupted cached/offline tile data cheaply before decoding or GPU upload.
 
-The v1 file itself is intentionally not internally compressed. HTTP transport may use content encoding and offline packages may compress their members. Keeping the canonical cache tile uncompressed makes decoding, random access and direct GPU-oriented staging simple. A typical v1 payload is only 8450 bytes before transport/package compression.
+The v2 file itself is intentionally not internally compressed. HTTP transport may use content encoding and offline packages may compress their members. Keeping the canonical cache tile uncompressed makes decoding, random access and direct GPU-oriented staging simple. A v2 payload is 8534 bytes before transport/package compression.
 
-The format version is independent of provider/dataset versions. A source-data revision does not require an AOWIS format-version change if it normalizes into the same v1 structure.
+The format version is independent of provider/dataset versions. A source-data revision does not require an AOWIS format-version change if it normalizes into the same v2 structure.
 
 How samples are derived from a source is versioned separately by the **normalization revision** `r<revision>` in the cache path (`TerrainNormalizationRevision`; 1 = point samples, 2 = area averages below the provider's native zoom). A semantic change bumps it, so a cache never mixes tiles of different normalizers; the binary format is unchanged.
 
-An incompatible binary/layout change requires a new AOWIS terrain format version and a separate normalized cache namespace such as `normalized/v2/...`. Existing v1 meanings must not be changed in place.
+An incompatible binary/layout change requires a new AOWIS terrain format version and a separate normalized cache namespace such as `normalized/v2/...`. The v1 decoder and tile endpoint are removed. Old normalized tiles are not read; they may be deleted while MAP is stopped. Native source storage is unchanged.
 
-## What is intentionally not in v1
+## What is intentionally not in v2
 
 The normalized tile does not contain:
 
@@ -189,7 +214,7 @@ The renderer can derive vertices/normals and reuse static topology. Imagery rema
 `AOWIS-SERVER-MAP` exposes cached normalized tiles directly to renderers:
 
 ```text
-GET /terrain/v1/<dataset>/<z>/<x>/<y>.aowterrain
+GET /terrain/v2/<dataset>/<z>/<x>/<y>.aowterrain
 ```
 
 A successful response has MIME type:

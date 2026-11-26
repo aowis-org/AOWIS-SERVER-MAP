@@ -2166,6 +2166,8 @@ TerrainProviderFetchResult CopernicusTerrainProvider::fetchTile(
                                       TerrainTileCellCount, &south, &east);
     raster_set.disableRemoteFetch();
     result.geometric_error = raster_set.measureGeometricError(tile, west, south, east, north);
+    result.tile->source_statistics = result.source_statistics;
+    result.tile->geometric_error = result.geometric_error;
     return result;
 }
 

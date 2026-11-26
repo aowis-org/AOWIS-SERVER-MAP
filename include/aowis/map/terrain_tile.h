@@ -2,6 +2,7 @@
 #define AOWIS_MAP_TERRAIN_TILE_H
 
 #include <aowis/map/terrain_elevation.h>
+#include <aowis/map/terrain_geometric_error.h>
 
 #include <QByteArray>
 #include <QString>
@@ -12,7 +13,9 @@
 namespace Aowis::Map
 {
 
-inline constexpr quint16 TerrainTileFormatVersion = 1;
+inline constexpr quint16 TerrainTileFormatVersion = 2;
+using TerrainSourceStatistics = TerrainWire::TerrainSourceStatistics;
+inline constexpr int TerrainTileMetadataBytes = TerrainWire::MetadataBytes;
 // Revision of how normalizers derive samples from their sources, independent
 // of the binary format. It is part of the normalized cache namespace, so tiles
 // built by an older normalizer are never served after a semantic change.
@@ -44,6 +47,8 @@ struct TerrainTile
 
     // Row-major, north-to-south then west-to-east. NaN represents no-data in memory.
     QVector<float> elevations_m;
+    std::optional<TerrainSourceStatistics> source_statistics;
+    std::optional<TerrainGeometricError> geometric_error;
 };
 
 bool isValidTerrainDatasetId(const QString &dataset);

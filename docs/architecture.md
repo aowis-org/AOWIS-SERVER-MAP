@@ -77,7 +77,7 @@ An identical in-flight terrain request reuses its existing computation and does 
 | Retained decoded TIFF blocks across readers | 128 MiB shared | Decode a needed block without caching it |
 | Concurrent temporary TIFF decode buffers | 128 MiB shared | Reject the source read rather than allocate beyond the budget |
 | Distinct grid result and serialized payloads | 64 MiB shared | Reject grid work when admission cannot reserve estimated buffers |
-| Normalized `.aowterrain` disk read | Fixed v1 format maximum (8,642 bytes) | Reject oversized/corrupt cache entries before reading |
+| Normalized `.aowterrain` disk read | Fixed v2 format maximum (8,726 bytes) | Reject oversized/corrupt cache entries before reading |
 
 Grid-byte admission accounts for **both** the float result vector and the serialized HTTP payload (8 bytes per sample). The temporary float vector is released before HTTP delivery; response bytes may be implicitly shared by Qt's copy-on-write containers for single-flight fan-out. Shared decoder reservations are released on eviction, read completion, error and teardown paths.
 
@@ -88,7 +88,7 @@ Grid-byte admission accounts for **both** the float result vector and the serial
 ```text
 <terrain-cache>/
   providers/copernicus/glo30/       Native 1° COG cells, shared across normalized tiles
-  normalized/v1/r2/copernicus-glo30/ <z>/<x>/<y>.aowterrain
+  normalized/v2/r2/copernicus-glo30/ <z>/<x>/<y>.aowterrain
   offline-packages/                Reserved; automatic package mounting unavailable
 ```
 
@@ -137,7 +137,7 @@ ctest --test-dir build-linux-tests-debug \
 
 ```bash
 SERVER_PID=$(pgrep -f '/build-linux/aowis-server-map$')
-TILE_URL='http://127.0.0.1:8122/terrain/v1/copernicus-glo30/8/133/86.aowterrain'
+TILE_URL='http://127.0.0.1:8122/terrain/v2/copernicus-glo30/8/133/86.aowterrain'
 GRID_URL='http://127.0.0.1:8122/terrain/v1/analysis/grid?dataset=copernicus-glo30&west=8.10&south=50.10&east=8.11&north=50.11&columns=512&rows=512'
 
 python3 tools/benchmark_terrain_memory.py \

@@ -82,6 +82,8 @@ int main(int argc, char **argv)
     tile.vertical_datum = TerrainVerticalDatum::Egm2008;
     tile.nominal_resolution_m = 30;
     tile.elevations_m.fill(300.0f, TerrainTileSampleCount);
+    tile.source_statistics = TerrainSourceStatistics{100.0f, 4500.0f, 10000, 2, 1};
+    tile.geometric_error = TerrainGeometricError{4200.0, 200.0, 15.0, 9000, 2, 3, 1};
     const QByteArray canonical = encodeTerrainTile(tile);
     if (!require(!canonical.isEmpty(), "Unable to create terrain tile")) return 1;
     const QString path = TerrainZstdHttpTestAccess::path(server, address);
@@ -92,7 +94,7 @@ int main(int argc, char **argv)
                  "Unable to seed normalized tile cache")) return 1;
     cached.close();
 
-    const QUrl url(QStringLiteral("http://127.0.0.1:%1/terrain/v1/copernicus-glo30/8/130/101.aowterrain")
+    const QUrl url(QStringLiteral("http://127.0.0.1:%1/terrain/v2/copernicus-glo30/8/130/101.aowterrain")
                    .arg(TerrainZstdHttpTestAccess::port(server)));
     QNetworkAccessManager network;
     QSemaphore entered;
