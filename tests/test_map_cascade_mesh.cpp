@@ -392,7 +392,7 @@ bool slowHubTerrain(QCoreApplication &application, const QString &root)
     QElapsedTimer since_first;
     slow_root.respond = [&since_first, &tile](const QByteArray &request) -> QByteArray
     {
-        if (!request.contains("/terrain/v1/"))
+        if (!request.contains("/terrain/v2/"))
             return httpResponse(404, "Not Found", "X-AOWIS-Instance: " + stub_instance + "\r\n", {});
         if (!since_first.isValid()) since_first.start();
         if (since_first.elapsed() < 12000)
@@ -478,7 +478,7 @@ bool busyUpstream(QCoreApplication &application, const QString &root)
             QUrl(baseUrl(server).toString() + terrain_route), 20000);
         // Each downstream also asks its upstream for the provider catalog;
         // only terrain requests matter here.
-        if (!require(result.code != 200 && busy.count("/terrain/v1/") == 1 &&
+        if (!require(result.code != 200 && busy.count("/terrain/v2/") == 1 &&
                      copernicus.requests.isEmpty(),
                      "busy: a busy upstream led to a direct source download")) return false;
         const QJsonObject health = upstreamHealth(application, network, server,
@@ -497,7 +497,7 @@ bool busyUpstream(QCoreApplication &application, const QString &root)
         Server server(config);
         if (!require(server.start(), "busy: control downstream did not start")) return false;
         get(application, network, QUrl(baseUrl(server).toString() + terrain_route), 30000);
-        if (!require(proxy_error.count("/terrain/v1/") == 1 && !copernicus.requests.isEmpty(),
+        if (!require(proxy_error.count("/terrain/v2/") == 1 && !copernicus.requests.isEmpty(),
                      "busy: control did not fall back to the direct source")) return false;
         const QJsonObject health = upstreamHealth(application, network, server,
                                                   QStringLiteral("proxied"), QStringLiteral("terrain"));
