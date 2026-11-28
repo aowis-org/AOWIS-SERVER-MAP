@@ -72,10 +72,6 @@ install_debian_dependencies()
         libpng-dev
         libturbojpeg0-dev
         libsqlite3-dev
-        python3
-        python3-numpy
-        python3-rasterio
-        python3-pyproj
         curl
         ca-certificates
     )
@@ -105,7 +101,7 @@ require_build_tools()
     local missing_tools=()
     local tool=""
 
-    for tool in cmake c++ ninja dh dpkg-buildpackage dpkg-deb tar python3 curl; do
+    for tool in cmake c++ ninja dh dpkg-buildpackage dpkg-deb tar curl; do
         if ! command -v "$tool" >/dev/null 2>&1; then
             missing_tools+=("$tool")
         fi
@@ -190,7 +186,10 @@ rm -rf -- "$source_directory"
 mkdir -p "$source_directory" "$dist_directory"
 
 # Versioned data is cached outside the checkout/build tree, even with --clean.
-python3 "$project_directory/tools/prepare_global_terrain_data.py" --deb-output "$dist_directory"
+cmake -S "$project_directory/tools/etopo" -B "$build_directory/etopo-tool" -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF
+cmake --build "$build_directory/etopo-tool" --parallel
+bash "$project_directory/tools/prepare_global_terrain_data.sh" \
+    --native "$build_directory/etopo-tool/aowis-map-etopo" --deb-output "$dist_directory"
 
 tar \
     --exclude='./.git' \

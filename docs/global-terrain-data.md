@@ -16,7 +16,7 @@ The digests verify local reuse, not an independently published NOAA checksum.
 ## Prepare once and reuse
 
 `compile_linux.sh`, `compile_deb.sh` and `compile_deb_docker.sh` automatically
-invoke `tools/prepare_global_terrain_data.py`. It uses a persistent directory:
+invoke `tools/prepare_global_terrain_data.sh`. It uses a persistent directory:
 
 ```
 ${XDG_DATA_HOME:-$HOME/.local/share}/aowis-server-map/datasets/etopo-2022-v1-60s/
@@ -29,27 +29,29 @@ imported automatically, including during Docker builds. For an original stored
 elsewhere, explicitly import it once:
 
 ```bash
-python3 tools/prepare_global_terrain_data.py --offline --source /path/to/ETOPO_2022_v1_60s_N90W180_surface.tif
+bash tools/prepare_global_terrain_data.sh --offline --source /path/to/ETOPO_2022_v1_60s_N90W180_surface.tif
 ```
 
-On Arch, use an isolated Python environment (outside the checkout):
+The native C++ tool is built with MAP, using the already-required libtiff.
+No Python environment, GDAL, PROJ, NumPy or Rasterio is required. To build
+just the preparation utility on a machine with CMake, Ninja, C++20 and libtiff:
 
 ```bash
-sudo pacman -S --needed python python-pip curl
-python3 -m venv "$HOME/.local/share/aowis-server-map/terrain-python"
-source "$HOME/.local/share/aowis-server-map/terrain-python/bin/activate"
-python -m pip install numpy rasterio pyproj
+cmake -S tools/etopo -B build-etopo -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build-etopo
+bash tools/prepare_global_terrain_data.sh --native build-etopo/aowis-map-etopo --offline
 ```
 
-Keep the environment active when running native build scripts. Debian's native
-dependency installer and Docker toolchain include the Python dependencies.
-Before source acquisition or regeneration, the preparation script checks its
-Python dependencies. A completed `.tif.part` from an earlier failed run is
-validated block by block and promoted without any network request, including
-with `--offline`. An incomplete file is retained for resuming; offline mode
-never invokes curl. Building the
-first overview requires working disk space and RAM for raster reprojection;
-subsequent builds verify and reuse the existing artifacts without reprojection.
+A completed `.tif.part` from an earlier failed run is validated pixel by pixel
+and promoted without any network request, including with `--offline`.
+`./compile_linux.sh --offline-global-data --no-run` performs the normal build
+and local preparation with downloads forbidden. An incomplete file is retained for resuming; offline mode
+never invokes curl. Building the first overview requires working disk space and RAM for the projected grid;
+source pixels are decoded by libtiff and area-averaged using their geographic
+footprints, without creating an intermediate GeoTIFF. Previously generated
+valid overview packs remain reusable; newly generated values need not be
+bit-identical to GDAL resampling.
+Subsequent builds verify and reuse the existing artifacts without reprojection.
 The preparation tool is serialized by a file lock. A missing/corrupt derived pack
 is rebuilt locally; an original changed since its manifest was written is
 reported as an error rather than replaced. `--offline` prevents acquisition of

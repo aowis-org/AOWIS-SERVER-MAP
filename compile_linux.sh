@@ -6,6 +6,7 @@ build_directory="$project_directory/build-linux"
 install_dependencies=false
 run_after_build=true
 prepare_global_data=true
+offline_global_data=false
 application_arguments=()
 
 is_debian_family()
@@ -39,7 +40,7 @@ install_debian_dependencies()
         exit 1
     fi
 
-    local packages=(build-essential cmake ninja-build qt6-base-dev qt6-websockets-dev qt6-httpserver-dev libtiff-dev libzstd-dev libpng-dev libturbojpeg0-dev libsqlite3-dev pkg-config python3 python3-numpy python3-rasterio python3-pyproj curl ca-certificates)
+    local packages=(build-essential cmake ninja-build qt6-base-dev qt6-websockets-dev qt6-httpserver-dev libtiff-dev libzstd-dev libpng-dev libturbojpeg0-dev libsqlite3-dev pkg-config curl ca-certificates)
 
     if (( EUID == 0 )); then
         apt-get update
@@ -90,6 +91,9 @@ while (( $# > 0 )); do
         --install-dependencies)
             install_dependencies=true
             ;;
+        --offline-global-data)
+            offline_global_data=true
+            ;;
         --no-global-data)
             prepare_global_data=false
             ;;
@@ -132,8 +136,9 @@ if [[ ! -x "$executable" ]]; then
 fi
 
 if [[ "$prepare_global_data" == true ]]; then
-    python3 "$project_directory/tools/prepare_global_terrain_data.py" \
-        --link-directory "$build_directory/terrain-data"
+    terrain_arguments=(--native "$build_directory/aowis-map-etopo" --link-directory "$build_directory/terrain-data")
+    if [[ "$offline_global_data" == true ]]; then terrain_arguments+=(--offline); fi
+    bash "$project_directory/tools/prepare_global_terrain_data.sh" "${terrain_arguments[@]}"
 fi
 
 if [[ "$run_after_build" == false ]]; then

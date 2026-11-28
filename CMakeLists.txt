@@ -140,6 +140,10 @@ target_link_libraries(aowis-server-map
 
 
 include(CTest)
+# Build-host tool; do not add it to embedded MAP or non-Unix targets.
+if(UNIX AND CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    add_subdirectory(tools/etopo)
+endif()
 if(BUILD_TESTING)
     add_executable(aowis-server-map-cache-storage-test
         tests/test_cache_storage.cpp)
@@ -589,6 +593,9 @@ if(BUILD_TESTING)
                 "Test executable ${target_name} is missing from AOWIS_SERVER_MAP_TEST_TARGETS")
         endif()
     endforeach()
+    if(TARGET aowis-map-etopo)
+        list(APPEND AOWIS_SERVER_MAP_TEST_TARGETS aowis-map-etopo)
+    endif()
     add_custom_target(aowis-server-map-tests
         DEPENDS ${AOWIS_SERVER_MAP_TEST_TARGETS})
     get_property(AOWIS_SERVER_MAP_REGISTERED_TESTS DIRECTORY PROPERTY TESTS)

@@ -185,20 +185,22 @@ when the pack header and size are valid. Each tile's CRC, address and datum
 are independently validated on read. Install the pack before starting clients
 (or reconnect to refresh the catalog).
 
-Build once on a machine with Python, NumPy and Rasterio/GDAL:
+Build once using the native C++ tool (CMake, libtiff):
 
 ```bash
-python3 tools/build_global_terrain_overview.py /path/to/global-land-egm2008.tif \
-    /path/to/global-overview-v1.aowpack --source-resolution-m 1855
+cmake -S tools/etopo -B build-etopo -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build-etopo
+./build-etopo/aowis-map-etopo build /path/to/global-land-egm2008.tif \
+    /path/to/global-overview-v1.aowpack 1855
 ```
 
-Input must be a north-up global EPSG:4326 GeoTIFF with finite elevations in
+Input must be a north-up global single-band float32 EPSG:4326 GeoTIFF with finite elevations in
 metres relative to EGM2008, with the ocean filled at sea level. One possible
 input is NOAA ETOPO 2022 60 arc-second ice-surface relief
 (https://www.ncei.noaa.gov/products/etopo-global-relief-model). ETOPO includes
 bathymetry: prepare a land-only raster with the ocean set to zero, or explicitly
 pass `--clamp-negative` for a visual-only approximation that also removes
-below-sea-level land. The source resolution argument is the approximate input
+below-sea-level land. The positional source resolution argument is the approximate input
 resolution, not the output grid spacing. Keep the input for future builds.
 The tool does not download anything. It computes area means in Web Mercator,
 then builds coarser levels with 2x2 averages and samples shared vertex edges.

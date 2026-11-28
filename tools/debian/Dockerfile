@@ -9,10 +9,6 @@ RUN apt-get update -o APT::Update::Error-Mode=any \
       build-essential \
       ca-certificates \
       curl \
-      python3 \
-      python3-numpy \
-      python3-rasterio \
-      python3-pyproj \
       cmake \
       debhelper \
       dpkg-dev \
