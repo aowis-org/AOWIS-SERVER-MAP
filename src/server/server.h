@@ -138,6 +138,8 @@ private:
     QHttpServerResponse terrainAcceptedResponse() const;
 
     void applyAvailableProviders();
+    // Runs a waiting cascade acquisition step again after delay_ms.
+    void scheduleTerrainPoll(const std::shared_ptr<std::function<void()>> &step, int delay_ms);
 
     Config config;
     Aowis::Map::ProviderCatalog *provider_catalog = nullptr;

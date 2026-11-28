@@ -380,13 +380,13 @@ std::string TerrainData::cacheStorageKey(const QString &path) const
 
 CacheAccessIndex::PayloadLease TerrainData::leaseCachePayload(const QString &path) const
 {
-    return this->cache_access_index ? this->cache_access_index->leasePayload(this->cacheStorageKey(path))
+    return this->cache_access_index ? this->cache_access_index->leasePayload(cacheStorageKey(path))
                                     : CacheAccessIndex::PayloadLease();
 }
 
 void TerrainData::recordCacheUse(const QString &path) const
 {
-    if (this->cache_access_index) this->cache_access_index->recordAccess(this->cacheStorageKey(path));
+    if (this->cache_access_index) this->cache_access_index->recordAccess(cacheStorageKey(path));
 }
 
 bool TerrainData::setCacheStoragePolicy(const CacheStoragePolicy &policy)
@@ -457,7 +457,7 @@ QHash<QString, CascadeUpstreamState> TerrainData::upstreamHealth() const
 
 QStringList TerrainData::cascadeCandidates(const QByteArray &cascade_trace) const
 {
-    const MapCascadeConfig cascade = this->cascadeConfig();
+    const MapCascadeConfig cascade = cascadeConfig();
     const QList<QByteArray> trace_ids = cascadeTraceIds(cascade_trace);
     QStringList names;
     for (const MapCascadeUpstream &upstream : cascade.upstreams)
@@ -683,7 +683,7 @@ TerrainCacheDeletionResult TerrainData::deleteNormalizedTiles(
             // while the file is missing or corrupt and replaces it atomically
             // (QSaveFile): removing it underneath is safe either way.
             const QString tile_path = x_directory.filePath(tile_file_name);
-            const CacheAccessIndex::PayloadLease lease = this->leaseCachePayload(tile_path);
+            const CacheAccessIndex::PayloadLease lease = leaseCachePayload(tile_path);
             if (QFile::remove(tile_path))
             {
                 ++result.deleted_count;
@@ -770,7 +770,7 @@ TerrainCacheDeletionResult TerrainData::deleteSourceData(
 TerrainAnalysisGridResult TerrainData::analysisGrid(
     const TerrainAnalysisGridRequest &request, bool allow_remote_fetch) const
 {
-    const MapCascadeConfig cascade = this->cascadeConfig();
+    const MapCascadeConfig cascade = cascadeConfig();
     TerrainAnalysisGridResult result;
     if (!this->config.enabled || !this->initialized)
     {
@@ -825,7 +825,7 @@ TerrainProviderFetchResult TerrainData::acquireGridSources(
     const TerrainAnalysisGridRequest &request,
     const std::shared_ptr<std::atomic_bool> &cancel_requested) const
 {
-    const MapCascadeConfig cascade = this->cascadeConfig();
+    const MapCascadeConfig cascade = cascadeConfig();
     TerrainProviderFetchResult result;
     result.status = TerrainProviderFetchStatus::Ready;
     // Outside coverage, the CPU stage still serves already cached sources.
@@ -857,17 +857,28 @@ TerrainProviderFetchResult TerrainData::acquireGridSources(
 TerrainProviderFetchResult TerrainData::fetchNormalizedFromUpstreams(
     const QString &dataset, const TerrainTileAddress &address,
     const std::shared_ptr<std::atomic_bool> &cancel_requested,
-    const QByteArray &cascade_trace, bool *upstream_busy) const
+    const QByteArray &cascade_trace, bool *upstream_busy,
+    TerrainCascadePoll *poll) const
 {
     if (upstream_busy != nullptr) *upstream_busy = false;
-    const MapCascadeConfig cascade = this->cascadeConfig();
+    const bool resuming = poll != nullptr && poll->active;
+    if (poll != nullptr) poll->pending = false;
+    const MapCascadeConfig cascade = cascadeConfig();
     TerrainProviderFetchResult result;
     result.status = TerrainProviderFetchStatus::SourceUnavailable;
     if (cascade.upstreams.isEmpty())
         return result;
 
-    const std::uint64_t generation =
+    // A resumed poll keeps the generation of its first call: a cancellation
+    // or upstream change while it waited between polls must still apply.
+    const std::uint64_t generation = resuming ? poll->generation :
         this->cascade_cancel_generation.load(std::memory_order_acquire);
+    if (poll != nullptr && !resuming)
+    {
+        poll->active = true;
+        poll->generation = generation;
+        poll->upstream_index = 0;
+    }
     const QByteArray visited = cascade_trace.isEmpty()
         ? this->cascade_instance_id : cascade_trace + ',' + this->cascade_instance_id;
     // An upstream whose instance already handled this request is waiting
@@ -881,9 +892,19 @@ TerrainProviderFetchResult TerrainData::fetchNormalizedFromUpstreams(
                (cancel_requested && cancel_requested->load(std::memory_order_acquire));
     };
     const qint64 poll_budget_ms = qint64(qMax(1, this->config.download_deadline_seconds)) * 1000;
-
-    for (const MapCascadeUpstream &upstream : cascade.upstreams)
+    if (canceled())
     {
+        result.status = TerrainProviderFetchStatus::Cancelled;
+        result.error_message = QStringLiteral("Terrain cascade canceled");
+        return result;
+    }
+
+    const qsizetype first_index = resuming ? poll->upstream_index : 0;
+    for (qsizetype upstream_index = first_index; upstream_index < cascade.upstreams.size();
+         ++upstream_index)
+    {
+        const MapCascadeUpstream &upstream = cascade.upstreams.at(upstream_index);
+        const bool resumed_upstream = resuming && upstream_index == first_index;
         // A WireGuard upstream only through its running tunnel, never directly.
         if (!cascadeUpstreamUsable(upstream)) continue;
         if (this->upstream_health.coolingDown(upstream.name, QDateTime::currentMSecsSinceEpoch()) ||
@@ -918,7 +939,10 @@ TerrainProviderFetchResult TerrainData::fetchNormalizedFromUpstreams(
 
         QNetworkAccessManager *network = cascadeNetworkManager(upstream, generation);
         QElapsedTimer polling;
-        polling.start();
+        if (resumed_upstream && poll->polling.isValid())
+            polling = poll->polling;
+        else
+            polling.start();
         bool next_upstream = false;
         while (!next_upstream)
         {
@@ -1006,6 +1030,18 @@ TerrainProviderFetchResult TerrainData::fetchNormalizedFromUpstreams(
                 // Retry-After clamped to 1..5 s: soon enough to pick up a
                 // finished tile quickly, far enough apart to stay cheap.
                 const qint64 wait_ms = qint64(qBound(1, retry_after_s, 5)) * 1000;
+                if (poll != nullptr)
+                {
+                    // Hand the wait back to the caller: no worker sleeps.
+                    poll->pending = true;
+                    poll->retry_after_ms = int(wait_ms);
+                    poll->upstream_index = upstream_index;
+                    poll->polling = polling;
+                    result.status = TerrainProviderFetchStatus::SourceUnavailable;
+                    result.error_message = QStringLiteral(
+                        "MAP upstream '%1' is still acquiring the terrain tile").arg(upstream.name);
+                    return result;
+                }
                 QElapsedTimer waited;
                 waited.start();
                 while (waited.elapsed() < wait_ms)
@@ -1120,7 +1156,7 @@ TerrainProviderFetchResult TerrainData::fetchNormalizedFromUpstreams(
                 file.cancelWriting();
                 return result;
             }
-            this->recordCacheUse(file_path);
+            recordCacheUse(file_path);
             result.status = TerrainProviderFetchStatus::Ready;
             result.origin = TerrainDataOrigin::Cache;
             result.error_message.clear();
@@ -1133,9 +1169,10 @@ TerrainProviderFetchResult TerrainData::fetchNormalizedFromUpstreams(
 TerrainProviderFetchResult TerrainData::acquireTileSources(
     const QString &dataset, const TerrainTileAddress &address,
     const std::shared_ptr<std::atomic_bool> &cancel_requested,
-    const QByteArray &cascade_trace) const
+    const QByteArray &cascade_trace, TerrainCascadePoll *poll) const
 {
-    const MapCascadeConfig cascade = this->cascadeConfig();
+    if (poll != nullptr) poll->pending = false;
+    const MapCascadeConfig cascade = cascadeConfig();
     TerrainProviderFetchResult result;
     result.status = TerrainProviderFetchStatus::Ready;
     if (!this->initialized || !this->config.remote_fetch_enabled ||
@@ -1151,7 +1188,7 @@ TerrainProviderFetchResult TerrainData::acquireTileSources(
         && (GlobalTerrainOverview::available(this->storage_paths.offline_packages)
             || cascade.upstreams.isEmpty()))
         return result;
-    const CacheAccessIndex::PayloadLease lease = this->leaseCachePayload(normalizedTilePath(dataset, address));
+    const CacheAccessIndex::PayloadLease lease = leaseCachePayload(normalizedTilePath(dataset, address));
     // A normalized cache hit requires no provider-native acquisition.
     if (readNormalizedTile(dataset, address).status == TerrainTileLookupStatus::Ready)
         return result;
@@ -1165,7 +1202,10 @@ TerrainProviderFetchResult TerrainData::acquireTileSources(
     {
         bool upstream_busy = false;
         const TerrainProviderFetchResult upstream_result = fetchNormalizedFromUpstreams(
-            dataset, address, cancel_requested, cascade_trace, &upstream_busy);
+            dataset, address, cancel_requested, cascade_trace, &upstream_busy, poll);
+        // Still polling: the caller asks again later with the same state.
+        if (poll != nullptr && poll->pending)
+            return upstream_result;
         // A busy upstream is reachable and will have capacity again soon:
         // fail this attempt (the caller retries) instead of downloading the
         // whole Copernicus source tile over the slow link.
@@ -1188,7 +1228,7 @@ TerrainProviderFetchResult TerrainData::acquireTileSources(
 bool TerrainData::tileNeedsRemoteAcquisition(const QString &dataset,
                                              const TerrainTileAddress &address) const
 {
-    const MapCascadeConfig cascade = this->cascadeConfig();
+    const MapCascadeConfig cascade = cascadeConfig();
     if (!isRemoteFetchEnabled())
         return false;
     if (this->config.copernicus_enabled && GlobalTerrainOverview::supports(dataset, address)
@@ -1299,7 +1339,7 @@ TerrainTileLookupResult TerrainData::terrainTile(const QString &dataset,
             return overview.value();
     }
 
-    const CacheAccessIndex::PayloadLease lease = this->leaseCachePayload(normalizedTilePath(dataset, address));
+    const CacheAccessIndex::PayloadLease lease = leaseCachePayload(normalizedTilePath(dataset, address));
     result = readNormalizedTile(dataset, address);
     if (result.status == TerrainTileLookupStatus::Ready ||
         result.status == TerrainTileLookupStatus::TileReadError)
@@ -1381,7 +1421,7 @@ TerrainTileLookupResult TerrainData::readNormalizedTile(
 {
     TerrainTileLookupResult result;
     const QString path = normalizedTilePath(dataset, address);
-    const CacheAccessIndex::PayloadLease lease = this->leaseCachePayload(path);
+    const CacheAccessIndex::PayloadLease lease = leaseCachePayload(path);
     const QFileInfo file_info(path);
     if (!file_info.exists())
     {
@@ -1446,7 +1486,7 @@ TerrainTileLookupResult TerrainData::readNormalizedTile(
         return result;
     }
 
-    this->recordCacheUse(path);
+    recordCacheUse(path);
     result.status = TerrainTileLookupStatus::Ready;
     result.data = data;
     result.origin = TerrainDataOrigin::Cache;
@@ -1459,7 +1499,7 @@ TerrainTileLookupResult TerrainData::fetchAndStoreNormalizedTile(
     const QString &dataset, const TerrainTileAddress &address,
     bool allow_remote_fetch) const
 {
-    const MapCascadeConfig cascade = this->cascadeConfig();
+    const MapCascadeConfig cascade = cascadeConfig();
     TerrainTileLookupResult result;
     bool dataset_supported = false;
     bool address_supported = false;
@@ -1588,7 +1628,7 @@ TerrainTileLookupResult TerrainData::fetchAndStoreNormalizedTile(
             return result;
         }
 
-        this->recordCacheUse(path);
+        recordCacheUse(path);
         result.status = TerrainTileLookupStatus::Ready;
         result.data = encoded;
         result.origin = provider_result.origin;
@@ -1620,8 +1660,10 @@ TerrainTileLookupResult TerrainData::fetchAndStoreNormalizedTile(
 
 TerrainProviderFetchResult TerrainData::acquireElevationSources(
     const QString &dataset, double latitude_deg, double longitude_deg,
-    const std::shared_ptr<std::atomic_bool> &cancel_requested) const
+    const std::shared_ptr<std::atomic_bool> &cancel_requested,
+    TerrainCascadePoll *poll) const
 {
+    if (poll != nullptr) poll->pending = false;
     TerrainProviderFetchResult result;
     result.status = TerrainProviderFetchStatus::Ready;
     if (!this->initialized || !this->config.remote_fetch_enabled ||
@@ -1640,7 +1682,7 @@ TerrainProviderFetchResult TerrainData::acquireElevationSources(
         {
             if (provider->supportsDataset(dataset) &&
                 provider->supportsAddress(dataset, position->address))
-                return acquireTileSources(dataset, position->address, cancel_requested);
+                return acquireTileSources(dataset, position->address, cancel_requested, {}, poll);
         }
     }
     return result;

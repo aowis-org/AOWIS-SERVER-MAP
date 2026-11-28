@@ -208,7 +208,7 @@ RasterTransferOptimizer::Selection RasterTransferOptimizer::select(
         ++this->counters.tiles_evaluated;
         this->counters.encoding_microseconds += elapsed;
         if (!encoded) ++this->counters.skipped_unsafe;
-        this->cacheLocked(key, selection);
+        cacheLocked(key, selection);
     }
     return selection;
 }

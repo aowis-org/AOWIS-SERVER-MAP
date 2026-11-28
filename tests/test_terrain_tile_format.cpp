@@ -74,7 +74,7 @@ int main()
                  "LOD metadata round trip failed")) return 1;
     TerrainTile absent = tile;
     absent.source_statistics.reset(); absent.geometric_error.reset();
-    const auto absent_round_trip = decodeTerrainTile(encodeTerrainTile(absent));
+    const std::optional<TerrainTile> absent_round_trip = decodeTerrainTile(encodeTerrainTile(absent));
     if (!require(absent_round_trip && !absent_round_trip->source_statistics &&
                  !absent_round_trip->geometric_error, "Absent LOD metadata became present")) return 1;
     TerrainTile invalid = tile;

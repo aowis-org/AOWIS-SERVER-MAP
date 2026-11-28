@@ -239,7 +239,7 @@ bool readMapProviderCatalog(QSettings *settings, Server::Config *config,
                 return false;
             }
             Aowis::Map::MapProvider provider;
-            for (const auto &known : defaults)
+            for (const Aowis::Map::MapProvider &known : defaults)
                 if (known.id == id) provider = known;
             provider.id = id;
             settings->beginGroup(group);

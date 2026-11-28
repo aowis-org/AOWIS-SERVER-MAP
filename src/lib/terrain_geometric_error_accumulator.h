@@ -53,7 +53,7 @@ public:
 
     TerrainGeometricError result() const
     {
-        auto value = error;
+        TerrainGeometricError value = this->error;
         if (value.compared_pixel_count != 0)
             value.rms_geometric_error_m = std::sqrt(squared_error_sum / double(value.compared_pixel_count));
         return value;

@@ -616,7 +616,8 @@ int main(int argc, char **argv)
         if (step < 2)
         {
             const qint64 expected = step == 0 ? 300 : 700;
-            const auto state = Aowis::Map::Internal::loadCopernicusPartialState(
+            const std::optional<Aowis::Map::Internal::CopernicusPartialState> state =
+                Aowis::Map::Internal::loadCopernicusPartialState(
                 partial, metadata, 256LL * 1024LL * 1024LL);
             if (!state || state->downloaded_bytes != expected)
             {

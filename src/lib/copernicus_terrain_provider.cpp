@@ -578,8 +578,8 @@ SourceLoadResult downloadSourceTile(const QString &provider_cache_directory,
     reply->deleteLater();
     output.close();
 
-    const auto discard_incoming = [&]() { QFile::remove(incoming_path); };
-    const auto discard_partial = [&]()
+    const std::function<void()> discard_incoming = [&]() { QFile::remove(incoming_path); };
+    const std::function<void()> discard_partial = [&]()
     {
         QFile::remove(partial_path);
         QFile::remove(metadata_path);
@@ -1560,8 +1560,10 @@ public:
                 const double cell_north = double(cell_south + 1);
                 // Expand by one index for floating-point boundary rounding;
                 // then test the geographic centre itself before visiting.
-                const auto longitude = [&](int column) { return cell_west + double(column) / width; };
-                const auto latitude = [&](int row) { return cell_north - double(row) / height; };
+                const std::function<double(int)> longitude =
+                    [&](int column) -> double { return cell_west + double(column) / width; };
+                const std::function<double(int)> latitude =
+                    [&](int row) -> double { return cell_north - double(row) / height; };
                 int first_column = std::max(0, int(std::floor((west - cell_west) * width)));
                 int last_column = std::min(width - 1, int(std::ceil((east - cell_west) * width)));
                 int first_row = std::max(0, int(std::floor((cell_north - north) * height)));
@@ -1605,7 +1607,7 @@ public:
                     return std::nullopt;
             }
         }
-        auto result = accumulator.result();
+        TerrainGeometricError result = accumulator.result();
         result.missing_source_cells = missing_cells;
         if (result.compared_pixel_count == 0)
             return std::nullopt;

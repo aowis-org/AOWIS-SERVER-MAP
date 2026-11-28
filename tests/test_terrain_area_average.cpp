@@ -231,7 +231,7 @@ TerrainGeometricError referenceGeometricError(const TerrainTile &tile, int south
 {
     TerrainGeometricError result;
     double squared = 0.0;
-    const auto &address = tile.address;
+    const TerrainTileAddress &address = tile.address;
     const double north = latitudeAt(address, 0), south = latitudeAt(address, TerrainTileCellCount);
     const double west = longitudeAt(address, 0), east = longitudeAt(address, TerrainTileCellCount);
     for (int row = 0; row < SourcePixels; ++row)
@@ -466,7 +466,7 @@ int main(int argc, char **argv)
     const TerrainTileAddress peak = addressFor(52.5, 8.5, 10);
     std::optional<TerrainSourceStatistics> peak_statistics;
     std::optional<TerrainGeometricError> peak_error;
-    const auto peak_tile = loadTile(terrain_data, peak, &peak_statistics, &peak_error);
+    const std::optional<TerrainTile> peak_tile = loadTile(terrain_data, peak, &peak_statistics, &peak_error);
     if (!require(insideCell(peak, 52, 8) && peak_tile &&
                      matchesSourceStatistics(peak_statistics,
                          referenceSourceStatistics(peak, 52, 8, 0.5)) &&
@@ -536,7 +536,7 @@ int main(int argc, char **argv)
                              TerrainProviderFetchStatus::Ready,
                          "cached native source acquisition must succeed locally"))
                 return 1;
-            const auto rebuilt = upgraded.terrainTile(dataset, address);
+            const TerrainTileLookupResult rebuilt = upgraded.terrainTile(dataset, address);
             if (!require(rebuilt.status == TerrainTileLookupStatus::Ready &&
                              rebuilt.origin == TerrainDataOrigin::Cache &&
                              rebuilt.source_statistics && rebuilt.geometric_error &&

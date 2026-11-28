@@ -13,6 +13,7 @@
 
 
 #include <QByteArray>
+#include <QElapsedTimer>
 #include <QHash>
 #include <QMutex>
 #include <QString>
@@ -106,6 +107,23 @@ struct TerrainCacheDeletionResult
 
 QString terrainCacheDeletionStatusId(TerrainCacheDeletionStatus status);
 
+// Resumable MAP-to-MAP polling of one terrain tile acquisition. With a poll
+// state, acquireTileSources() does not sleep while an upstream answers 202:
+// it returns with pending set, and the caller calls it again with the same
+// state after retry_after_ms, from any thread. The worker thread stays free
+// meanwhile. Without a poll state the call polls in place (blocking).
+struct TerrainCascadePoll
+{
+    // Set by the last call: ask again after retry_after_ms.
+    bool pending = false;
+    int retry_after_ms = 1000;
+    // Internal resume position; callers only create and keep the state.
+    bool active = false;
+    qsizetype upstream_index = 0;
+    std::uint64_t generation = 0;
+    QElapsedTimer polling;
+};
+
 class TerrainProvider;
 
 class TerrainData : public QObject
@@ -186,12 +204,14 @@ public:
     TerrainProviderFetchResult acquireTileSources(
         const QString &dataset, const TerrainTileAddress &address,
         const std::shared_ptr<std::atomic_bool> &cancel_requested = {},
-        const QByteArray &cascade_trace = {}) const;
+        const QByteArray &cascade_trace = {},
+        TerrainCascadePoll *poll = nullptr) const;
 
     // Acquire the highest-resolution point tile sources before CPU-only sampling.
     TerrainProviderFetchResult acquireElevationSources(
         const QString &dataset, double latitude_deg, double longitude_deg,
-        const std::shared_ptr<std::atomic_bool> &cancel_requested = {}) const;
+        const std::shared_ptr<std::atomic_bool> &cancel_requested = {},
+        TerrainCascadePoll *poll = nullptr) const;
 
     // HTTP-thread classification of requests (file metadata only): true when
     // serving the request may first need a provider-native download, so it
@@ -266,7 +286,8 @@ private:
     TerrainProviderFetchResult fetchNormalizedFromUpstreams(
         const QString &dataset, const TerrainTileAddress &address,
         const std::shared_ptr<std::atomic_bool> &cancel_requested,
-        const QByteArray &cascade_trace, bool *upstream_busy) const;
+        const QByteArray &cascade_trace, bool *upstream_busy,
+        TerrainCascadePoll *poll = nullptr) const;
     TerrainTileLookupResult fetchAndStoreNormalizedTile(const QString &dataset,
                                                         const TerrainTileAddress &address,
                                                         bool allow_remote_fetch) const;

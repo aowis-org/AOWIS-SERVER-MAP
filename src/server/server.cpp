@@ -12,6 +12,7 @@
 #include <QHttpHeaders>
 #endif
 #include <QThread>
+#include <QTimer>
 #include <QTcpSocket>
 #include <QDir>
 #include <QFileInfo>
@@ -736,7 +737,12 @@ QFuture<QHttpServerResponse> Server::submitTerrainTile(
     const bool detached = client_request != nullptr && remote_job &&
         requestWantsCacheFirst(*client_request);
     if (detached && existing)
+    {
+        // A polling downstream now depends on this flight: it must keep
+        // running when the clients that started it disconnect.
+        this->detached_terrain_tiles.insert(key);
         return makeReadyResponse(terrainAcceptedResponse());
+    }
     if (detached)
     {
         const QHash<QString, DetachedTerrainFailure>::iterator failure =
@@ -861,17 +867,34 @@ QFuture<QHttpServerResponse> Server::submitTerrainTile(
         this->terrain_worker_pool.start(process_tile);
         return future;
     }
-    this->terrain_remote_pool.start([this, key, dataset, address, process_tile, cancellation, cascade_trace]()
+    // While a MAP upstream answers 202 the job waits on a timer, not in a
+    // remote worker: a slow upstream acquisition must not occupy the few
+    // remote threads for the whole download deadline. The job keeps both
+    // admission slots while it waits.
+    const std::shared_ptr<Aowis::Map::TerrainCascadePoll> poll =
+        std::make_shared<Aowis::Map::TerrainCascadePoll>();
+    const std::shared_ptr<std::function<void()>> acquire_step =
+        std::make_shared<std::function<void()>>();
+    const std::weak_ptr<std::function<void()>> weak_step = acquire_step;
+    *acquire_step = [this, key, dataset, address, process_tile, cancellation, cascade_trace,
+                     poll, weak_step]()
     {
         Aowis::Map::TerrainProviderFetchResult acquired;
         try
         {
-            acquired = this->terrain_data->acquireTileSources(dataset, address, cancellation, cascade_trace);
+            acquired = this->terrain_data->acquireTileSources(
+                dataset, address, cancellation, cascade_trace, poll.get());
         }
         catch (...)
         {
+            poll->pending = false;
             acquired.status = Aowis::Map::TerrainProviderFetchStatus::NetworkError;
             acquired.error_message = QStringLiteral("Terrain source acquisition failed");
+        }
+        if (poll->pending && !cancellation->load(std::memory_order_acquire))
+        {
+            scheduleTerrainPoll(weak_step.lock(), poll->retry_after_ms);
+            return;
         }
         this->terrain_remote_admission.release();
         if (acquired.status == Aowis::Map::TerrainProviderFetchStatus::Ready &&
@@ -904,7 +927,8 @@ QFuture<QHttpServerResponse> Server::submitTerrainTile(
                 waiter->finish();
             }
         }, Qt::QueuedConnection);
-    });
+    };
+    this->terrain_remote_pool.start([acquire_step]() { (*acquire_step)(); });
     return detached ? makeReadyResponse(terrainAcceptedResponse()) : future;
 }
 
@@ -961,8 +985,12 @@ QFuture<QHttpServerResponse> Server::submitTerrainElevation(
     const TerrainCancellation cancellation = std::make_shared<std::atomic_bool>(false);
     this->elevation_cancellations.insert(key, cancellation);
 
+    // Set by a failed source acquisition before process_elevation is queued:
+    // reported when no cached tile can answer the point either.
+    const std::shared_ptr<QString> acquisition_error = std::make_shared<QString>();
     const std::function<void()> process_elevation =
-        [this, key, dataset, latitude_deg, longitude_deg, requested_vertical_datum, cancellation]()
+        [this, key, dataset, latitude_deg, longitude_deg, requested_vertical_datum, cancellation,
+         acquisition_error]()
     {
         Aowis::Map::TerrainElevationLookupResult result;
         try
@@ -970,6 +998,12 @@ QFuture<QHttpServerResponse> Server::submitTerrainElevation(
             if (!cancellation->load(std::memory_order_acquire))
                 result = this->terrain_data->sampleElevation(
                     dataset, latitude_deg, longitude_deg, requested_vertical_datum, false);
+            if (!acquisition_error->isEmpty() &&
+                result.status == Aowis::Map::TerrainElevationLookupStatus::TileUnavailable)
+            {
+                result.status = Aowis::Map::TerrainElevationLookupStatus::RemoteFetchError;
+                result.error_message = *acquisition_error;
+            }
         }
         catch (...)
         {
@@ -997,24 +1031,46 @@ QFuture<QHttpServerResponse> Server::submitTerrainElevation(
         this->terrain_worker_pool.start(process_elevation);
         return future;
     }
-    this->terrain_remote_pool.start(
-        [this, key, dataset, latitude_deg, longitude_deg, process_elevation, cancellation]()
+    const std::shared_ptr<Aowis::Map::TerrainCascadePoll> poll =
+        std::make_shared<Aowis::Map::TerrainCascadePoll>();
+    const std::shared_ptr<std::function<void()>> acquire_step =
+        std::make_shared<std::function<void()>>();
+    const std::weak_ptr<std::function<void()>> weak_step = acquire_step;
+    *acquire_step = [this, key, dataset, latitude_deg, longitude_deg, process_elevation,
+                     cancellation, poll, weak_step, acquisition_error]()
     {
         Aowis::Map::TerrainProviderFetchResult acquired;
         try
         {
             acquired = this->terrain_data->acquireElevationSources(
-                dataset, latitude_deg, longitude_deg, cancellation);
+                dataset, latitude_deg, longitude_deg, cancellation, poll.get());
         }
         catch (...)
         {
+            poll->pending = false;
             acquired.status = Aowis::Map::TerrainProviderFetchStatus::NetworkError;
             acquired.error_message = QStringLiteral("Elevation source acquisition failed");
         }
+        if (poll->pending && !cancellation->load(std::memory_order_acquire))
+        {
+            scheduleTerrainPoll(weak_step.lock(), poll->retry_after_ms);
+            return;
+        }
         this->terrain_remote_admission.release();
-        if (acquired.status == Aowis::Map::TerrainProviderFetchStatus::Ready &&
+        // Sampling falls back to cached coarser tiles, so a failed download
+        // of the finest tile must not hide them: only a canceled job (or an
+        // invalid request) ends here without sampling.
+        const bool sample_anyway =
+            acquired.status == Aowis::Map::TerrainProviderFetchStatus::NetworkError ||
+            acquired.status == Aowis::Map::TerrainProviderFetchStatus::SourceUnavailable ||
+            acquired.status == Aowis::Map::TerrainProviderFetchStatus::SourceReadError;
+        if ((acquired.status == Aowis::Map::TerrainProviderFetchStatus::Ready || sample_anyway) &&
             !cancellation->load(std::memory_order_acquire))
         {
+            if (sample_anyway)
+                *acquisition_error = acquired.error_message.isEmpty()
+                    ? QStringLiteral("Elevation source acquisition failed")
+                    : acquired.error_message;
             this->terrain_worker_pool.start(process_elevation);
             return;
         }
@@ -1039,8 +1095,26 @@ QFuture<QHttpServerResponse> Server::submitTerrainElevation(
                 waiter->finish();
             }
         }, Qt::QueuedConnection);
-    });
+    };
+    this->terrain_remote_pool.start([acquire_step]() { (*acquire_step)(); });
     return future;
+}
+
+void Server::scheduleTerrainPoll(const std::shared_ptr<std::function<void()>> &step,
+                                 int delay_ms)
+{
+    // Called on a remote worker. The timer runs on the HTTP thread; a server
+    // being destroyed drops both the queued call and the timer, so a waiting
+    // job never touches a dead server. A canceled job's next step sees its
+    // token at once and finishes through the ordinary failure path.
+    if (!step) return;
+    QMetaObject::invokeMethod(this, [this, step, delay_ms]()
+    {
+        QTimer::singleShot(qMax(1, delay_ms), this, [this, step]()
+        {
+            this->terrain_remote_pool.start([step]() { (*step)(); });
+        });
+    }, Qt::QueuedConnection);
 }
 
 QFuture<QHttpServerResponse> Server::submitTerrainGrid(

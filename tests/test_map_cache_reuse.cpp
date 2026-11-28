@@ -21,6 +21,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <limits>
+#include <functional>
 
 namespace
 {
@@ -47,6 +48,8 @@ void writeFile(const QString &path, const QByteArray &data)
 class MapTilesCacheWriteTestAccess
 {
 public:
+    using PendingWrite = QSharedPointer<MapTiles::CacheWriteState>;
+
     static QSharedPointer<MapTiles::CacheWriteState> injectPendingWrite(
         MapTiles &tiles, const QString &key)
     {
@@ -204,7 +207,7 @@ int main(int argc, char **argv)
         MapTiles writer(race_cache.path(), 2, 8);
         writer.configureProviders(providers, {}, {});
         const QString canonical_key = QStringLiteral("%1/6/31/20").arg(provider_id);
-        const auto state = MapTilesCacheWriteTestAccess::injectPendingWrite(writer, canonical_key);
+        const MapTilesCacheWriteTestAccess::PendingWrite state = MapTilesCacheWriteTestAccess::injectPendingWrite(writer, canonical_key);
         QSemaphore worker_locked;
         std::atomic_bool release_observed{false};
         QFuture<void> active_write = QtConcurrent::run(
@@ -312,7 +315,7 @@ int main(int argc, char **argv)
         while (upstream.hasPendingConnections())
         {
             QTcpSocket *socket = upstream.nextPendingConnection();
-            const auto respond = [socket, &request_count, &image]()
+            const std::function<void()> respond = [socket, &request_count, &image]()
             {
                 if (!socket->bytesAvailable() || socket->property("responded").toBool())
                     return;

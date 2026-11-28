@@ -73,12 +73,12 @@ inline void putDouble(MetadataBuffer &b, int offset, double value)
 }
 inline float getFloat(const unsigned char *b, int offset)
 {
-    const auto bits = std::uint32_t(get(b, offset, 4)); float value;
+    const std::uint32_t bits = std::uint32_t(get(b, offset, 4)); float value;
     std::memcpy(&value, &bits, 4); return value;
 }
 inline double getDouble(const unsigned char *b, int offset)
 {
-    const auto bits = get(b, offset, 8); double value;
+    const std::uint64_t bits = get(b, offset, 8); double value;
     std::memcpy(&value, &bits, 8); return value;
 }
 inline bool zero(const unsigned char *b, int first, int end)
@@ -120,7 +120,7 @@ inline bool decodeMetadata(const unsigned char *b, std::size_t size,
 {
     using namespace Detail;
     if (!b || size < MetadataBytes) return false;
-    const auto flags = get(b, 0, 4);
+    const std::uint64_t flags = get(b, 0, 4);
     if (flags & ~std::uint64_t(3)) return false;
     std::optional<TerrainSourceStatistics> s;
     std::optional<TerrainGeometricError> e;

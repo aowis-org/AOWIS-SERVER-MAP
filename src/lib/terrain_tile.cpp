@@ -269,7 +269,7 @@ QByteArray encodeTerrainTile(const TerrainTile &tile, QString *error_message)
         return QByteArray();
     }
 
-    const auto metadata = TerrainWire::encodeMetadata(tile.source_statistics, tile.geometric_error);
+    const std::optional<Aowis::TerrainWire::MetadataBuffer> metadata = TerrainWire::encodeMetadata(tile.source_statistics, tile.geometric_error);
     if (!metadata)
     {
         setError(error_message, QStringLiteral("Invalid terrain LOD metadata"));

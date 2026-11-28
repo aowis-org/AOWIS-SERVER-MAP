@@ -11,6 +11,7 @@
 #include <QString>
 
 #include <optional>
+#include <functional>
 
 namespace Aowis::Map::Internal
 {
@@ -124,7 +125,8 @@ inline bool appendCopernicusPartialSuffix(const QString &partial_path,
     if (!prefix.open(QIODevice::ReadOnly) || !suffix.open(QIODevice::ReadOnly) ||
         !combined.open(QIODevice::WriteOnly))
         return false;
-    const auto copy_bytes = [&combined](QFile &source, qint64 expected) -> bool
+    const std::function<bool(QFile &, qint64)> copy_bytes =
+        [&combined](QFile &source, qint64 expected) -> bool
     {
         qint64 remaining = expected;
         while (remaining > 0)

@@ -10,6 +10,7 @@
 #include <cmath>
 #include <numbers>
 #include <iterator>
+#include <functional>
 
 namespace Aowis::Map
 {
@@ -30,7 +31,7 @@ Bounds xyzBounds(int zoom, int x, int y)
     const double count = double(quint64(1) << zoom);
     const double west = double(x) / count * 360.0 - 180.0;
     const double east = double(x + 1) / count * 360.0 - 180.0;
-    const auto latitude = [count](int row) -> double
+    const std::function<double(int)> latitude = [count](int row) -> double
     {
         return qRadiansToDegrees(std::atan(std::sinh(std::numbers::pi * (1.0 - 2.0 * double(row) / count))));
     };
@@ -42,8 +43,8 @@ bool ringContains(const QVector<QPair<double, double>> &ring, double x, double y
     bool inside = false;
     for (qsizetype i = 0, j = ring.size() - 1; i < ring.size(); j = i++)
     {
-        const auto &a = ring[i];
-        const auto &b = ring[j];
+        const QPair<double, double> &a = ring[i];
+        const QPair<double, double> &b = ring[j];
         if ((a.second > y) != (b.second > y) &&
             x < (b.first - a.first) * (y - a.second) / (b.second - a.second) + a.first)
             inside = !inside;
@@ -54,7 +55,8 @@ bool ringContains(const QVector<QPair<double, double>> &ring, double x, double y
 bool segmentsIntersect(double ax, double ay, double bx, double by,
                        double cx, double cy, double dx, double dy)
 {
-    const auto cross = [](double x1, double y1, double x2, double y2, double x3, double y3)
+    const std::function<double(double, double, double, double, double, double)> cross =
+        [](double x1, double y1, double x2, double y2, double x3, double y3) -> double
     {
         return (x2 - x1) * (y3 - y1) - (y2 - y1) * (x3 - x1);
     };
@@ -66,8 +68,9 @@ bool segmentsIntersect(double ax, double ay, double bx, double by,
         ((o3 > 0 && o4 < 0) || (o3 < 0 && o4 > 0)))
         return true;
     constexpr double epsilon = 1e-10;
-    const auto on = [epsilon](double px, double py, double ax, double ay,
-                              double bx, double by)
+    const std::function<bool(double, double, double, double, double, double)> on =
+        [epsilon](double px, double py, double ax, double ay,
+                  double bx, double by) -> bool
     {
         return std::abs((bx - ax) * (py - ay) - (by - ay) * (px - ax)) < epsilon &&
                px >= std::min(ax, bx) - epsilon && px <= std::max(ax, bx) + epsilon &&
@@ -173,7 +176,7 @@ bool DownloadCoverage::intersectsPolygon(const Polygon &polygon, const Bounds &t
             pairs.append(qMakePair(p.lon, p.lat));
         rings.append(pairs);
     }
-    const auto inside = [&rings](double x, double y)
+    const std::function<bool(double, double)> inside = [&rings](double x, double y) -> bool
     {
         if (!ringContains(rings.first(), x, y)) return false;
         for (qsizetype i = 1; i < rings.size(); ++i)

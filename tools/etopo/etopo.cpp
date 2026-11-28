@@ -155,7 +155,7 @@ public:
             for (uint32_t y = 0; y < this->height; ++y)
             {
                 require(TIFFReadScanline(file, row.data(), y, 0) == 1, "incomplete TIFF scanline");
-                this->validateRow(row.data());
+                validateRow(row.data());
                 visitor(y, row.data());
             }
             return;
@@ -179,7 +179,7 @@ public:
             for (uint32_t j = 0; j < rows; ++j)
             {
                 const float *row = band.data() + size_t(j) * this->width;
-                this->validateRow(row);
+                validateRow(row);
                 visitor(y + j, row);
             }
         }

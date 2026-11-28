@@ -23,6 +23,11 @@ namespace
 {
 constexpr int TileMemoryCacheMaximumCostKiB = 256 * 1024;
 constexpr int MaximumActiveDownloadsPerOrigin = 6;
+// A MAP upstream answers 202 while it acquires a tile itself; the download
+// then holds its slot for up to the cascade poll budget although it only
+// sends small polls. The public tile-server courtesy limit above would let six
+// slow tiles stall the whole downstream, so MAP upstreams get more slots.
+constexpr int MaximumActiveDownloadsPerCascadeOrigin = 16;
 constexpr int MaximumPendingCacheWrites = 64;
 constexpr int MaximumPendingCacheReads = 64;
 constexpr qint64 MaximumPendingCacheReadBytes = 64LL * 1024 * 1024;
@@ -179,7 +184,7 @@ std::string MapTiles::cacheStorageKey(const QString &tile_base_path) const
 
 void MapTiles::recordCacheUse(const QString &tile_base_path) const
 {
-    this->cache_access_index.recordAccess(this->cacheStorageKey(tile_base_path));
+    this->cache_access_index.recordAccess(cacheStorageKey(tile_base_path));
 }
 
 bool MapTiles::setCacheStoragePolicy(const Aowis::Map::CacheStoragePolicy &policy)
@@ -199,8 +204,8 @@ Aowis::Map::CacheCleanupResult MapTiles::lastCacheCleanup() const
 
 std::string MapTiles::cacheProtectionNamespace(const QString &provider) const
 {
-    const QString path = this->providerCachePath(provider);
-    return path.isEmpty() ? std::string() : this->cacheStorageKey(path);
+    const QString path = providerCachePath(provider);
+    return path.isEmpty() ? std::string() : cacheStorageKey(path);
 }
 
 bool MapTiles::replaceCacheProtectionGroup(const Aowis::Map::CacheProtectionGroup &group)
@@ -226,7 +231,7 @@ void MapTiles::recordMemoryCacheUse(const QString &provider, int z, int x, int y
     // Do not call providerCachePath() or stat a tile on the RAM-hit path.
     const QString cache_path = this->provider_cache_paths.value(provider);
     if (!cache_path.isEmpty())
-        this->recordCacheUse(rasterTileBasePath(cache_path, z, x, y));
+        recordCacheUse(rasterTileBasePath(cache_path, z, x, y));
 }
 
 void MapTiles::setPermanentDataDirectory(const QString &directory)
@@ -235,7 +240,7 @@ void MapTiles::setPermanentDataDirectory(const QString &directory)
     if (!directory.isEmpty() && Aowis::Map::cacheStorageRootsOverlap(
         std::filesystem::path(QDir(this->fscache_base).absoluteFilePath(QStringLiteral("maptiles")).toStdU16String()),
         std::filesystem::path(QDir(directory).absoluteFilePath(QStringLiteral("maptiles")).toStdU16String())))
-        this->setCacheStoragePolicy({});
+        setCacheStoragePolicy({});
     ++this->cache_generation;
     this->permanent_data_directory = directory;
     this->permanent_cached_keys.clear();
@@ -481,7 +486,7 @@ MapTiles::TileRequestResult MapTiles::getTile(const QString &provider, int z, in
         const QByteArray *cached = this->tile_memory_cache.object(canonical_key);
         if (cached != nullptr && !cached->isEmpty())
         {
-            this->recordMemoryCacheUse(provider, z, wrapped_x, y, canonical_key);
+            recordMemoryCacheUse(provider, z, wrapped_x, y, canonical_key);
             return { TileRequestStatus::Ready, *cached };
         }
     }
@@ -518,13 +523,13 @@ MapTiles::TileRequestResult MapTiles::getTile(const QString &provider, int z, in
     const QByteArray *memory_tile = this->tile_memory_cache.object(canonical_key);
     if (memory_tile != nullptr && !memory_tile->isEmpty())
     {
-        this->recordCacheUse(tile_base_path);
+        recordCacheUse(tile_base_path);
         return { TileRequestStatus::Ready, *memory_tile };
     }
 
     {
         const Aowis::Map::CacheAccessIndex::PayloadLease lease =
-            this->cache_access_index.leasePayload(this->cacheStorageKey(tile_base_path));
+            this->cache_access_index.leasePayload(cacheStorageKey(tile_base_path));
         QFile file(existingRasterTilePath(tile_base_path));
         if (!file.fileName().isEmpty() && file.open(QIODevice::ReadOnly))
         {
@@ -533,7 +538,7 @@ MapTiles::TileRequestResult MapTiles::getTile(const QString &provider, int z, in
             {
                 this->tile_memory_cache.insert(
                     canonical_key, new QByteArray(data), tileMemoryCacheCostKiB(data));
-                this->recordCacheUse(tile_base_path);
+                recordCacheUse(tile_base_path);
                 return { TileRequestStatus::Ready, data };
             }
         }
@@ -643,7 +648,7 @@ MapTiles::TileRequestResult MapTiles::getTileForHttp(
         const QByteArray *cached = this->tile_memory_cache.object(canonical_key);
         if (cached != nullptr && !cached->isEmpty())
         {
-            this->recordMemoryCacheUse(provider, z, wrapped_x, y, canonical_key);
+            recordMemoryCacheUse(provider, z, wrapped_x, y, canonical_key);
             return { TileRequestStatus::Ready, *cached };
         }
     }
@@ -663,11 +668,11 @@ MapTiles::TileRequestResult MapTiles::getTileForHttp(
         const QByteArray *cached = this->tile_memory_cache.object(canonical_key);
         if (cached != nullptr && !cached->isEmpty())
         {
-            this->recordMemoryCacheUse(provider, z, wrapped_x, y, canonical_key);
+            recordMemoryCacheUse(provider, z, wrapped_x, y, canonical_key);
             return { TileRequestStatus::Ready, *cached };
         }
         const QString tile_base_path = rasterTileBasePath(providerCachePath(provider), z, wrapped_x, y);
-        lease = this->cache_access_index.leasePayload(this->cacheStorageKey(tile_base_path));
+        lease = this->cache_access_index.leasePayload(cacheStorageKey(tile_base_path));
         read_path = existingRasterTilePath(tile_base_path);
     }
 
@@ -712,7 +717,7 @@ MapTiles::TileRequestResult MapTiles::getTileForHttp(
             this->tile_memory_cache.insert(canonical_key,
                 new QByteArray(data), tileMemoryCacheCostKiB(data));
             if (permanent) this->permanent_cached_keys.insert(canonical_key);
-            else this->recordCacheUse(read_path.left(read_path.lastIndexOf(QLatin1Char('.'))));
+            else recordCacheUse(read_path.left(read_path.lastIndexOf(QLatin1Char('.'))));
             for (const QString &response_key : request_keys) emit tileReady(response_key, data);
             return;
         }
@@ -880,7 +885,7 @@ int MapTiles::deleteTiles(const QString &provider, int zoom, int tile_x_min, int
 
             const QString tile_path = x_directory.filePath(tile_file_name);
             const Aowis::Map::CacheAccessIndex::PayloadLease lease = this->cache_access_index.leasePayload(
-                this->cacheStorageKey(tile_path.left(tile_path.lastIndexOf(QLatin1Char('.')))));
+                cacheStorageKey(tile_path.left(tile_path.lastIndexOf(QLatin1Char('.')))));
             if (!QFile::remove(tile_path))
             {
                 qWarning() << "Failed to delete cached tile:" << tile_path;
@@ -1006,8 +1011,16 @@ bool MapTiles::canStartDownloadLocked(const QueuedDownload &download) const
     if (this->downloads_active.size() >= this->maximum_active_downloads)
         return false;
 
+    bool cascade_origin = false;
+    for (const DownloadSource &source : download.sources)
+        if (source.url == download.url)
+        {
+            cascade_origin = source.cascade;
+            break;
+        }
     return this->downloads_active_per_origin.value(downloadOrigin(download.url), 0) <
-           MaximumActiveDownloadsPerOrigin;
+           (cascade_origin ? MaximumActiveDownloadsPerCascadeOrigin
+                           : MaximumActiveDownloadsPerOrigin);
 }
 
 void MapTiles::markDownloadStartedLocked(const QueuedDownload &download)
@@ -1159,9 +1172,9 @@ void MapTiles::attemptMapTileDownload(const QueuedDownload &download, int source
             if (write_state->invalidated.load(std::memory_order_acquire))
                 return true; // deletion intentionally discarded persistence
             const Aowis::Map::CacheAccessIndex::PayloadLease lease =
-                this->cache_access_index.leasePayload(this->cacheStorageKey(tile_path));
+                this->cache_access_index.leasePayload(cacheStorageKey(tile_path));
             const bool saved = MapTiles::saveMapTile(data, tile_path);
-            if (saved) this->recordCacheUse(tile_path);
+            if (saved) recordCacheUse(tile_path);
             return saved;
         }));
     });

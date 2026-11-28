@@ -590,7 +590,7 @@ class CacheAccessIndex::Impl
 {
 public:
     explicit Impl(const std::filesystem::path &root)
-        : root(root), database_path(root / IndexFilename), worker([this]() { this->run(); })
+        : root(root), database_path(root / IndexFilename), worker([this]() { run(); })
     {
         std::error_code error;
         if (std::filesystem::is_directory(root, error))
@@ -607,7 +607,7 @@ public:
         }
         this->condition.notify_one();
         this->worker.join();
-        this->flush();
+        flush();
     }
 
     void record(const std::string &key)
@@ -637,7 +637,7 @@ public:
         }
         if (batch.empty()) return true;
         std::string error;
-        if (this->writeBatch(batch, error))
+        if (writeBatch(batch, error))
         {
             std::lock_guard<std::mutex> lock(this->mutex);
             this->last_error.clear();
@@ -820,7 +820,7 @@ public:
         const CacheStoragePolicy policy = this->policy;
         const CacheStorageKind kind = this->kind;
         CacheCleanupResult result;
-        if (policy.maximum_bytes == 0) return this->publish(result);
+        if (policy.maximum_bytes == 0) return publish(result);
         const ExclusiveCleanup ownership(this->gate);
         if (!ownership.acquired)
         {
@@ -829,11 +829,11 @@ public:
             result.errors = stats.scan_errors;
             result.shared_root = true;
             result.target_reached = !result.errors && result.remaining_bytes <= policy.maximum_bytes;
-            return this->publish(result);
+            return publish(result);
         }
         // Freeze durable recency during selection; newer access hints remain
         // in pending and are rechecked before unlinking each candidate.
-        if (!this->flush()) { ++result.errors; result.target_reached = false; return this->publish(result); }
+        if (!flush()) { ++result.errors; result.target_reached = false; return publish(result); }
         std::lock_guard<std::mutex> disk_lock(this->disk_mutex);
         const CacheStorageStatistics stats = scanCacheStorage(this->root, kind);
         result.before_bytes = result.remaining_bytes = stats.payload_bytes;
@@ -844,7 +844,7 @@ public:
         {
             result.target_reached = !result.errors;
             if (result.target_reached) this->cleanup_in_progress = false;
-            return this->publish(result);
+            return publish(result);
         }
         this->cleanup_in_progress = true;
         Database database;
@@ -857,7 +857,7 @@ public:
             sqlite3_prepare_v2(database.handle, "SELECT 1 FROM cache_protection WHERE source_namespace=?1 AND "
                 "zoom=?2 AND min_x<=?3 AND max_x>=?3 AND min_y<=?4 AND max_y>=?4 LIMIT 1", -1,
                 &protection.handle, nullptr) != SQLITE_OK)
-        { ++result.errors; result.target_reached = false; return this->publish(result); }
+        { ++result.errors; result.target_reached = false; return publish(result); }
         std::uint64_t initial_dropped;
         { std::lock_guard<std::mutex> lock(this->mutex); initial_dropped = this->dropped; }
         std::vector<EvictionCandidate> candidates;
@@ -919,7 +919,7 @@ public:
             it.increment(error);
         }
         if (error) ++result.errors;
-        if (result.errors) { result.target_reached = false; return this->publish(result); }
+        if (result.errors) { result.target_reached = false; return publish(result); }
         std::sort_heap(candidates.begin(), candidates.end(), olderCandidate);
         std::vector<std::string> removed_keys;
         for (const EvictionCandidate &candidate : candidates)
@@ -997,7 +997,7 @@ public:
         result.errors += after.scan_errors;
         result.target_reached = !result.errors && result.remaining_bytes <= target;
         if (result.target_reached) this->cleanup_in_progress = false;
-        return this->publish(result);
+        return publish(result);
     }
 
     CacheCleanupResult publish(const CacheCleanupResult &result)
@@ -1021,16 +1021,16 @@ public:
             this->policy_changed = false;
             if (check_policy) this->next_cleanup = std::chrono::steady_clock::now() + FlushInterval;
             lock.unlock();
-            const bool ok = this->flush();
+            const bool ok = flush();
             if (check_policy)
             {
-                try { this->cleanup(); }
+                try { cleanup(); }
                 catch (const std::exception &)
                 {
                     CacheCleanupResult failure;
                     failure.errors = 1;
                     failure.target_reached = false;
-                    this->publish(failure);
+                    publish(failure);
                 }
             }
             lock.lock();

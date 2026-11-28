@@ -3,6 +3,7 @@
 #include <cmath>
 #include <iostream>
 #include <limits>
+#include <functional>
 
 using namespace Aowis::Map::Detail;
 
@@ -11,7 +12,8 @@ int main()
     const float grid[] = {0, 10, 20, 100};
     const float nan = std::numeric_limits<float>::quiet_NaN();
     const float missing[] = {0, 10, 20, nan};
-    const auto near = [](double a, double b) { return std::abs(a - b) < 1e-9; };
+    const std::function<bool(double, double)> near =
+        [](double a, double b) -> bool { return std::abs(a - b) < 1e-9; };
     // The opposite diagonal would give 50 at the centre; bilinear 32.5.
     if (!near(triangularGridElevation(grid, 1, 0.5, 0.5), 15) ||
         !near(triangularGridElevation(grid, 1, 0.75, 0.75), 57.5) ||
@@ -34,7 +36,7 @@ int main()
     accumulator.observe(1000, 1000);
     accumulator.observe(nan, 1000);
     accumulator.observe(1000, nan);
-    const auto error = accumulator.result();
+    const Aowis::Map::TerrainGeometricError error = accumulator.result();
     if (error.compared_pixel_count != 3 || error.no_data_pixel_count != 1 ||
         error.missing_surface_pixel_count != 1 ||
         !near(error.maximum_underestimation_m, 3500) ||
