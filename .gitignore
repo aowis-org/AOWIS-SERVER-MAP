@@ -58,3 +58,8 @@ compile_commands.json
 
 # Debian binary packages and generated distribution files
 /dist/
+
+# Versioned terrain data are prepared outside source control.
+/ETOPO_2022_v1_60s_N90W180_surface.tif*
+/global-overview-v1.aowpack*
+/terrain-data/
