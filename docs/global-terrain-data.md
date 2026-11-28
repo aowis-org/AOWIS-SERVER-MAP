@@ -32,8 +32,22 @@ elsewhere, explicitly import it once:
 python3 tools/prepare_global_terrain_data.py --offline --source /path/to/ETOPO_2022_v1_60s_N90W180_surface.tif
 ```
 
-On Arch, install `python-numpy python-rasterio python-pyproj curl`. Debian's
-native dependency installer and Docker toolchain include them. Building the
+On Arch, use an isolated Python environment (outside the checkout):
+
+```bash
+sudo pacman -S --needed python python-pip curl
+python3 -m venv "$HOME/.local/share/aowis-server-map/terrain-python"
+source "$HOME/.local/share/aowis-server-map/terrain-python/bin/activate"
+python -m pip install numpy rasterio pyproj
+```
+
+Keep the environment active when running native build scripts. Debian's native
+dependency installer and Docker toolchain include the Python dependencies.
+Before source acquisition or regeneration, the preparation script checks its
+Python dependencies. A completed `.tif.part` from an earlier failed run is
+validated block by block and promoted without any network request, including
+with `--offline`. An incomplete file is retained for resuming; offline mode
+never invokes curl. Building the
 first overview requires working disk space and RAM for raster reprojection;
 subsequent builds verify and reuse the existing artifacts without reprojection.
 The preparation tool is serialized by a file lock. A missing/corrupt derived pack

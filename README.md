@@ -26,8 +26,8 @@ curl -fsS http://127.0.0.1:8122/terrain/v1/datasets
 
 Standard `compile_linux.sh` builds prepare the permanent NOAA ETOPO 2022 global
 terrain data once, using a persistent build-data directory outside the checkout.
-On Arch Linux install `python-numpy python-rasterio python-pyproj curl` before
-first provisioning. `--no-global-data` is available for code-only development
+On Arch Linux use a Python virtual environment with `numpy`, `rasterio`
+and `pyproj` installed, and ensure `curl` is available. `--no-global-data` is available for code-only development
 builds; `compile_linux_tests.sh` never provisions or downloads the dataset.
 See [global terrain data](docs/global-terrain-data.md).
 

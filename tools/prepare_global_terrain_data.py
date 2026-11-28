@@ -5,6 +5,7 @@ No downloads at runtime. Keep the original GeoTIFF across all rebuilds.
 import argparse
 import fcntl
 import hashlib
+import importlib
 import json
 import os
 from pathlib import Path
@@ -39,8 +40,21 @@ def sha256(path):
         return digest.hexdigest()
 
 
-def validate_source(path):
-    # Check the full raster, not just its filename or TIFF magic bytes.
+def check_dependencies():
+    for name in ('numpy', 'rasterio', 'rasterio.warp', 'pyproj'):
+        try:
+            importlib.import_module(name)
+        except (ImportError, OSError) as error:
+            raise ValueError(
+                f'Python dependency {name} unavailable ({error}). '
+                'On Debian install python3-numpy python3-rasterio python3-pyproj; '
+                'on Arch use a virtual environment with pip install numpy rasterio pyproj. '
+                'Keep any existing ETOPO .part file and retry with the same cache.') from error
+
+
+def validate_source(path, read_pixels=False):
+    # Validate dimensions and CRS; optionally verify every raster block before
+    # accepting a recovered download, since even a truncated TIFF may open.
     import rasterio
     from pyproj import CRS
     with rasterio.open(path) as src:
@@ -55,6 +69,9 @@ def validate_source(path):
             raise ValueError('unexpected ETOPO geographic reference or extent')
         if crs.is_compound and not crs.sub_crs_list[1].equals(CRS.from_epsg(3855)):
             raise ValueError('expected EGM2008 vertical datum')
+        if read_pixels:
+            for _, window in src.block_windows(1):
+                src.read(1, window=window)
         # The overview builder also reads every source pixel and rejects gaps.
 
 
@@ -90,19 +107,33 @@ def prepare(directory, local_source=None, offline=False):
     if source.exists():
         print(f'Reusing original ETOPO: {source}', flush=True)
     elif local_source is not None:
-        validate_source(local_source)
+        check_dependencies()
+        validate_source(local_source, read_pixels=True)
         temporary = directory / (SOURCE + '.import')
         shutil.copyfile(local_source, temporary)
         os.replace(temporary, source)
     else:
-        if offline:
-            raise ValueError('ETOPO source missing and --offline was specified')
         temporary = directory / (SOURCE + '.part')
-        subprocess.run(['curl', '--fail', '--location', '--retry', '3',
-                        '--connect-timeout', '30', '--continue-at', '-',
-                        '--output', str(temporary), URL], check=True)
-        validate_source(temporary)
-        # Only publish a source that can be opened; never overwrite an existing one.
+        if offline and not temporary.is_file():
+            raise ValueError('ETOPO source missing and --offline was specified')
+        check_dependencies()
+        recovered = False
+        if temporary.is_file():
+            try:
+                validate_source(temporary, read_pixels=True)
+            except (OSError, ValueError) as error:
+                print(f'Existing ETOPO partial file not yet usable: {error}', flush=True)
+            else:
+                recovered = True
+                print(f'Reusing completed ETOPO download: {temporary}', flush=True)
+        if not recovered:
+            if offline:
+                raise ValueError('ETOPO partial download incomplete or invalid; --offline forbids resuming it')
+            subprocess.run(['curl', '--fail', '--location', '--retry', '3',
+                            '--connect-timeout', '30', '--continue-at', '-',
+                            '--output', str(temporary), URL], check=True)
+            validate_source(temporary, read_pixels=True)
+        # Only publish a readable source; never overwrite an existing one.
         os.replace(temporary, source)
     source_hash = sha256(source)
     if old is not None and old['source_sha256'] != source_hash:
@@ -110,6 +141,7 @@ def prepare(directory, local_source=None, offline=False):
     if old is not None and pack.exists() and old['overview_sha256'] == sha256(pack):
         print(f'Reusing global overview: {pack}', flush=True)
         return old
+    check_dependencies()
     validate_source(source)
     # Build again only if the derived data is missing, invalid or not tied to this source.
     subprocess.run([sys.executable, str(Path(__file__).with_name('build_global_terrain_overview.py')),
