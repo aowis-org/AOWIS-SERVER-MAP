@@ -42,6 +42,9 @@ struct TerrainDatasetInfo
     // the maximum_zoom tile instead.
     int minimum_zoom = 0;
     int maximum_zoom = 0;
+    // Optional visual-only overview below the native provider's generation
+    // range. -1 means there is no separate overview.
+    int native_minimum_zoom = -1;
 };
 
 bool isValidTerrainDatasetInfo(const TerrainDatasetInfo &info);

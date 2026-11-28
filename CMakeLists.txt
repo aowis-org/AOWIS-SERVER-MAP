@@ -87,6 +87,7 @@ add_library(aowis-server-map-core STATIC
     src/lib/copernicus_terrain_provider.cpp
     src/lib/copernicus_terrain_provider.h
     src/lib/terrain_data.cpp
+    src/lib/global_terrain_overview.h
     include/aowis/map/maptiles.h
     include/aowis/map/map_cascade_config.h
     include/aowis/map/terrain_elevation.h

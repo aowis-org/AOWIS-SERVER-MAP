@@ -42,7 +42,10 @@ bool isValidTerrainDatasetInfo(const TerrainDatasetInfo &info)
            std::isfinite(info.nominal_resolution_m) && info.nominal_resolution_m >= 0.0 &&
            isValidTerrainVerticalDatum(info.vertical_datum) &&
            info.minimum_zoom >= 0 && info.maximum_zoom <= TerrainTileMaximumZoom &&
-           info.minimum_zoom <= info.maximum_zoom;
+           info.minimum_zoom <= info.maximum_zoom &&
+           (info.native_minimum_zoom == -1 ||
+            (info.native_minimum_zoom >= info.minimum_zoom &&
+             info.native_minimum_zoom <= info.maximum_zoom));
 }
 
 QByteArray encodeTerrainDatasetCatalogJson(const QVector<TerrainDatasetInfo> &datasets,
@@ -64,6 +67,8 @@ QByteArray encodeTerrainDatasetCatalogJson(const QVector<TerrainDatasetInfo> &da
                      terrainSurfaceModelId(info.surface_model));
         entry.insert(QStringLiteral("minimum_zoom"), info.minimum_zoom);
         entry.insert(QStringLiteral("maximum_zoom"), info.maximum_zoom);
+        if (info.native_minimum_zoom >= 0)
+            entry.insert(QStringLiteral("native_minimum_zoom"), info.native_minimum_zoom);
         entry.insert(QStringLiteral("tile_grid_size"), TerrainTileGridSize);
         entries.append(entry);
     }

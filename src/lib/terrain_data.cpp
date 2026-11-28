@@ -4,6 +4,7 @@
 #include <aowis/map/cascade_upstream_health.h>
 
 #include "copernicus_terrain_provider.h"
+#include "global_terrain_overview.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -557,6 +558,15 @@ QVector<TerrainDatasetInfo> TerrainData::datasets() const
     QVector<TerrainDatasetInfo> result;
     for (const std::unique_ptr<TerrainProvider> &provider : this->providers)
         result.append(provider->datasets());
+    // Advertise coarse levels only when the complete local overview exists.
+    // Cascading peers may install the same pack without contacting a provider.
+    if (GlobalTerrainOverview::available(this->storage_paths.offline_packages))
+        for (TerrainDatasetInfo &info : result)
+            if (info.dataset == GlobalTerrainOverview::Dataset)
+            {
+                info.native_minimum_zoom = info.minimum_zoom;
+                info.minimum_zoom = 0;
+            }
     return result;
 }
 
@@ -1137,6 +1147,10 @@ TerrainProviderFetchResult TerrainData::acquireTileSources(
         result.status = TerrainProviderFetchStatus::UnsupportedAddress;
         return result;
     }
+    if (this->config.copernicus_enabled && GlobalTerrainOverview::supports(dataset, address)
+        && (GlobalTerrainOverview::available(this->storage_paths.offline_packages)
+            || cascade.upstreams.isEmpty()))
+        return result;
     const CacheAccessIndex::PayloadLease lease = this->leaseCachePayload(normalizedTilePath(dataset, address));
     // A normalized cache hit requires no provider-native acquisition.
     if (readNormalizedTile(dataset, address).status == TerrainTileLookupStatus::Ready)
@@ -1176,6 +1190,10 @@ bool TerrainData::tileNeedsRemoteAcquisition(const QString &dataset,
 {
     const MapCascadeConfig cascade = this->cascadeConfig();
     if (!isRemoteFetchEnabled())
+        return false;
+    if (this->config.copernicus_enabled && GlobalTerrainOverview::supports(dataset, address)
+        && (GlobalTerrainOverview::available(this->storage_paths.offline_packages)
+            || cascade.upstreams.isEmpty()))
         return false;
     if (isValidTerrainDatasetId(dataset) && isValidTerrainTileAddress(address))
     {
@@ -1271,6 +1289,14 @@ TerrainTileLookupResult TerrainData::terrainTile(const QString &dataset,
         result.status = TerrainTileLookupStatus::InvalidAddress;
         result.error_message = QStringLiteral("Invalid normalized terrain tile address");
         return result;
+    }
+
+    if (this->config.copernicus_enabled)
+    {
+        const std::optional<TerrainTileLookupResult> overview = GlobalTerrainOverview::read(
+            this->storage_paths.offline_packages, dataset, address);
+        if (overview.has_value())
+            return overview.value();
     }
 
     const CacheAccessIndex::PayloadLease lease = this->leaseCachePayload(normalizedTilePath(dataset, address));
@@ -1673,7 +1699,9 @@ TerrainElevationLookupResult TerrainData::sampleElevation(
 
     bool saw_no_data = false;
     std::optional<TerrainTileAddress> no_data_address;
-    for (int zoom = TerrainTileMaximumZoom; zoom >= 0; --zoom)
+    const int minimum_zoom = dataset == GlobalTerrainOverview::Dataset
+        ? GlobalTerrainOverview::MaximumZoom + 1 : 0;
+    for (int zoom = TerrainTileMaximumZoom; zoom >= minimum_zoom; --zoom)
     {
         const std::optional<TerrainGridPosition> grid_position =
             terrainGridPosition(latitude_deg, longitude_deg, zoom);

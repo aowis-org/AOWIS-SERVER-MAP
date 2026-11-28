@@ -211,9 +211,9 @@ public:
         std::optional<TerrainVerticalDatum> requested_vertical_datum = std::nullopt,
         bool allow_remote_fetch = true) const;
 
-    // Every dataset of every registered provider, in provider order. Static
-    // provider knowledge: available before initialize() and while the
-    // subsystem is disabled (callers decide whether to expose it).
+    // Every dataset of every registered provider, in provider order. The
+    // optional local visual overview expands the advertised minimum zoom.
+    // Available before initialize() and while disabled (callers decide exposure).
     QVector<TerrainDatasetInfo> datasets() const;
 
     TerrainUpstreamActivity upstreamActivity() const;

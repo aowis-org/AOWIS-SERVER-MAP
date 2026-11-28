@@ -2,6 +2,9 @@
 #include <aowis/map/terrain_dataset.h>
 #include <aowis/map/terrain_tile.h>
 
+#include "../src/lib/global_terrain_overview.h"
+#include <QTemporaryDir>
+#include <QFileInfo>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -61,6 +64,63 @@ int main()
     {
         return 1;
     }
+
+    // A complete-size local overview advertises z0..7 without enabling any
+    // provider downloads or changing the ordinary normalized cache namespace.
+    QTemporaryDir temp;
+    TerrainData::Config overview_config;
+    overview_config.cache_directory = temp.path();
+    overview_config.remote_fetch_enabled = true;
+    TerrainData overview_data(overview_config);
+    QString overview_error;
+    if (!require(temp.isValid() && overview_data.initialize(&overview_error),
+                 "Cannot initialize overview test"))
+        return 1;
+    const TerrainTileAddress address{0, 0, 0};
+    TerrainTile tile;
+    tile.address = address;
+    tile.dataset = GlobalTerrainOverview::Dataset;
+    tile.nominal_resolution_m = 1855;
+    tile.vertical_datum = TerrainVerticalDatum::Egm2008;
+    tile.elevations_m.fill(1234.0f, TerrainTileSampleCount);
+    const QByteArray encoded = encodeTerrainTile(tile);
+    if (!require(encoded.size() == GlobalTerrainOverview::RecordBytes,
+                 "Overview record size must match the canonical codec"))
+        return 1;
+    QFile pack(GlobalTerrainOverview::path(overview_data.storagePaths().offline_packages));
+    QByteArray header("AOWCOAR1", 8);
+    const quint32 zoom_le = qToLittleEndian(quint32(GlobalTerrainOverview::MaximumZoom));
+    const quint32 size_le = qToLittleEndian(quint32(GlobalTerrainOverview::RecordBytes));
+    header.append(reinterpret_cast<const char *>(&zoom_le), 4);
+    header.append(reinterpret_cast<const char *>(&size_le), 4);
+    // Sparse fixture: only the root is populated; other records deliberately
+    // fail CRC/format validation. No massive fixture or upstream requests.
+    if (!require(pack.open(QIODevice::WriteOnly) && pack.write(header) == header.size()
+                 && pack.write(encoded) == encoded.size()
+                 && pack.resize(GlobalTerrainOverview::PackBytes), "Cannot create overview fixture"))
+        return 1;
+    pack.close();
+    if (!require(overview_data.datasets().first().minimum_zoom == 0
+                 && overview_data.datasets().first().native_minimum_zoom == 8
+                 && !overview_data.tileNeedsRemoteAcquisition(tile.dataset, address)
+                 && overview_data.acquireTileSources(tile.dataset, address).status == TerrainProviderFetchStatus::Ready,
+                 "Local overview should be advertised and bypass remote acquisition"))
+        return 1;
+    const TerrainTileLookupResult overview = overview_data.terrainTile(tile.dataset, address);
+    if (!require(overview.status == TerrainTileLookupStatus::Ready && overview.data == encoded
+                 && !QFileInfo::exists(overview_data.normalizedTilePath(tile.dataset, address)),
+                 "Overview must be delivered verbatim without duplicating it in cache"))
+        return 1;
+    if (!require(overview_data.terrainTile(tile.dataset, {1, 0, 0}).status == TerrainTileLookupStatus::CorruptTile,
+                 "Corrupt overview records must be rejected"))
+        return 1;
+    if (!require(overview_data.sampleElevation(tile.dataset, 0.0, 0.0, std::nullopt, false).status
+                     != TerrainElevationLookupStatus::Ready,
+                 "Visual overview must not supply engineering point elevations"))
+        return 1;
+    if (!require(pack.remove() && overview_data.datasets().first().minimum_zoom == 8,
+                 "Absent overview must not advertise coarse levels"))
+        return 1;
 
     // An invalid description is dropped from the catalog, not served.
     TerrainDatasetInfo invalid = copernicus;

@@ -40,7 +40,7 @@ The public source does not require an AWS account or API token. Dataset properti
 
 A DSM may include building roofs and vegetation. It is **not** equivalent to a surveyed bare-earth digital terrain model or a hydraulic elevation reference. Public GLO-30 coverage is not universal; the server does not silently substitute GLO-90 and mislabel it as GLO-30. The authoritative dataset metadata is available from `GET /terrain/v1/datasets`.
 
-On-demand normalization stops at zoom 14 because higher zooms would mostly oversample the underlying source, and below zoom 8 a normalized tile can span too many native source cells. Existing valid normalized tiles outside this generation range can still be read.
+On-demand normalization stops at zoom 14 because higher zooms would mostly oversample the underlying source, and below zoom 8 a normalized tile can span too many native source cells. Existing valid normalized tiles outside this generation range can still be read. The optional visual-only global overview supplies zoom 0–7; see below.
 
 ## Cache organization and read-through behavior
 
@@ -48,7 +48,7 @@ On-demand normalization stops at zoom 14 because higher zooms would mostly overs
 <terrain cache>/
   providers/copernicus/glo30/         Native downloaded source COGs
   normalized/v2/r2/copernicus-glo30/ <z>/<x>/<y>.aowterrain
-  offline-packages/                  Reserved; no automatic mounting
+  offline-packages/                  Optional global-overview-v1.aowpack
 ```
 
 On a normalized tile request the server:
@@ -140,7 +140,7 @@ enabled=true
 
 `terrain/enabled=false` makes terrain requests unavailable (`503`); `terrain/remote_fetch_enabled=false` allows the routes and **local source/normalized caches**, but forbids missing Internet source downloads. This is separate from `downloads/remote_fetch_enabled`, which controls raster imagery. The Copernicus provider may also be disabled or assigned a named geographic coverage profile, but it cannot override the global switch.
 
-Coverage rules govern **requested XYZ tiles that may trigger new downloads**. A native 1° source file can extend beyond that request footprint; it is not clipped geographically. Already cached native files can still normalize tiles outside download coverage. Configuring a `permanent_data_directory` does not automatically mount arbitrary terrain packages or import GIS datasets. See [Configuration](configuration.md#geographic-download-coverage).
+Coverage rules govern **requested XYZ tiles that may trigger new downloads**. A native 1° source file can extend beyond that request footprint; it is not clipped geographically. Already cached native files can still normalize tiles outside download coverage. Configuring a `permanent_data_directory` does not automatically mount arbitrary terrain packages or import GIS datasets; the explicitly named global overview is the exception. See [Configuration](configuration.md#geographic-download-coverage).
 
 ## Vertical datums, provenance and attribution
 
@@ -169,3 +169,51 @@ These values are observed vertical errors, not conservative continuous or
 ECEF bounds; they exclude quantization, ellipsoid curvature, polar edge
 flattening, vertical exaggeration, skirts, hole filling and ancestor fallback.
 The v2 tile payload carries both optional records, including through HTTP and cascades. Existing v1 normalized tiles are not used. Analysis sampling and rendering behavior are unchanged.
+
+
+## Optional global visual overview (zoom 0–7)
+
+Coarse globe tiles must not initiate huge Copernicus downloads. MAP can instead
+serve a precomputed, immutable `global-overview-v1.aowpack` from its offline
+package directory (`<terrain cache>/offline-packages/`, or
+`<permanent_data_directory>/terrain/` if configured). The pack contains 21,845
+canonical v2 tiles, indexed by zoom, row and column (about 188 MB). It is not
+part of the normalized LRU cache and no native source files are invalidated.
+The catalog advertises `minimum_zoom: 0` and `native_minimum_zoom: 8` only
+when the pack header and size are valid. Each tile's CRC, address and datum
+are independently validated on read. Install the pack before starting clients
+(or reconnect to refresh the catalog).
+
+Build once on a machine with Python, NumPy and Rasterio/GDAL:
+
+```bash
+python3 tools/build_global_terrain_overview.py /path/to/global-land-egm2008.tif \
+    /path/to/global-overview-v1.aowpack --source-resolution-m 1855
+```
+
+Input must be a north-up global EPSG:4326 GeoTIFF with finite elevations in
+metres relative to EGM2008, with the ocean filled at sea level. One possible
+input is NOAA ETOPO 2022 60 arc-second ice-surface relief
+(https://www.ncei.noaa.gov/products/etopo-global-relief-model). ETOPO includes
+bathymetry: prepare a land-only raster with the ocean set to zero, or explicitly
+pass `--clamp-negative` for a visual-only approximation that also removes
+below-sea-level land. The source resolution argument is the approximate input
+resolution, not the output grid spacing. Keep the input for future builds.
+The tool does not download anything. It computes area means in Web Mercator,
+then builds coarser levels with 2x2 averages and samples shared vertex edges.
+The output is atomically published, and can be copied to multiple MAP servers.
+Install it with read permission for the MAP service user (for example,
+`install -m 0644 global-overview-v1.aowpack <offline package directory>/`).
+Preserve the source attribution and source file alongside your provisioning records.
+This is an overview derived from a separate source, not native GLO-30. Native
+source-statistics and geometric-error fields are intentionally absent in these
+coarse tiles. The native GLO-30 generation range and existing caches are unchanged.
+Point elevation queries for GLO-30 do not fall back to these visual-only levels;
+analysis-grid APIs are unchanged. Polar areas beyond Web Mercator are not covered.
+
+For now every MAP server that advertises the expanded range needs a local copy
+of the overview pack. The ordinary cascade protocol can also transfer individual
+v2 coarse tiles on explicit requests, but automatic upstream overview discovery
+is not implemented. This avoids advertising coverage from an upstream that may
+not have the pack. No third-party fetches are triggered by the builder or by
+serving an installed pack.
