@@ -8,6 +8,11 @@ RUN apt-get update -o APT::Update::Error-Mode=any \
  && apt-get install --yes --no-install-recommends \
       build-essential \
       ca-certificates \
+      curl \
+      python3 \
+      python3-numpy \
+      python3-rasterio \
+      python3-pyproj \
       cmake \
       debhelper \
       dpkg-dev \

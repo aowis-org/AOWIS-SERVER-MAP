@@ -14,11 +14,16 @@ tar -C /source \
     --exclude='./build' \
     --exclude='./build-*' \
     --exclude='./dist' \
+    --exclude='./ETOPO_2022_v1_60s_N90W180_surface.tif' \
+    --exclude='./global-overview-v1.aowpack' \
     --exclude='./*.zip' \
     --exclude='./terrain-endurance*.json' \
     -cf - . | tar -C "$scratch" -xf -
 
 cd "$scratch"
+if [[ -f /source/ETOPO_2022_v1_60s_N90W180_surface.tif ]]; then
+    export AOWIS_MAP_ETOPO_SOURCE=/source/ETOPO_2022_v1_60s_N90W180_surface.tif
+fi
 # The source tree may originate from an archive without executable file modes.
 # Run the Bash entry point explicitly rather than relying on its mode bit.
 bash ./compile_deb.sh --clean --revision "$DEB_REVISION"
@@ -52,5 +57,11 @@ for required in \
     fi
 done
 
+data_package="$scratch/dist/aowis-server-map-data_2022.1+overview1_all.deb"
+test -s "$data_package"
+# Preserve the separately versioned artifact on routine code rebuilds.
+if [[ ! -f "/packages/$(basename -- "$data_package")" ]] || ! cmp -s "$data_package" "/packages/$(basename -- "$data_package")"; then
+    install -m 0644 "$data_package" "/packages/$(basename -- "$data_package")"
+fi
 install -m 0644 "$package" "/packages/$package_name"
 printf 'Exported: %s\n' "/packages/$package_name"

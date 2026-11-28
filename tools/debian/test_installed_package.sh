@@ -27,7 +27,16 @@ first_package="${first_packages[0]}"
 upgrade_package="${upgrade_packages[0]}"
 
 printf '\n== Fresh Debian package installation ==\n'
-apt-get install --yes --no-install-recommends "$first_package"
+data_package=/packages/aowis-server-map-data_2022.1+overview1_all.deb
+apt-get install --yes --no-install-recommends "$data_package" "$first_package"
+data_dir=/usr/share/aowis-server-map/terrain
+pack="$data_dir/global-overview-v1.aowpack"
+source="$data_dir/ETOPO_2022_v1_60s_N90W180_surface.tif"
+test -s "$source"
+test -s "$pack"
+test -f "$data_dir/etopo-2022-provenance.json"
+pack_hash="$(sha256sum "$pack")"
+source_hash="$(sha256sum "$source")"
 dpkg-query -W -f='${Status}\n' aowis-server-map | grep -Fxq 'install ok installed'
 
 config=/etc/aowis-server-map/map-server.ini
@@ -94,6 +103,9 @@ for path in /status /map/v1/providers /terrain/v1/datasets; do
     curl --fail --silent --show-error --max-time 5 \
         "http://127.0.0.1:18122$path" >/dev/null
 done
+curl -fsS 'http://127.0.0.1:18122/terrain/v1/datasets' | python3 -c 'import json,sys; data=json.load(sys.stdin); assert any(d.get("minimum_zoom")==0 and d.get("native_minimum_zoom")==8 for d in data["datasets"])'
+curl -fsS --max-time 5 'http://127.0.0.1:18122/terrain/v2/copernicus-glo30/0/0/0.aowterrain' -o /tmp/overview-test.aowterrain
+python3 -c 'import sys; data=open(sys.argv[1],"rb").read(); assert len(data)==8614 and data[:8]==b"AOWTRN\0\0"' /tmp/overview-test.aowterrain
 cleanup_server
 printf '%s\n' 'PASS: installed binary serves GET endpoints without API keys.'
 
@@ -109,6 +121,8 @@ printf '[map_providers]\nconfigured=true\n' > "$state/providers.ini"
 printf '%s\n' 'cache is preserved' > "$cache/package-smoke-cache"
 
 apt-get install --yes --no-install-recommends "$upgrade_package"
+[[ "$(sha256sum "$pack")" == "$pack_hash" ]]
+[[ "$(sha256sum "$source")" == "$source_hash" ]]
 [[ "$(sha256sum "$config" | cut -d ' ' -f 1)" == "$config_hash" ]]
 [[ "$(stat -c '%a:%U:%G' "$config")" == "$config_mode" ]]
 grep -Fxq 'configured=true' "$state/providers.ini"
@@ -121,6 +135,8 @@ apt-get remove --yes aowis-server-map
 test -f "$config"
 test -f "$state/providers.ini"
 apt-get install --yes --no-install-recommends "$upgrade_package"
+[[ "$(sha256sum "$pack")" == "$pack_hash" ]]
+[[ "$(sha256sum "$source")" == "$source_hash" ]]
 [[ "$(sha256sum "$config" | cut -d ' ' -f 1)" == "$config_hash" ]]
 [[ "$(stat -c '%a:%U:%G' "$config")" == "$config_mode" ]]
 test -f "$state/providers.ini"

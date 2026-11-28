@@ -171,11 +171,12 @@ flattening, vertical exaggeration, skirts, hole filling and ancestor fallback.
 The v2 tile payload carries both optional records, including through HTTP and cascades. Existing v1 normalized tiles are not used. Analysis sampling and rendering behavior are unchanged.
 
 
-## Optional global visual overview (zoom 0–7)
+## Bundled global visual overview (zoom 0–7)
 
-Coarse globe tiles must not initiate huge Copernicus downloads. MAP can instead
-serve a precomputed, immutable `global-overview-v1.aowpack` from its offline
-package directory (`<terrain cache>/offline-packages/`, or
+Coarse globe tiles must not initiate huge Copernicus downloads. Standard MAP
+Debian packages and development builds now include a precomputed, immutable
+`global-overview-v1.aowpack` derived from ETOPO. See [global terrain data](global-terrain-data.md).
+An administrator can override this pack with one in the offline package directory (`<terrain cache>/offline-packages/`, or
 `<permanent_data_directory>/terrain/` if configured). The pack contains 21,845
 canonical v2 tiles, indexed by zoom, row and column (about 188 MB). It is not
 part of the normalized LRU cache and no native source files are invalidated.
@@ -211,9 +212,7 @@ coarse tiles. The native GLO-30 generation range and existing caches are unchang
 Point elevation queries for GLO-30 do not fall back to these visual-only levels;
 analysis-grid APIs are unchanged. Polar areas beyond Web Mercator are not covered.
 
-For now every MAP server that advertises the expanded range needs a local copy
-of the overview pack. The ordinary cascade protocol can also transfer individual
+Every standard MAP installation includes its own local overview pack. The ordinary cascade protocol can also transfer individual
 v2 coarse tiles on explicit requests, but automatic upstream overview discovery
 is not implemented. This avoids advertising coverage from an upstream that may
-not have the pack. No third-party fetches are triggered by the builder or by
-serving an installed pack.
+not have the pack. The low-level overview builder and runtime serving never fetch third-party data; the separate provisioning tool acquires ETOPO once on the build host if no original is available.

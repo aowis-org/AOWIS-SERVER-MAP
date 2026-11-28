@@ -9,7 +9,7 @@ Homepage: https://aowis.org/
 
 Package: aowis-server-map
 Architecture: any
-Depends: ${shlibs:Depends}, ${misc:Depends}, adduser, apache2, systemd
+Depends: ${shlibs:Depends}, ${misc:Depends}, adduser, apache2, systemd, aowis-server-map-data (= 2022.1+overview1)
 Suggests: certbot, python3-certbot-apache
 Description: AOWIS caching map tile server
  AOWIS Server Map is a Qt-based HTTP service that caches map tiles for the

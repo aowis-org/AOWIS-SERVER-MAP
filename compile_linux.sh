@@ -5,6 +5,7 @@ project_directory="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 build_directory="$project_directory/build-linux"
 install_dependencies=false
 run_after_build=true
+prepare_global_data=true
 application_arguments=()
 
 is_debian_family()
@@ -38,7 +39,7 @@ install_debian_dependencies()
         exit 1
     fi
 
-    local packages=(build-essential cmake ninja-build qt6-base-dev qt6-websockets-dev qt6-httpserver-dev libtiff-dev libzstd-dev libpng-dev libturbojpeg0-dev libsqlite3-dev pkg-config)
+    local packages=(build-essential cmake ninja-build qt6-base-dev qt6-websockets-dev qt6-httpserver-dev libtiff-dev libzstd-dev libpng-dev libturbojpeg0-dev libsqlite3-dev pkg-config python3 python3-numpy python3-rasterio python3-pyproj curl ca-certificates)
 
     if (( EUID == 0 )); then
         apt-get update
@@ -89,6 +90,9 @@ while (( $# > 0 )); do
         --install-dependencies)
             install_dependencies=true
             ;;
+        --no-global-data)
+            prepare_global_data=false
+            ;;
         --no-run)
             run_after_build=false
             ;;
@@ -125,6 +129,11 @@ executable="$build_directory/aowis-server-map"
 if [[ ! -x "$executable" ]]; then
     echo "Error: build completed without creating the expected executable: $executable" >&2
     exit 1
+fi
+
+if [[ "$prepare_global_data" == true ]]; then
+    python3 "$project_directory/tools/prepare_global_terrain_data.py" \
+        --link-directory "$build_directory/terrain-data"
 fi
 
 if [[ "$run_after_build" == false ]]; then

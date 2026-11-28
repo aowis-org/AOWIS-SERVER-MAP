@@ -32,9 +32,9 @@ To explicitly use Docker bridge networking for that image build instead:
 ./compile_deb_docker.sh --build-network bridge
 ```
 
-`--build-network` affects **only the Docker toolchain image build**; the
-subsequent package-build container and optional qualification container still
-use Docker's bridge networking by default. It does not change the network of
+`--build-network` affects the Docker toolchain image build and the subsequent
+package-build container (for first-time ETOPO acquisition). The optional
+qualification container uses its separate network setting. It does not change the network of
 the installed service on your host. Host mode relies on the host having working
 Debian repository DNS and HTTP access.
 
@@ -80,7 +80,11 @@ The wrapper builds a tagged Debian 13 toolchain image from
 `tools/debian/Dockerfile`, mounts the checked-out source read-only, copies it
 into a disposable build directory without local build trees, and invokes the
 existing `compile_deb.sh` script. It writes a binary package to `dist/` using
-the **host user's UID/GID**. No Debian dependencies are installed on the host,
+the **host user's UID/GID**. It also exports the required, independently
+versioned `aowis-server-map-data_2022.1+overview1_all.deb`. The original ETOPO
+GeoTIFF, overview and completed data package survive container deletion and
+`--clean` in a persistent host build-data directory. See
+[global terrain data](global-terrain-data.md). No Debian dependencies are installed on the host,
 and the wrapper does not start, stop, or replace any host service.
 
 `compile_deb.sh --install-dependencies` is still available for native Debian
@@ -102,9 +106,9 @@ checks actual installation and package-manager lifecycle behavior:
 4. Validate the vendor unit with `systemd-analyze verify`.
 5. Start the **installed** binary as its unprivileged service account, on
    container-local port **18122**, with the installed INI and no API keys.
-6. Verify unauthenticated status, provider-list, and terrain-dataset HTTP reads.
+6. Verify unauthenticated status, provider-list, and terrain-dataset HTTP reads, including bundled zoom-0 terrain.
 7. Upgrade to the next package revision and verify that `/etc` configuration,
-   permissions, `/var/lib` provider state, and `/var/cache` contents survive.
+   permissions, `/var/lib` provider state, `/var/cache` contents, and permanent ETOPO data hashes survive.
 8. Remove/reinstall the package and check preservation again, then purge and
    verify the package-owned administrator INI is removed while service data
    remains untouched.

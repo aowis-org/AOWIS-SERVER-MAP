@@ -24,6 +24,13 @@ curl -fsS http://127.0.0.1:8122/map/v1/providers
 curl -fsS http://127.0.0.1:8122/terrain/v1/datasets
 ```
 
+Standard `compile_linux.sh` builds prepare the permanent NOAA ETOPO 2022 global
+terrain data once, using a persistent build-data directory outside the checkout.
+On Arch Linux install `python-numpy python-rasterio python-pyproj curl` before
+first provisioning. `--no-global-data` is available for code-only development
+builds; `compile_linux_tests.sh` never provisions or downloads the dataset.
+See [global terrain data](docs/global-terrain-data.md).
+
 No API keys are needed for requests. `./compile_linux.sh` **without** `--no-run` builds *and starts* the server; when another instance already uses port 8122, a subsequent bind failure does not indicate a compilation failure.
 
 ### Listen on the LAN (`0.0.0.0`)
@@ -153,7 +160,7 @@ For a Debian package, build with a disposable Debian 13 Docker toolchain and opt
 ./compile_deb_docker.sh --test   # Also test install, HTTP, upgrade, removal and purge
 ```
 
-The native `./compile_deb.sh --install-dependencies` remains available on Debian without Docker. See [Debian package building and qualification](docs/debian-package-build.md) for test scope and installation details. Install the resulting artifact on the target system with `sudo apt install ./dist/<package-filename>.deb`.
+The native `./compile_deb.sh --install-dependencies` remains available on Debian without Docker. See [Debian package building and qualification](docs/debian-package-build.md) for test scope and installation details. Install both the server and its separately versioned `aowis-server-map-data` artifact on a new target system (see [global terrain data](docs/global-terrain-data.md)). Later code-only upgrades need only the server package if the data version is already installed.
 
 The package installs a dedicated `aowis-server-map` systemd service, preserves existing administrator settings and creates a default INI when needed, without API keys. The service uses an explicit `/etc/aowis-server-map/map-server.ini`, state under `/var/lib/aowis-server-map/` and disposable caches under `/var/cache/aowis-server-map/`.
 
@@ -174,7 +181,7 @@ The package installs a dedicated `aowis-server-map` systemd service, preserves e
 | [Architecture and resource limits](docs/architecture.md) | Execution model, concurrency, memory, cancellation, test and benchmark tools |
 | [Terrain sources](docs/terrain-providers.md) | Copernicus GLO-30, cache fill, resumable download, data provenance |
 | [Elevation and DEM contract](docs/terrain-elevation-contract.md) | Coordinate/datum rules, sampling, error statuses and analysis data |
-| [`.aowterrain` binary specification](docs/terrain-tile-format.md) | Exact v1 structure, quantization, CRS, CRC and compatibility |
+| [`.aowterrain` binary specification](docs/terrain-tile-format.md) | Exact v2 structure, quantization, CRS, CRC and compatibility |
 | [systemd](configs/systemd/README.md) · [Apache](configs/apache/README.md) | Linux deployment |
 
 The C++ `Aowis::Map::TerrainData` API is also used in-process by AOWIS Server Standalone/Hydrology integrations, avoiding an unnecessary localhost HTTP hop or duplicate Copernicus source cache. Hydrology owns its analysis outputs; Map owns terrain sources and retrieval policy.

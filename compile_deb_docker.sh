@@ -3,6 +3,7 @@ set -euo pipefail
 
 project_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 dist_directory="$project_root/dist"
+data_cache="${AOWIS_MAP_DATA_BUILD_CACHE:-${XDG_DATA_HOME:-$HOME/.local/share}/aowis-server-map/datasets/etopo-2022-v1-60s}"
 docker_image="aowis-server-map-debian-builder:trixie"
 revision="${DEB_REVISION:-1}"
 run_tests=false
@@ -24,14 +25,15 @@ container without installing Debian build dependencies on the host.
                       a disposable, fresh Debian container.
   --revision NUMBER   Initial Debian revision (positive integer, default: 1).
   --build-network MODE
-                      Docker network for installing build dependencies while
-                      building the toolchain image (bridge or host; default host).
+                      Docker network for toolchain build and first-time ETOPO acquisition
+                      (bridge or host; default host).
   --test-network MODE Docker network for package-installation qualification
                       (bridge or host; default bridge). With host networking,
                       the test HTTP listener uses the HOST loopback port 18122.
   -h, --help          Show help.
 
 Output: dist/aowis-server-map_<version>+deb<revision>_<architecture>.deb
+        dist/aowis-server-map-data_2022.1+overview1_all.deb
 HELP
 }
 
@@ -92,11 +94,12 @@ if ! docker info >/dev/null 2>&1; then
     exit 1
 fi
 
-mkdir -p "$dist_directory"
+mkdir -p "$dist_directory" "$data_cache"
+data_cache="$(cd -- "$data_cache" && pwd -P)"
 
 printf 'Building Debian 13 package toolchain image (network: %s)...\n' "$build_network"
 if [[ "$build_network" == "host" ]]; then
-    printf '%s\n' 'Host networking is enabled only for the toolchain image build.'
+    printf '%s\n' 'Host networking is enabled for the toolchain and package build containers.'
 fi
 docker build \
     --network "$build_network" \
@@ -119,9 +122,12 @@ build_package()
 
     printf '\nBuilding Debian package revision %s...\n' "$package_revision"
     docker run --rm --init \
+        --network "$build_network" \
         --user "$(id -u):$(id -g)" \
         --volume "$project_root:/source:ro" \
         --volume "$dist_directory:/packages" \
+        --volume "$data_cache:/terrain-data-cache" \
+        --env AOWIS_MAP_DATA_BUILD_CACHE=/terrain-data-cache \
         --env "DEB_REVISION=$package_revision" \
         "$docker_image" \
         bash /source/tools/debian/build_in_container.sh
@@ -134,6 +140,7 @@ build_package()
             "${#new_packages[@]}" "$package_revision" >&2
         exit 1
     fi
+    test -s "$dist_directory/aowis-server-map-data_2022.1+overview1_all.deb"
     printf 'Package ready: %s\n' "${new_packages[0]}"
 }
 

@@ -2,9 +2,11 @@
 #define AOWIS_MAP_GLOBAL_TERRAIN_OVERVIEW_H
 
 #include <aowis/map/terrain_data.h>
+#include <QCoreApplication>
 #include <QDir>
 #include <QFile>
 #include <QtEndian>
+#include <QStringList>
 
 namespace Aowis::Map::GlobalTerrainOverview
 {
@@ -38,10 +40,32 @@ inline bool validHeader(QFile &file)
         && qFromLittleEndian<quint32>(header.constData() + 12) == quint32(RecordBytes);
 }
 
+// Prefer an administrator-provisioned overview, then the immutable data
+// shipped beside the executable or in the Debian package's share directory.
+inline bool openOverview(QFile &file, const QString &directory)
+{
+    QStringList directories{directory};
+    if (QCoreApplication::instance())
+    {
+        const QDir application_directory(QCoreApplication::applicationDirPath());
+        directories.append(application_directory.filePath(QStringLiteral("terrain-data")));
+        directories.append(application_directory.filePath(QStringLiteral("../share/aowis-server-map/terrain")));
+    }
+    for (const QString &candidate : directories)
+    {
+        file.close();
+        file.setFileName(path(candidate));
+        if (validHeader(file))
+            return true;
+    }
+    file.close();
+    return false;
+}
+
 inline bool available(const QString &directory)
 {
-    QFile file(path(directory));
-    return validHeader(file);
+    QFile file;
+    return openOverview(file, directory);
 }
 
 inline qint64 offset(const TerrainTileAddress &address)
@@ -57,8 +81,8 @@ inline std::optional<TerrainTileLookupResult> read(const QString &directory,
 {
     if (!supports(dataset, address))
         return std::nullopt;
-    QFile file(path(directory));
-    if (!validHeader(file))
+    QFile file;
+    if (!openOverview(file, directory))
         return std::nullopt;
     TerrainTileLookupResult result;
     result.status = TerrainTileLookupStatus::CorruptTile;

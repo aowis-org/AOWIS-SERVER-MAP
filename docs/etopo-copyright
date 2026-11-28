@@ -1,0 +1,16 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: ETOPO 2022 Global Relief Model
+Source: https://www.ncei.noaa.gov/products/etopo-global-relief-model
+
+Files: *
+Copyright: NOAA National Centers for Environmental Information (NCEI)
+License: CC0-1.0
+ NOAA ETOPO 2022 is released under CC0 1.0 Universal.
+ https://creativecommons.org/publicdomain/zero/1.0/
+ .
+ NOAA National Centers for Environmental Information (2022): ETOPO 2022
+ 15 Arc-Second Global Relief Model. DOI: 10.25921/fd45-gt74.
+ The bundled source is the 60 arc-second ice-surface elevation GeoTIFF.
+ The AOWIS visual overview is derived from it by Web Mercator reprojection,
+ averaging, quantization and clamping negative heights to zero.
+ The original GeoTIFF is retained unmodified.

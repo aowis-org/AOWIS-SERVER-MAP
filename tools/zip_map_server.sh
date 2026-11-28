@@ -18,6 +18,8 @@ cd -- "$project_parent"
 find "$project_name" \
     \( -type d \( \
         -name "build*" -o \
+        -name "dist" -o \
+        -name "terrain-data" -o \
         -name ".git" -o \
         -name ".idea" -o \
         -name ".vscode" -o \
@@ -32,6 +34,8 @@ find "$project_name" \
     \) \) -prune -o \
     \( -type f \( \
         -name ".git" -o \
+        -name "ETOPO_2022_v1_60s_N90W180_surface.tif*" -o \
+        -name "global-overview-v1.aowpack*" -o \
         -name "*.user" -o \
         -name "*.user.*" -o \
         -name "CMakeCache.txt" -o \

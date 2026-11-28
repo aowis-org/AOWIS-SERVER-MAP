@@ -13,6 +13,7 @@ import zlib
 
 import numpy as np
 import rasterio
+from pyproj import CRS
 from rasterio.transform import from_bounds
 from rasterio.warp import reproject, Resampling
 
@@ -98,7 +99,13 @@ def write_pack(cells, output, resolution_m, max_zoom=MAX_ZOOM):
 
 def project(source, clamp_negative, tempdir):
     with rasterio.open(source) as src:
-        if (src.crs != rasterio.crs.CRS.from_epsg(4326)
+        if src.crs is None:
+            raise ValueError('source has no CRS')
+        source_crs = CRS.from_wkt(src.crs.to_wkt())
+        horizontal = source_crs.sub_crs_list[0] if source_crs.is_compound else source_crs
+        if source_crs.is_compound and not source_crs.sub_crs_list[1].equals(CRS.from_epsg(3855)):
+            raise ValueError('source vertical CRS must be EGM2008')
+        if (not horizontal.equals(CRS.from_epsg(4326), ignore_axis_order=True)
                 or src.transform.b != 0 or src.transform.d != 0
                 or src.transform.a <= 0 or src.transform.e >= 0
                 or any(abs(a - b) > 1e-5 for a, b in zip(src.bounds, (-180, -90, 180, 90)))):
@@ -108,7 +115,7 @@ def project(source, clamp_negative, tempdir):
         # A prepared land-only, sea-level-filled source is preferable.
         clean = Path(tempdir) / 'land.tif'
         profile = dict(driver='GTiff', width=src.width, height=src.height, count=1,
-                       dtype='float32', crs=src.crs, transform=src.transform,
+                       dtype='float32', crs='EPSG:4326', transform=src.transform,
                        tiled=True, blockxsize=256, blockysize=256, compress='deflate',
                        BIGTIFF='IF_SAFER')
         with rasterio.open(clean, 'w', **profile) as dst:
