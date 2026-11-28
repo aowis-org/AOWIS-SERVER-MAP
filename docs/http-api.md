@@ -216,7 +216,7 @@ curl -i -X DELETE \
 - Terrain source deletion removes the native source cells needed by the specified XYZ range. A 1° source COG can be shared with other terrain tiles, so this may affect future normalization beyond that range.
 - `DELETE /upstream/v1/map-tiles` and `DELETE /upstream/v1/terrain` request cancellation of the corresponding upstream operations, not automatic cache deletion.
 
-Terrain deletion runs outside the HTTP event loop. Active source file locks and overlapping cache writes can delay deletion. Invalid deletion requests return `400`; errors may return `500`; admission pressure may produce `503`.
+Raster and terrain deletion run outside the HTTP event loop. Active source file locks and overlapping cache writes can delay deletion. Invalid deletion requests return `400`; errors may return `500`; admission pressure may produce `503`.
 
 ## Response and safety notes
 

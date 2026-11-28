@@ -87,6 +87,9 @@ cache_minimum_free_bytes=268435456
 ```
 
 The worker checks limits at startup/policy change and roughly every 30 seconds.
+While the last full scan plus the bytes this server has written since then stay
+below the limit, a check skips the directory scan; a full scan still runs at
+least every 15 minutes, so files changed by other processes are picked up.
 A cache exceeding its limit is trimmed toward 85% of that limit (configurable).
 If active files or the bounded selection batch prevent reaching that target, a
 later pass continues toward it. At most 32,768 candidates are retained per pass;

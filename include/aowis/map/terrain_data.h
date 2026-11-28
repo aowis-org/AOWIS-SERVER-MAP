@@ -306,6 +306,7 @@ private:
     std::string cacheStorageKey(const QString &path) const;
     CacheAccessIndex::PayloadLease leaseCachePayload(const QString &path) const;
     void recordCacheUse(const QString &path) const;
+    void recordCachePublished(const QString &path, std::uint64_t bytes) const;
     std::vector<std::unique_ptr<TerrainProvider>> providers;
     mutable QMutex normalized_directory_mutex;
     bool initialized = false;

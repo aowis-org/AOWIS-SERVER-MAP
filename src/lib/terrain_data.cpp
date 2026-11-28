@@ -389,6 +389,12 @@ void TerrainData::recordCacheUse(const QString &path) const
     if (this->cache_access_index) this->cache_access_index->recordAccess(cacheStorageKey(path));
 }
 
+void TerrainData::recordCachePublished(const QString &path, std::uint64_t bytes) const
+{
+    if (this->cache_access_index)
+        this->cache_access_index->recordPublished(cacheStorageKey(path), bytes);
+}
+
 bool TerrainData::setCacheStoragePolicy(const CacheStoragePolicy &policy)
 {
     if (!this->cache_access_index) return policy.maximum_bytes == 0;
@@ -1156,7 +1162,7 @@ TerrainProviderFetchResult TerrainData::fetchNormalizedFromUpstreams(
                 file.cancelWriting();
                 return result;
             }
-            recordCacheUse(file_path);
+            recordCachePublished(file_path, std::uint64_t(bytes.size()));
             result.status = TerrainProviderFetchStatus::Ready;
             result.origin = TerrainDataOrigin::Cache;
             result.error_message.clear();
@@ -1628,7 +1634,7 @@ TerrainTileLookupResult TerrainData::fetchAndStoreNormalizedTile(
             return result;
         }
 
-        recordCacheUse(path);
+        recordCachePublished(path, std::uint64_t(encoded.size()));
         result.status = TerrainTileLookupStatus::Ready;
         result.data = encoded;
         result.origin = provider_result.origin;

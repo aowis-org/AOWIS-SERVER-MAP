@@ -3,6 +3,7 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QEventLoop>
 #include <QFileInfo>
 #include <QFutureWatcher>
@@ -37,6 +38,8 @@ public:
     QByteArray last_request;
     bool offer_zstd = false;
     bool invalid_zstd = false;
+    // Answer this many otherwise successful requests with 202 (still acquiring).
+    int accepted_before_ready = 0;
 
     bool start() { return listen(QHostAddress::LocalHost, 0); }
     QUrl origin() const
@@ -66,7 +69,12 @@ protected:
             const QByteArray lowercase = this->last_request.toLower();
             const bool authorized = this->required_key.isEmpty() ||
                 lowercase.contains("x-api-key: " + this->required_key.toLower() + "\r\n");
-            const int status = authorized ? this->response_status : 401;
+            int status = authorized ? this->response_status : 401;
+            if (status == 200 && this->accepted_before_ready > 0)
+            {
+                --this->accepted_before_ready;
+                status = 202;
+            }
             QByteArray body = status == 200 ? this->response_body : QByteArrayLiteral("error");
             bool compressed = false;
             if (status == 200 && this->offer_zstd &&
@@ -84,6 +92,8 @@ protected:
                 (status == 200 ? " OK\r\n" : " Error\r\n");
             response += "Content-Type: application/vnd.aowis.terrain\r\n";
             response += "X-AOWIS-Terrain-Revision: " + this->revision + "\r\n";
+            if (status == 202)
+                response += "Retry-After: 1\r\n";
             if (compressed)
                 response += "Content-Encoding: zstd\r\n";
             response += "Content-Length: " + QByteArray::number(body.size()) + "\r\n";
@@ -137,6 +147,31 @@ Aowis::Map::TerrainProviderFetchResult acquire(
     timeout.start(16000);
     if (!watcher.isFinished()) loop.exec();
     if (!require(watcher.isFinished(), "Terrain MAP upstream request timed out"))
+        return {};
+    return watcher.result();
+}
+
+// acquire() with a resumable poll state: returns while the upstream answers 202.
+Aowis::Map::TerrainProviderFetchResult acquirePolled(
+    const Aowis::Map::TerrainData &data,
+    const Aowis::Map::TerrainTileAddress &address,
+    Aowis::Map::TerrainCascadePoll *poll)
+{
+    QFutureWatcher<Aowis::Map::TerrainProviderFetchResult> watcher;
+    QEventLoop loop;
+    QTimer timeout;
+    timeout.setSingleShot(true);
+    QObject::connect(&watcher, &QFutureWatcherBase::finished,
+                     &loop, &QEventLoop::quit);
+    QObject::connect(&timeout, &QTimer::timeout, &loop, &QEventLoop::quit);
+    watcher.setFuture(QtConcurrent::run([&data, address, poll]()
+    {
+        return data.acquireTileSources(QStringLiteral("copernicus-glo30"),
+                                       address, {}, {}, poll);
+    }));
+    timeout.start(16000);
+    if (!watcher.isFinished()) loop.exec();
+    if (!require(watcher.isFinished(), "Polled terrain MAP upstream request timed out"))
         return {};
     return watcher.result();
 }
@@ -338,6 +373,55 @@ int main(int argc, char **argv)
     if (!require(still_cached.status == TerrainTileLookupStatus::Ready &&
                  still_cached.data == cached_tile,
                  "Live reconfiguration dropped cached terrain")) return 1;
+
+    // Resumable cascade polling: a 202 hands the wait back to the caller
+    // (the server's timer) instead of sleeping in a remote worker thread.
+    TerrainUpstream acquiring;
+    if (!require(acquiring.start(), "Could not start acquiring upstream")) return 1;
+    TerrainData::Config polled_config;
+    polled_config.cache_directory = QDir(directory.path()).filePath(QStringLiteral("polled"));
+    polled_config.cascade.allow_direct_fetch = false;
+    polled_config.cascade.upstreams.append(upstream("acquiring", acquiring));
+    TerrainData polled(polled_config);
+    if (!require(polled.initialize(&error), "Failed to initialize polled terrain cache")) return 1;
+    TerrainTileAddress polled_address = address;
+    polled_address.x = 140;
+    acquiring.response_body = encodeTerrainTile(makeTile(polled_address));
+    acquiring.accepted_before_ready = 2;
+    TerrainCascadePoll poll;
+    TerrainProviderFetchResult polled_result;
+    int pending_rounds = 0;
+    for (int round = 0; round < 5; ++round)
+    {
+        QElapsedTimer call;
+        call.start();
+        polled_result = acquirePolled(polled, polled_address, &poll);
+        if (!poll.pending) break;
+        if (!require(call.elapsed() < 900 && poll.retry_after_ms == 1000,
+                     "A pending cascade poll waited inside the call")) return 1;
+        ++pending_rounds;
+    }
+    if (!require(polled_result.status == TerrainProviderFetchStatus::Ready &&
+                 pending_rounds == 2 && acquiring.request_count == 3 &&
+                 QFileInfo::exists(polled.normalizedTilePath(
+                     QStringLiteral("copernicus-glo30"), polled_address)),
+                 "Resumed cascade polling did not deliver the tile")) return 1;
+
+    // A cancellation while a poll waits between calls must still apply.
+    TerrainTileAddress canceled_address = polled_address;
+    canceled_address.x = 141;
+    acquiring.response_body = encodeTerrainTile(makeTile(canceled_address));
+    acquiring.accepted_before_ready = 1;
+    TerrainCascadePoll canceled_poll;
+    acquirePolled(polled, canceled_address, &canceled_poll);
+    if (!require(canceled_poll.pending, "Accepted terrain request did not leave a pending poll"))
+        return 1;
+    const int requests_before_cancel = acquiring.request_count;
+    polled.cancelUpstreamDownloads();
+    const TerrainProviderFetchResult canceled = acquirePolled(polled, canceled_address, &canceled_poll);
+    if (!require(canceled.status == TerrainProviderFetchStatus::Cancelled &&
+                 !canceled_poll.pending && acquiring.request_count == requests_before_cancel,
+                 "Cancellation between cascade polls was lost")) return 1;
 
     return 0;
 }

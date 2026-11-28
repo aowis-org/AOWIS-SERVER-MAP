@@ -37,6 +37,9 @@ constexpr std::size_t MaximumEvictionCandidates = 32768;
 constexpr std::size_t MaximumProtectionRangesPerGroup = 16384;
 constexpr std::chrono::seconds FlushInterval(30);
 constexpr std::chrono::seconds RetryInterval(30);
+// Periodic maintenance trusts the last full scan plus the bytes this process
+// published since then for at most this long; then it scans the tree again.
+constexpr std::chrono::minutes MaximumScanEstimateAge(15);
 constexpr const char *IndexFilename = ".aowis-cache-access-v1.sqlite3";
 
 struct DiskAdmissionState
@@ -625,6 +628,28 @@ public:
         if (this->pending.size() >= FlushThreshold) this->condition.notify_one();
     }
 
+    void published(const std::string &key, std::uint64_t bytes)
+    {
+        record(key);
+        std::lock_guard<std::mutex> lock(this->mutex);
+        this->published_since_scan += bytes;
+    }
+
+    // Called with this->mutex held. Every successful full scan restarts the estimate.
+    void rememberScanLocked(std::uint64_t payload_bytes)
+    {
+        this->scanned_bytes = payload_bytes;
+        this->scanned_at = std::chrono::steady_clock::now();
+        this->published_since_scan = 0;
+    }
+
+    void rememberScan(const CacheStorageStatistics &stats)
+    {
+        std::lock_guard<std::mutex> lock(this->mutex);
+        if (stats.scan_errors == 0) rememberScanLocked(stats.payload_bytes);
+        else this->scanned_bytes.reset();
+    }
+
     bool flush()
     {
         // Serialize the worker, explicit flush and readers. Never hold the
@@ -755,6 +780,7 @@ public:
         {
             std::lock_guard<std::mutex> lock(this->mutex);
             this->policy_changed = true;
+            this->scanned_bytes.reset();
         }
         this->condition.notify_one();
         return true;
@@ -810,21 +836,36 @@ public:
         this->policy = policy;
         this->cleanup_in_progress = false;
         this->policy_changed = true;
+        this->scanned_bytes.reset();
         this->condition.notify_one();
         return true;
     }
 
-    CacheCleanupResult cleanup()
+    // periodic: the worker's regular pass, which may skip the tree scan while
+    // the cache is certainly below its limit. cleanupNow() always scans.
+    CacheCleanupResult cleanup(bool periodic)
     {
         std::lock_guard<std::mutex> maintenance(this->cleanup_mutex);
         const CacheStoragePolicy policy = this->policy;
         const CacheStorageKind kind = this->kind;
         CacheCleanupResult result;
         if (policy.maximum_bytes == 0) return publish(result);
+        if (periodic)
+        {
+            std::lock_guard<std::mutex> lock(this->mutex);
+            const bool estimate_fresh = this->scanned_bytes.has_value() &&
+                std::chrono::steady_clock::now() - this->scanned_at < MaximumScanEstimateAge;
+            // Overwrites count twice, so the estimate errs towards scanning.
+            if (estimate_fresh && !this->cleanup_in_progress &&
+                this->published_since_scan <= policy.maximum_bytes &&
+                *this->scanned_bytes <= policy.maximum_bytes - this->published_since_scan)
+                return this->last_cleanup;
+        }
         const ExclusiveCleanup ownership(this->gate);
         if (!ownership.acquired)
         {
             const CacheStorageStatistics stats = scanCacheStorage(this->root, kind);
+            rememberScan(stats);
             result.before_bytes = result.remaining_bytes = stats.payload_bytes;
             result.errors = stats.scan_errors;
             result.shared_root = true;
@@ -836,6 +877,7 @@ public:
         if (!flush()) { ++result.errors; result.target_reached = false; return publish(result); }
         std::lock_guard<std::mutex> disk_lock(this->disk_mutex);
         const CacheStorageStatistics stats = scanCacheStorage(this->root, kind);
+        rememberScan(stats);
         result.before_bytes = result.remaining_bytes = stats.payload_bytes;
         result.errors = stats.scan_errors;
         const std::uint64_t target = (policy.maximum_bytes / 100) * policy.cleanup_target_percent +
@@ -993,6 +1035,7 @@ public:
         // Reconcile concurrent publication and unrecognized payloads with actual
         // filesystem accounting instead of claiming a transactional byte limit.
         const CacheStorageStatistics after = scanCacheStorage(this->root, kind);
+        rememberScan(after);
         result.remaining_bytes = after.payload_bytes;
         result.errors += after.scan_errors;
         result.target_reached = !result.errors && result.remaining_bytes <= target;
@@ -1024,7 +1067,7 @@ public:
             const bool ok = flush();
             if (check_policy)
             {
-                try { cleanup(); }
+                try { cleanup(true); }
                 catch (const std::exception &)
                 {
                     CacheCleanupResult failure;
@@ -1055,6 +1098,10 @@ public:
     CacheCleanupResult last_cleanup;
     bool policy_changed = false;
     bool cleanup_in_progress = false;
+    // Last successful full scan and the bytes published since (this->mutex).
+    std::optional<std::uint64_t> scanned_bytes;
+    std::chrono::steady_clock::time_point scanned_at;
+    std::uint64_t published_since_scan = 0;
     std::chrono::steady_clock::time_point next_cleanup = std::chrono::steady_clock::now() + FlushInterval;
     std::thread worker;
 };
@@ -1068,7 +1115,7 @@ bool CacheAccessIndex::setStoragePolicy(CacheStorageKind kind, const CacheStorag
 { return this->impl->setPolicy(kind, policy); }
 CacheCleanupResult CacheAccessIndex::lastCleanup() const
 { std::lock_guard<std::mutex> lock(this->impl->mutex); return this->impl->last_cleanup; }
-CacheCleanupResult CacheAccessIndex::cleanupNow() { return this->impl->cleanup(); }
+CacheCleanupResult CacheAccessIndex::cleanupNow() { return this->impl->cleanup(false); }
 bool CacheAccessIndex::replaceProtectionGroup(CacheStorageKind kind, const CacheProtectionGroup &group)
 {
     if (!validGroupId(group.id) || group.ranges.empty() || group.ranges.size() > MaximumProtectionRangesPerGroup ||
@@ -1082,6 +1129,8 @@ bool CacheAccessIndex::removeProtectionGroup(const std::string &id)
 std::optional<std::vector<CacheProtectionGroup>> CacheAccessIndex::protectionGroups(CacheStorageKind kind) const
 { return this->impl->protectionGroups(kind); }
 void CacheAccessIndex::recordAccess(const std::string &key) { this->impl->record(key); }
+void CacheAccessIndex::recordPublished(const std::string &key, std::uint64_t bytes)
+{ this->impl->published(key, bytes); }
 bool CacheAccessIndex::flush() { return this->impl->flush(); }
 std::optional<std::int64_t> CacheAccessIndex::lastAccess(const std::string &key) const
 { return this->impl->lastAccess(key); }

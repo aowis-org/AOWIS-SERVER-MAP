@@ -1516,24 +1516,31 @@ void Server::setupRoutes()
 
     this->http.route("/cache/<arg>/<arg>/<arg>/<arg>/<arg>/<arg>", QHttpServerRequest::Method::Delete,
                      [this](const QString &provider, int zoom, int tile_x_min, int tile_x_max,
-                            int tile_y_min, int tile_y_max)
+                            int tile_y_min, int tile_y_max,
+                            const QHttpServerRequest &) -> QFuture<QHttpServerResponse>
     {
-        const int deleted_count = this->maptiles->deleteTiles(
-            provider, zoom, tile_x_min, tile_x_max, tile_y_min, tile_y_max);
-        if (deleted_count == -1)
+        // Directory walks and unlinks run on a MapTiles worker, never on
+        // the HTTP event loop; cache state is invalidated immediately.
+        const PendingPromise promise = PendingPromise::create();
+        promise->start();
+        QFuture<QHttpServerResponse> future = promise->future();
+        this->maptiles->deleteTilesAsync(provider, zoom, tile_x_min, tile_x_max,
+                                         tile_y_min, tile_y_max, [promise](int deleted_count)
         {
-            return QHttpServerResponse(
-                "Invalid tile cache deletion request",
-                QHttpServerResponse::StatusCode::BadRequest);
-        }
-        if (deleted_count < -1)
-        {
-            return QHttpServerResponse(
-                "Failed to delete one or more cached tiles",
-                QHttpServerResponse::StatusCode::InternalServerError);
-        }
-
-        return QHttpServerResponse(QString::number(deleted_count), QHttpServerResponse::StatusCode::Ok);
+            if (deleted_count == -1)
+                promise->addResult(QHttpServerResponse(
+                    "Invalid tile cache deletion request",
+                    QHttpServerResponse::StatusCode::BadRequest));
+            else if (deleted_count < -1)
+                promise->addResult(QHttpServerResponse(
+                    "Failed to delete one or more cached tiles",
+                    QHttpServerResponse::StatusCode::InternalServerError));
+            else
+                promise->addResult(QHttpServerResponse(
+                    QString::number(deleted_count), QHttpServerResponse::StatusCode::Ok));
+            promise->finish();
+        });
+        return future;
     });
 
     this->http.route("/cache/<arg>/<arg>/<arg>/<arg>/<arg>/<arg>", QHttpServerRequest::Method::Options,

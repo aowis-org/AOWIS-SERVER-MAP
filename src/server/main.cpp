@@ -11,11 +11,56 @@
 
 #include <cstdlib>
 
+#ifdef Q_OS_UNIX
+#include <QSocketNotifier>
+#include <csignal>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
+
 #include "configuration.h"
 #include "server.h"
 
 namespace
 {
+#ifdef Q_OS_UNIX
+// SIGTERM (systemctl stop) and SIGINT end the event loop, so the server is
+// destroyed normally: workers are canceled and joined, cache access hints
+// are flushed. The handler only writes to a socket (async-signal-safe).
+int shutdown_signal_sockets[2] = {-1, -1};
+
+void handleShutdownSignal(int)
+{
+    const char byte = 1;
+    const ssize_t written = ::write(shutdown_signal_sockets[0], &byte, sizeof(byte));
+    (void)written;
+}
+
+bool installShutdownSignalHandlers(QCoreApplication *application)
+{
+    if (::socketpair(AF_UNIX, SOCK_STREAM, 0, shutdown_signal_sockets) != 0)
+        return false;
+    QSocketNotifier *notifier = new QSocketNotifier(
+        shutdown_signal_sockets[1], QSocketNotifier::Read, application);
+    QObject::connect(notifier, &QSocketNotifier::activated, application,
+                     [notifier, application]()
+    {
+        notifier->setEnabled(false);
+        char byte = 0;
+        const ssize_t received = ::read(shutdown_signal_sockets[1], &byte, sizeof(byte));
+        (void)received;
+        qInfo() << "Shutdown requested; stopping map server";
+        application->quit();
+    });
+    struct sigaction action = {};
+    action.sa_handler = handleShutdownSignal;
+    sigemptyset(&action.sa_mask);
+    action.sa_flags = SA_RESTART;
+    return ::sigaction(SIGTERM, &action, nullptr) == 0 &&
+           ::sigaction(SIGINT, &action, nullptr) == 0;
+}
+#endif
+
 bool parsePositiveInt(const QString &value, const QString &option_name, int *result)
 {
     bool valid = false;
@@ -277,6 +322,10 @@ int main(int argc, char *argv[])
     Server server(config);
     if (!server.start())
         return EXIT_FAILURE;
+#ifdef Q_OS_UNIX
+    if (!installShutdownSignalHandlers(&app))
+        qWarning() << "Could not install SIGTERM/SIGINT handlers; shutdown will not flush caches";
+#endif
 
     // Optional event-loop stall instrumentation for performance diagnostics.
     // Configure AOWIS_MAP_EVENT_LOOP_WARN_MS to a positive integer to enable.

@@ -144,6 +144,11 @@ public:
     std::optional<std::vector<CacheProtectionGroup>> protectionGroups(CacheStorageKind kind) const;
 
     void recordAccess(const std::string &relative_key);
+    // recordAccess() for a payload this process just wrote. Its size lets
+    // periodic maintenance skip the full tree scan while the cache is
+    // certainly below its limit (files changed by others are found by the
+    // next full scan, at least every few minutes).
+    void recordPublished(const std::string &relative_key, std::uint64_t bytes);
     // Explicit synchronization point for tests, shutdown and maintenance.
     // Returns false if persistence failed. Normal requests remain usable.
     bool flush();

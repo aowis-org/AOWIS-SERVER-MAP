@@ -154,11 +154,13 @@ MapTiles::MapTiles(const QString &cache_base_directory, int maximum_active_downl
     this->cascade_instance_id = QUuid::createUuid().toString(QUuid::WithoutBraces).toLatin1();
     this->cache_write_pool.setMaxThreadCount(2);
     this->cache_read_pool.setMaxThreadCount(2);
+    this->cache_delete_pool.setMaxThreadCount(1);
     configureProviders(Aowis::Map::defaultMapProviders(), {}, {});
 }
 
 MapTiles::~MapTiles()
 {
+    this->cache_delete_pool.waitForDone();
     this->cache_read_pool.waitForDone();
     this->cache_write_pool.waitForDone();
 }
@@ -756,8 +758,9 @@ MapTiles::TileRequestResult MapTiles::getTileForHttp(
     return { TileRequestStatus::Pending, {} };
 }
 
-int MapTiles::deleteTiles(const QString &provider, int zoom, int tile_x_min, int tile_x_max,
-                          int tile_y_min, int tile_y_max)
+int MapTiles::prepareTileDeletion(const QString &provider, int zoom, int tile_x_min,
+                                  int tile_x_max, int tile_y_min, int tile_y_max,
+                                  TileDeletionPlan *plan)
 {
     // Reject malformed requests before invalidating unrelated pending reads or
     // waiting for any outstanding writes. The provider path may be empty for
@@ -774,15 +777,23 @@ int MapTiles::deleteTiles(const QString &provider, int zoom, int tile_x_min, int
     if (bounded_y_min > bounded_y_max)
         return 0;
 
+    plan->cache_path = cache_path;
+    plan->provider = provider;
+    plan->zoom = zoom;
+    plan->tile_count = tile_count;
+    plan->tile_x_min = tile_x_min;
+    plan->tile_x_max = tile_x_max;
+    plan->tile_y_min = bounded_y_min;
+    plan->tile_y_max = bounded_y_max;
+
     // Invalidate outstanding cold reads without waiting for disk workers.
     // They only read independent file paths; their completion callback checks
     // this generation before publishing bytes or retrying a remote request.
     ++this->cache_generation;
     // Invalidate only overlapping writes. A worker holds its tile's mutex
-    // while publishing with QSaveFile; once we acquire and release that
-    // mutex, an already-running write has finished. Queued workers see the
-    // invalidation marker and must not publish after deletion.
-    QList<QSharedPointer<CacheWriteState>> overlapping_writes;
+    // while publishing with QSaveFile; once the deletion worker acquires and
+    // releases that mutex, an already-running write has finished. Queued
+    // workers see the invalidation marker and must not publish after deletion.
     for (QHash<QString, QSharedPointer<CacheWriteState>>::const_iterator it =
              this->cache_write_states.cbegin();
          it != this->cache_write_states.cend(); ++it)
@@ -799,14 +810,8 @@ int MapTiles::deleteTiles(const QString &provider, int zoom, int tile_x_min, int
             tileXInsideRange(write_x, tile_count, tile_x_min, tile_x_max))
         {
             it.value()->invalidated.store(true, std::memory_order_release);
-            overlapping_writes.append(it.value());
+            plan->overlapping_writes.append(it.value());
         }
-    }
-    // This waits only for writes that actually overlap the requested tiles,
-    // never for unrelated queued work. New workers skip invalidated writes.
-    for (const QSharedPointer<CacheWriteState> &state : overlapping_writes)
-    {
-        QMutexLocker locker(&state->mutex);
     }
 
     {
@@ -832,6 +837,12 @@ int MapTiles::deleteTiles(const QString &provider, int zoom, int tile_x_min, int
         }
     }
 
+    evictMemoryTiles(*plan);
+    return 1;
+}
+
+void MapTiles::evictMemoryTiles(const TileDeletionPlan &plan)
+{
     const QList<QString> memory_keys = this->tile_memory_cache.keys();
     for (const QString &memory_key : memory_keys)
     {
@@ -845,42 +856,54 @@ int MapTiles::deleteTiles(const QString &provider, int zoom, int tile_x_min, int
             continue;
         }
 
-        if (memory_provider == provider && memory_zoom == zoom
-            && memory_y >= bounded_y_min && memory_y <= bounded_y_max
-            && tileXInsideRange(memory_x, tile_count, tile_x_min, tile_x_max))
+        if (memory_provider == plan.provider && memory_zoom == plan.zoom
+            && memory_y >= plan.tile_y_min && memory_y <= plan.tile_y_max
+            && tileXInsideRange(memory_x, plan.tile_count, plan.tile_x_min, plan.tile_x_max))
         {
             this->tile_memory_cache.remove(memory_key);
         }
     }
+}
 
-    QDir provider_dir(cache_path);
-    QDir zoom_dir(provider_dir.filePath(QString::number(zoom)));
+MapTiles::TileDeletionOutcome MapTiles::removeTileFiles(const TileDeletionPlan &plan) const
+{
+    // Any thread: only immutable paths, the thread-safe access index and the
+    // write-state mutexes are used here.
+    TileDeletionOutcome outcome;
+    // This waits only for writes that actually overlap the requested tiles,
+    // never for unrelated queued work. New workers skip invalidated writes.
+    for (const QSharedPointer<CacheWriteState> &state : plan.overlapping_writes)
+    {
+        QMutexLocker locker(&state->mutex);
+    }
+
+    QDir provider_dir(plan.cache_path);
+    QDir zoom_dir(provider_dir.filePath(QString::number(plan.zoom)));
     if (!zoom_dir.exists())
-        return 0;
+        return outcome;
 
     const QStringList x_directory_names = zoom_dir.entryList(QDir::Dirs | QDir::NoDotAndDotDot);
-    int deleted_count = 0;
+    QStringList name_filters;
+    for (const QString &extension : rasterTileExtensions())
+        name_filters << QStringLiteral("*.") + extension;
 
     for (const QString &x_directory_name : x_directory_names)
     {
         bool tile_x_valid = false;
         const int tile_x = x_directory_name.toInt(&tile_x_valid);
-        if (!tile_x_valid || tile_x < 0 || tile_x >= tile_count ||
-            !tileXInsideRange(tile_x, tile_count, tile_x_min, tile_x_max))
+        if (!tile_x_valid || tile_x < 0 || tile_x >= plan.tile_count ||
+            !tileXInsideRange(tile_x, plan.tile_count, plan.tile_x_min, plan.tile_x_max))
         {
             continue;
         }
 
         QDir x_directory(zoom_dir.filePath(x_directory_name));
-        QStringList name_filters;
-        for (const QString &extension : rasterTileExtensions())
-            name_filters << QStringLiteral("*.") + extension;
         const QStringList tile_file_names = x_directory.entryList(name_filters, QDir::Files);
         for (const QString &tile_file_name : tile_file_names)
         {
             bool tile_y_valid = false;
             const int tile_y = QFileInfo(tile_file_name).completeBaseName().toInt(&tile_y_valid);
-            if (!tile_y_valid || tile_y < bounded_y_min || tile_y > bounded_y_max)
+            if (!tile_y_valid || tile_y < plan.tile_y_min || tile_y > plan.tile_y_max)
                 continue;
 
             const QString tile_path = x_directory.filePath(tile_file_name);
@@ -889,20 +912,70 @@ int MapTiles::deleteTiles(const QString &provider, int zoom, int tile_x_min, int
             if (!QFile::remove(tile_path))
             {
                 qWarning() << "Failed to delete cached tile:" << tile_path;
-                return -2;
+                outcome.deleted_count = -2;
+                return outcome;
             }
 
             QFile::remove(tile_path + QStringLiteral(".http.json"));
-            const QString removed_key = canonicalTileKey(provider, zoom, tile_x, tile_y);
-            this->permanent_cached_keys.remove(removed_key);
-            ++deleted_count;
+            outcome.removed_keys.append(canonicalTileKey(plan.provider, plan.zoom, tile_x, tile_y));
+            ++outcome.deleted_count;
         }
 
         zoom_dir.rmdir(x_directory_name);
     }
 
-    provider_dir.rmdir(QString::number(zoom));
-    return deleted_count;
+    provider_dir.rmdir(QString::number(plan.zoom));
+    return outcome;
+}
+
+void MapTiles::finishTileDeletion(const TileDeletionPlan &plan, const TileDeletionOutcome &outcome)
+{
+    for (const QString &removed_key : outcome.removed_keys)
+        this->permanent_cached_keys.remove(removed_key);
+    // While files were being removed off this thread, a request may have
+    // read a tile that was about to go: drop such reads and RAM copies.
+    ++this->cache_generation;
+    evictMemoryTiles(plan);
+}
+
+int MapTiles::deleteTiles(const QString &provider, int zoom, int tile_x_min, int tile_x_max,
+                          int tile_y_min, int tile_y_max)
+{
+    TileDeletionPlan plan;
+    const int prepared = prepareTileDeletion(provider, zoom, tile_x_min, tile_x_max,
+                                             tile_y_min, tile_y_max, &plan);
+    if (prepared <= 0)
+        return prepared;
+    const TileDeletionOutcome outcome = removeTileFiles(plan);
+    finishTileDeletion(plan, outcome);
+    return outcome.deleted_count;
+}
+
+void MapTiles::deleteTilesAsync(const QString &provider, int zoom, int tile_x_min, int tile_x_max,
+                                int tile_y_min, int tile_y_max,
+                                const std::function<void(int)> &completed)
+{
+    TileDeletionPlan plan;
+    const int prepared = prepareTileDeletion(provider, zoom, tile_x_min, tile_x_max,
+                                             tile_y_min, tile_y_max, &plan);
+    if (prepared <= 0)
+    {
+        completed(prepared);
+        return;
+    }
+    QFutureWatcher<TileDeletionOutcome> *watcher = new QFutureWatcher<TileDeletionOutcome>(this);
+    connect(watcher, &QFutureWatcher<TileDeletionOutcome>::finished, this,
+            [this, watcher, plan, completed]()
+    {
+        const TileDeletionOutcome outcome = watcher->result();
+        watcher->deleteLater();
+        finishTileDeletion(plan, outcome);
+        completed(outcome.deleted_count);
+    });
+    watcher->setFuture(QtConcurrent::run(&this->cache_delete_pool, [this, plan]()
+    {
+        return removeTileFiles(plan);
+    }));
 }
 
 QHash<QString, Aowis::Map::CascadeUpstreamState> MapTiles::upstreamHealth() const
@@ -1152,8 +1225,14 @@ void MapTiles::attemptMapTileDownload(const QueuedDownload &download, int source
         {
             --this->pending_cache_writes;
             this->pending_cache_write_bytes -= qint64(data.size());
-            this->cache_writes_pending_keys.remove(download.canonical_key);
-            this->cache_write_states.remove(download.canonical_key);
+            // A later download of the same tile may already have registered
+            // its own write: only this write's entries are removed, so a
+            // cache deletion can still invalidate the newer one.
+            if (this->cache_write_states.value(download.canonical_key) == write_state)
+            {
+                this->cache_writes_pending_keys.remove(download.canonical_key);
+                this->cache_write_states.remove(download.canonical_key);
+            }
             // Cache deletion may have invalidated the write while it ran.
             // The deleting code waits for writers before removing disk files.
             {
@@ -1174,7 +1253,9 @@ void MapTiles::attemptMapTileDownload(const QueuedDownload &download, int source
             const Aowis::Map::CacheAccessIndex::PayloadLease lease =
                 this->cache_access_index.leasePayload(cacheStorageKey(tile_path));
             const bool saved = MapTiles::saveMapTile(data, tile_path);
-            if (saved) recordCacheUse(tile_path);
+            if (saved)
+                this->cache_access_index.recordPublished(cacheStorageKey(tile_path),
+                                                         std::uint64_t(data.size()));
             return saved;
         }));
     });

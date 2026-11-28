@@ -16,6 +16,7 @@
 #include <QQueue>
 #include <QSharedPointer>
 #include <atomic>
+#include <functional>
 #include <QSet>
 #include <QThreadPool>
 #include <QString>
@@ -92,8 +93,14 @@ public:
     // HTTP path: offload established cold disk hits without occupying the event loop.
     TileRequestResult getTileForHttp(const QString &provider, int z, int x, int y, const QString &key,
                                      const QByteArray &cascade_trace = {});
+    // Count of deleted tiles, -1 for an invalid request, < -1 on failure.
     int deleteTiles(const QString &provider, int zoom, int tile_x_min, int tile_x_max,
                     int tile_y_min, int tile_y_max);
+    // deleteTiles() with the file removal on a worker: cache state is
+    // invalidated at once, completed() runs later on the MapTiles thread.
+    void deleteTilesAsync(const QString &provider, int zoom, int tile_x_min, int tile_x_max,
+                          int tile_y_min, int tile_y_max,
+                          const std::function<void(int)> &completed);
     UpstreamActivity upstreamActivity() const;
     // Reachability, cooldown and learned instance ID per upstream name.
     QHash<QString, Aowis::Map::CascadeUpstreamState> upstreamHealth() const;
@@ -144,6 +151,33 @@ private:
         QByteArray cascade_trace;
         QVector<DownloadSource> sources;
     };
+
+    // One raster cache deletion, captured on the MapTiles thread.
+    struct TileDeletionPlan
+    {
+        QString cache_path;
+        QString provider;
+        int zoom = 0;
+        int tile_count = 1;
+        int tile_x_min = 0;
+        int tile_x_max = 0;
+        int tile_y_min = 0; // Clamped to the zoom's rows.
+        int tile_y_max = 0;
+        QList<QSharedPointer<CacheWriteState>> overlapping_writes;
+    };
+
+    struct TileDeletionOutcome
+    {
+        int deleted_count = 0;
+        QStringList removed_keys;
+    };
+
+    // -1: invalid, 0: nothing to delete, 1: plan ready (state invalidated).
+    int prepareTileDeletion(const QString &provider, int zoom, int tile_x_min, int tile_x_max,
+                            int tile_y_min, int tile_y_max, TileDeletionPlan *plan);
+    void evictMemoryTiles(const TileDeletionPlan &plan);
+    TileDeletionOutcome removeTileFiles(const TileDeletionPlan &plan) const;
+    void finishTileDeletion(const TileDeletionPlan &plan, const TileDeletionOutcome &outcome);
 
     enum class DownloadScheduleStatus
     {
@@ -204,6 +238,8 @@ private:
     QNetworkAccessManager *tunnelNetworkManager(const QNetworkProxy &proxy);
     QThreadPool cache_write_pool;
     QThreadPool cache_read_pool;
+    // One worker: deletions run in request order.
+    QThreadPool cache_delete_pool;
     QHash<QString, QStringList> cache_reads_pending;
     quint64 cache_generation = 0;
     qint64 pending_cache_read_bytes = 0;
