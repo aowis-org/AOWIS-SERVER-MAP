@@ -57,7 +57,7 @@ for required in \
     fi
 done
 
-data_package="$scratch/dist/aowis-server-map-data_2022.1+overview1_all.deb"
+data_package="$scratch/dist/aowis-server-map-data_2022.1+overview2_all.deb"
 test -s "$data_package"
 # Preserve the separately versioned artifact on routine code rebuilds.
 if [[ ! -f "/packages/$(basename -- "$data_package")" ]] || ! cmp -s "$data_package" "/packages/$(basename -- "$data_package")"; then

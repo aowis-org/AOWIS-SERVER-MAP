@@ -27,7 +27,7 @@ first_package="${first_packages[0]}"
 upgrade_package="${upgrade_packages[0]}"
 
 printf '\n== Fresh Debian package installation ==\n'
-data_package=/packages/aowis-server-map-data_2022.1+overview1_all.deb
+data_package=/packages/aowis-server-map-data_2022.1+overview2_all.deb
 apt-get install --yes --no-install-recommends "$data_package" "$first_package"
 data_dir=/usr/share/aowis-server-map/terrain
 pack="$data_dir/global-overview-v1.aowpack"
@@ -105,7 +105,7 @@ for path in /status /map/v1/providers /terrain/v1/datasets; do
 done
 curl -fsS 'http://127.0.0.1:18122/terrain/v1/datasets' | python3 -c 'import json,sys; data=json.load(sys.stdin); assert any(d.get("minimum_zoom")==0 and d.get("native_minimum_zoom")==8 for d in data["datasets"])'
 curl -fsS --max-time 5 'http://127.0.0.1:18122/terrain/v2/copernicus-glo30/0/0/0.aowterrain' -o /tmp/overview-test.aowterrain
-python3 -c 'import sys; data=open(sys.argv[1],"rb").read(); assert len(data)==8614 and data[:8]==b"AOWTRN\0\0"' /tmp/overview-test.aowterrain
+python3 -c 'import sys; data=open(sys.argv[1],"rb").read(); assert len(data)==8614 and data[:8]==b"AOWTRN\0\0" and data[80:84]==b"\x03\0\0\0"' /tmp/overview-test.aowterrain
 cleanup_server
 printf '%s\n' 'PASS: installed binary serves GET endpoints without API keys.'
 

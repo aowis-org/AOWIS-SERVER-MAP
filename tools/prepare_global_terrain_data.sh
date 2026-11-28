@@ -7,7 +7,7 @@ source_name=ETOPO_2022_v1_60s_N90W180_surface.tif
 url="https://www.ngdc.noaa.gov/mgg/global/relief/ETOPO2022/data/60s/60s_surface_elev_gtif/$source_name"
 pack_name=global-overview-v1.aowpack
 manifest_name=etopo-2022-provenance.json
-version=2022.1+overview1
+version=2022.1+overview2
 deb_name="aowis-server-map-data_${version}_all.deb"
 cache="${AOWIS_MAP_DATA_BUILD_CACHE:-${XDG_DATA_HOME:-$HOME/.local/share}/aowis-server-map/datasets/etopo-2022-v1-60s}"
 local_source="${AOWIS_MAP_ETOPO_SOURCE:-$project_root/$source_name}"
@@ -55,10 +55,15 @@ field() {
 }
 old_source_hash= old_pack_hash=
 if [[ -f "$manifest" ]]; then
-    [[ "$(field "$manifest" version)" == "$version" ]] || fail 'unexpected data manifest version'
+    previous_version="$(field "$manifest" version)" || fail 'missing data manifest version'
+    [[ "$previous_version" == "$version" || "$previous_version" == 2022.1+overview1 ]] || fail 'unexpected data manifest version'
     old_source_hash="$(field "$manifest" source_sha256)" || fail 'missing source digest'
     old_pack_hash="$(field "$manifest" overview_sha256)" || fail 'missing overview digest'
     [[ "$old_source_hash" =~ ^[0-9a-f]{64}$ && "$old_pack_hash" =~ ^[0-9a-f]{64}$ ]] || fail 'invalid manifest digests'
+    if [[ "$previous_version" != "$version" ]]; then
+        echo "Upgrading derived ETOPO overview metadata (original source retained)"
+        old_pack_hash=
+    fi
 fi
 validated_source=false
 if [[ -f "$source" ]]; then
@@ -111,7 +116,7 @@ else
   "attribution": "NOAA National Centers for Environmental Information, ETOPO 2022",
   "datum": "EGM2008",
   "resolution_arc_seconds": 60,
-  "overview_processing": "Web Mercator z0-7, geographic pixel-footprint area averaging, negative elevations clamped to zero for visualization"
+  "overview_processing": "Web Mercator z0-7, geographic pixel-footprint area averaging, negative elevations clamped to zero for visualization; sampled residuals against quantized triangular mesh at ETOPO pixel centres"
 }
 EOF_MANIFEST
     chmod 0644 "$temporary"

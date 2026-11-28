@@ -1,5 +1,6 @@
 // Offline ETOPO preparation. Only libtiff and the C++ standard library are needed.
 #include <tiffio.h>
+#include <aowis/map/terrain_lod_metadata.h>
 
 #include <algorithm>
 #include <array>
@@ -275,7 +276,134 @@ uint32_t crc(const Record &record)
         result = (result >> 8) ^ table[(result ^ record[i]) & 255];
     return ~result;
 }
-Record encode(const std::vector<float> &cells, int z, int tx, int ty, float resolution)
+// Store the same quantized vertex codes as the delivered mesh. A global
+// grid shares edge vertices, including the antimeridian.
+uint16_t vertexCode(const std::vector<float> &cells, int n, int x, int y)
+{
+    const size_t top = size_t(std::max(0, y - 1)) * n;
+    const size_t bottom = size_t(std::min(y, n - 1)) * n;
+    const int left = (x + n - 1) % n, right = x % n;
+    const double h = (double(cells[top + left]) + cells[top + right]
+                    + cells[bottom + left] + cells[bottom + right]) / 4;
+    const double code = std::floor((h - MinimumElevation) / Scale + 0.5);
+    require(std::isfinite(code) && code >= 0 && code <= 65534, "invalid encoded elevation");
+    return uint16_t(code);
+}
+
+struct Residual
+{
+    float minimum = std::numeric_limits<float>::infinity();
+    float maximum = -std::numeric_limits<float>::infinity();
+    double under = 0, over = 0, squares = 0;
+    uint64_t count = 0;
+
+    void observe(float reference, double surface)
+    {
+        this->minimum = std::min(this->minimum, reference);
+        this->maximum = std::max(this->maximum, reference);
+        const double difference = double(reference) - surface;
+        this->under = std::max(this->under, difference);
+        this->over = std::max(this->over, -difference);
+        this->squares += difference * difference;
+        ++this->count;
+    }
+
+    Aowis::TerrainWire::MetadataBuffer metadata() const
+    {
+        using namespace Aowis::TerrainWire;
+        if (!this->count)
+            return {};
+        const TerrainSourceStatistics source{this->minimum, this->maximum, this->count, 0, 0};
+        const TerrainGeometricError error{this->under, this->over,
+            std::sqrt(this->squares / double(this->count)), this->count, 0, 0, 0};
+        const std::optional<MetadataBuffer> encoded = encodeMetadata(source, error);
+        require(encoded.has_value(), "invalid overview metadata");
+        return *encoded;
+    }
+};
+
+struct AxisSample
+{
+    int cell;
+    double fraction;
+};
+
+AxisSample axisSample(double position, int n)
+{
+    const double p = std::clamp(position, 0.0, double(n));
+    const int cell = std::min(int(p), n - 1);
+    return {cell, p - cell};
+}
+
+// NE-SW diagonal: identical to Render's surface index topology. The
+// codes are interpolated before conversion to metres (an affine transform).
+double triangleHeight(uint16_t nw, uint16_t ne, uint16_t sw, uint16_t se,
+                      double u, double v)
+{
+    const double code = u + v <= 1.0
+        ? double(nw) + u * (double(ne) - nw) + v * (double(sw) - nw)
+        : double(se) + (1.0 - u) * (double(sw) - se) + (1.0 - v) * (double(ne) - se);
+    return MinimumElevation + Scale * code;
+}
+
+struct ErrorLevel
+{
+    int n = 0;
+    std::vector<uint16_t> vertices;
+    std::vector<AxisSample> columns;
+    std::vector<Residual> tiles;
+
+    void initialize(const std::vector<float> &cells, int z, uint32_t source_width)
+    {
+        this->n = GridCells << z;
+        const int stride = this->n + 1;
+        this->vertices.resize(size_t(stride) * stride);
+        for (int y = 0; y <= this->n; ++y)
+            for (int x = 0; x <= this->n; ++x)
+                this->vertices[size_t(y) * stride + x] = vertexCode(cells, this->n, x, y);
+        this->columns.resize(source_width);
+        for (uint32_t x = 0; x < source_width; ++x)
+            this->columns[x] = axisSample((double(x) + 0.5) * this->n / source_width, this->n);
+        const int side = 1 << z;
+        this->tiles.resize(size_t(side) * side);
+    }
+
+    void observeRow(double mercator_y, const float *row, bool clamp_negative)
+    {
+        const AxisSample sy = axisSample(mercator_y * this->n, this->n);
+        const size_t stride = size_t(this->n) + 1;
+        const uint16_t *top = this->vertices.data() + size_t(sy.cell) * stride;
+        const uint16_t *bottom = top + stride;
+        Residual *tile_row = this->tiles.data() + size_t(sy.cell / GridCells) * (this->n / GridCells);
+        for (size_t x = 0; x < this->columns.size(); ++x)
+        {
+            const AxisSample &sx = this->columns[x];
+            const int i = sx.cell;
+            const float reference = clamp_negative ? std::max(0.0f, row[x]) : row[x];
+            tile_row[i / GridCells].observe(reference,
+                triangleHeight(top[i], top[i + 1], bottom[i], bottom[i + 1], sx.fraction, sy.fraction));
+        }
+    }
+};
+
+void measureErrors(Raster &source, std::array<ErrorLevel, MaximumZoom + 1> &levels, bool clamp_negative)
+{
+    // One additional streaming pass over the source, not one per zoom. Pixel
+    // centres outside Web Mercator coverage are deliberately excluded.
+    source.rows([&](uint32_t y, const float *row)
+    {
+        const double latitude = (90.0 - (double(y) + 0.5) * 180.0 / source.height)
+                              * std::numbers::pi / 180.0;
+        const double mercator_y = (1.0 - std::asinh(std::tan(latitude)) / std::numbers::pi) * 0.5;
+        if (mercator_y < 0.0 || mercator_y >= 1.0)
+            return;
+        for (ErrorLevel &level : levels)
+            level.observeRow(mercator_y, row, clamp_negative);
+    });
+}
+
+Record encode(const std::vector<float> &cells, int z, int tx, int ty, float resolution,
+              const ErrorLevel *level = nullptr)
 {
     Record record{};
     const int n = GridCells << z;
@@ -292,16 +420,18 @@ Record encode(const std::vector<float> &cells, int z, int tx, int ty, float reso
     for (int j = 0; j <= 64; ++j)
     {
         const int y = ty * 64 + j;
-        const size_t top = size_t(std::max(0, y - 1)) * n, bottom = size_t(std::min(y, n - 1)) * n;
         for (int i = 0; i <= 64; ++i)
         {
             const int x = tx * 64 + i;
-            const int left = (x + n - 1) % n, right = x % n;
-            const double h = (double(cells[top + left]) + cells[top + right] + cells[bottom + left] + cells[bottom + right]) / 4;
-            const double code = std::floor((h - MinimumElevation) / Scale + 0.5);
-            require(std::isfinite(code) && code >= 0 && code <= 65534, "invalid encoded elevation");
-            put(record, SamplesOffset + 2 * (j * 65 + i), uint32_t(code), 2);
+            const uint16_t code = level ? level->vertices[size_t(y) * (n + 1) + x]
+                                        : vertexCode(cells, n, x, y);
+            put(record, SamplesOffset + 2 * (j * 65 + i), code, 2);
         }
+    }
+    if (level)
+    {
+        const Aowis::TerrainWire::MetadataBuffer metadata = level->tiles[size_t(ty) * (1 << z) + tx].metadata();
+        std::copy(metadata.begin(), metadata.end(), record.begin() + PayloadOffset);
     }
     put(record, 60, crc(record));
     return record;
@@ -333,9 +463,16 @@ void validatePack(const fs::path &path)
                     && get(record.data() + 52) == 4225 && get(record.data() + 56) == RecordBytes - PayloadOffset
                     && std::equal(record.begin() + 64, record.begin() + 80, "copernicus-glo30")
                     && get(record.data() + 60) == crc(record), "invalid overview record");
+                std::optional<Aowis::TerrainWire::TerrainSourceStatistics> statistics;
+                std::optional<Aowis::TerrainWire::TerrainGeometricError> error;
+                require(Aowis::TerrainWire::decodeMetadata(record.data() + PayloadOffset,
+                    RecordBytes - PayloadOffset, statistics, error)
+                    && statistics.has_value() == error.has_value()
+                    && (!statistics || statistics->valid_pixel_count == error->compared_pixel_count),
+                    "invalid overview metadata");
             }
 }
-void writePack(std::vector<float> cells, const fs::path &output, float resolution)
+void writePack(Raster &source, std::vector<float> cells, const fs::path &output, float resolution, bool clamp_negative)
 {
     // Caller creates a unique temporary file in the destination directory.
     std::ofstream out(output, std::ios::binary | std::ios::trunc);
@@ -344,18 +481,11 @@ void writePack(std::vector<float> cells, const fs::path &output, float resolutio
     std::copy_n("AOWCOAR1", 8, header.data());
     put(header, 8, MaximumZoom); put(header, 12, RecordBytes);
     out.write(reinterpret_cast<const char *>(header.data()), 16);
+    std::array<ErrorLevel, MaximumZoom + 1> levels;
     for (int z = MaximumZoom; z >= 0; --z)
     {
-        const int side = 1 << z, n = 64 * side;
-        out.seekp(offset(z, 0, 0));
-        for (int y = 0; y < side; ++y)
-            for (int x = 0; x < side; ++x)
-            {
-                const Record record = encode(cells, z, x, y, resolution);
-                out.write(reinterpret_cast<const char *>(record.data()), record.size());
-            }
-        require(bool(out), "pack write failed");
-        std::cout << "Zoom " << z << ": " << side * side << " tiles" << std::endl;
+        const int n = GridCells << z;
+        levels[z].initialize(cells, z, source.width);
         if (z)
         {
             const int m = n / 2;
@@ -368,6 +498,22 @@ void writePack(std::vector<float> cells, const fs::path &output, float resolutio
                 }
             cells.resize(size_t(m) * m);
         }
+    }
+    std::vector<float>().swap(cells);
+    std::cout << "Measuring ETOPO geometric error at zooms 0-7" << std::endl;
+    measureErrors(source, levels, clamp_negative);
+    for (int z = MaximumZoom; z >= 0; --z)
+    {
+        const int side = 1 << z;
+        out.seekp(offset(z, 0, 0));
+        for (int y = 0; y < side; ++y)
+            for (int x = 0; x < side; ++x)
+            {
+                const Record record = encode(cells, z, x, y, resolution, &levels[z]);
+                out.write(reinterpret_cast<const char *>(record.data()), record.size());
+            }
+        require(bool(out), "pack write failed");
+        std::cout << "Zoom " << z << ": " << side * side << " tiles" << std::endl;
     }
     out.close();
     require(bool(out), "pack close failed");
@@ -387,7 +533,7 @@ void build(const fs::path &source_path, const fs::path &output, float resolution
     close(fd);
     try
     {
-        writePack(std::move(cells), pattern, resolution);
+        writePack(source, std::move(cells), pattern, resolution, clamp_negative);
         validatePack(pattern);
         fs::permissions(pattern, fs::perms::owner_read | fs::perms::owner_write | fs::perms::group_read | fs::perms::others_read);
         const int pack_fd = open(pattern.c_str(), O_RDONLY);
@@ -464,6 +610,32 @@ void selfTest()
         require(get(a.data() + SamplesOffset + 2 * (64 * 65 + i), 2) == get(c.data() + SamplesOffset + 2 * i, 2), "vertical seam");
     }
     require(get(a.data() + 60) == crc(a), "CRC mismatch");
+    require(triangleHeight(24000, 24000, 24000, 26000, 0.25, 0.25) == 0.0,
+            "wrong NE-SW triangle");
+    require(triangleHeight(24000, 24000, 24000, 26000, 0.75, 0.75) == 500.0,
+            "wrong SE triangle");
+    Residual residual;
+    residual.observe(4500.0f, 1000.0);
+    residual.observe(0.0f, 1000.0);
+    std::optional<Aowis::TerrainWire::TerrainSourceStatistics> statistics;
+    std::optional<Aowis::TerrainWire::TerrainGeometricError> error;
+    const Aowis::TerrainWire::MetadataBuffer metadata = residual.metadata();
+    require(Aowis::TerrainWire::decodeMetadata(metadata.data(), metadata.size(), statistics, error)
+        && statistics && error && statistics->minimum_elevation_m == 0.0f
+        && statistics->maximum_elevation_m == 4500.0f && error->compared_pixel_count == 2
+        && error->maximum_underestimation_m == 3500.0 && error->maximum_overestimation_m == 1000.0
+        && std::abs(error->rms_geometric_error_m - std::sqrt(6625000.0)) < 1e-9,
+        "wrong source residual statistics");
+    ErrorLevel level;
+    level.initialize(cells, 1, 2);
+    const float samples[] = {4500.0f, 0.0f};
+    level.observeRow(0.25, samples, true);
+    const Record measured = encode(cells, 1, 0, 0, 1855, &level);
+    require(Aowis::TerrainWire::decodeMetadata(measured.data() + PayloadOffset,
+        RecordBytes - PayloadOffset, statistics, error) && statistics && error
+        && statistics->maximum_elevation_m == 4500.0f && error->compared_pixel_count == 1
+        && error->maximum_underestimation_m > 4000.0 && get(measured.data() + 60) == crc(measured),
+        "metadata record did not preserve summit");
     std::string pattern = (fs::temp_directory_path() / "aowis-etopo-test.XXXXXX").string();
     require(mkdtemp(pattern.data()) != nullptr, "cannot create fixture directory");
     try

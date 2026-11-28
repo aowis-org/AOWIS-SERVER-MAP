@@ -81,7 +81,7 @@ The wrapper builds a tagged Debian 13 toolchain image from
 into a disposable build directory without local build trees, and invokes the
 existing `compile_deb.sh` script. It writes a binary package to `dist/` using
 the **host user's UID/GID**. It also exports the required, independently
-versioned `aowis-server-map-data_2022.1+overview1_all.deb`. The original ETOPO
+versioned `aowis-server-map-data_2022.1+overview2_all.deb`. The original ETOPO
 GeoTIFF, overview and completed data package survive container deletion and
 `--clean` in a persistent host build-data directory. See
 [global terrain data](global-terrain-data.md). No Debian dependencies are installed on the host,

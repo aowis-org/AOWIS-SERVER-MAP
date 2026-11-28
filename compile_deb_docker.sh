@@ -33,7 +33,7 @@ container without installing Debian build dependencies on the host.
   -h, --help          Show help.
 
 Output: dist/aowis-server-map_<version>+deb<revision>_<architecture>.deb
-        dist/aowis-server-map-data_2022.1+overview1_all.deb
+        dist/aowis-server-map-data_2022.1+overview2_all.deb
 HELP
 }
 
@@ -140,7 +140,7 @@ build_package()
             "${#new_packages[@]}" "$package_revision" >&2
         exit 1
     fi
-    test -s "$dist_directory/aowis-server-map-data_2022.1+overview1_all.deb"
+    test -s "$dist_directory/aowis-server-map-data_2022.1+overview2_all.deb"
     printf 'Package ready: %s\n' "${new_packages[0]}"
 }
 

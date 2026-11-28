@@ -9,6 +9,7 @@ set_target_properties(aowis-map-etopo PROPERTIES AUTOMOC OFF
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
 target_link_libraries(aowis-map-etopo PRIVATE TIFF::TIFF)
 target_compile_features(aowis-map-etopo PRIVATE cxx_std_20)
+target_include_directories(aowis-map-etopo PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/../../include")
 if(BUILD_TESTING)
     add_test(NAME aowis-server-map-etopo-native
         COMMAND aowis-map-etopo self-test)

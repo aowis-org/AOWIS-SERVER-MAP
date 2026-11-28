@@ -233,6 +233,6 @@ echo "Debian package created:"
 echo "  $package_path"
 echo
 echo "Install it with:"
-echo "  sudo apt install ./dist/aowis-server-map-data_2022.1+overview1_all.deb ./${package_path#"$project_directory/"}"
+echo "  sudo apt install ./dist/aowis-server-map-data_2022.1+overview2_all.deb ./${package_path#"$project_directory/"}"
 echo
 dpkg-deb --info "$package_path"

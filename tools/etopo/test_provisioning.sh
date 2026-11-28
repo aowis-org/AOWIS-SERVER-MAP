@@ -32,9 +32,15 @@ run --offline --link-directory "$work/links"
 [[ -f "$source" && ! -e "$source.part" && -f "$pack" && -L "$work/links/$source_name" ]]
 run --offline
 [[ "$(wc -l < "$work/builds")" == 1 ]]
-rm "$pack"
+# Upgrading the manifest must rebuild only the derived pack, retaining source.
+sed -i 's/2022.1+overview2/2022.1+overview1/' "$work/cache/etopo-2022-provenance.json"
+run --offline
+[[ "$(wc -l < "$work/builds")" == 2 && "$(cat "$source")" == 'complete original' ]]
 run --offline
 [[ "$(wc -l < "$work/builds")" == 2 ]]
+rm "$pack"
+run --offline
+[[ "$(wc -l < "$work/builds")" == 3 ]]
 # Corrupted originals must not be replaced or reacquired.
 printf 'changed original' > "$source"
 if run --offline; then exit 1; fi

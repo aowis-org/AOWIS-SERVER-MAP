@@ -48,9 +48,11 @@ and promoted without any network request, including with `--offline`.
 and local preparation with downloads forbidden. An incomplete file is retained for resuming; offline mode
 never invokes curl. Building the first overview requires working disk space and RAM for the projected grid;
 source pixels are decoded by libtiff and area-averaged using their geographic
-footprints, without creating an intermediate GeoTIFF. Previously generated
-valid overview packs remain reusable; newly generated values need not be
-bit-identical to GDAL resampling.
+footprints, without creating an intermediate GeoTIFF. The overview2 data revision rebuilds the derived pack once from the existing
+original; no NOAA download is required. The binary tile and pack formats remain
+unchanged. The z0–7 metadata measures ETOPO pixel-centre elevations (with the
+same visual sea-level clamp) against the quantized NE–SW triangular surface.
+These are sampled ETOPO errors, not Copernicus errors or certified bounds.
 Subsequent builds verify and reuse the existing artifacts without reprojection.
 The preparation tool is serialized by a file lock. A missing/corrupt derived pack
 is rebuilt locally; an original changed since its manifest was written is
@@ -71,13 +73,13 @@ network or dataset dependencies.
 Two packages are produced in `dist/`:
 
 - `aowis-server-map_<code-version>_amd64.deb` (architecture varies).
-- `aowis-server-map-data_2022.1+overview1_all.deb` (architecture independent).
+- `aowis-server-map-data_2022.1+overview2_all.deb` (architecture independent).
 
 On a new server, transfer both artifacts and install both in one `apt install`
 transaction. For example (replace the code package version if different):
 
 ```bash
-sudo apt install ./aowis-server-map-data_2022.1+overview1_all.deb ./aowis-server-map_0.1.0+deb1_amd64.deb
+sudo apt install ./aowis-server-map-data_2022.1+overview2_all.deb ./aowis-server-map_0.1.0+deb1_amd64.deb
 ```
 
 The server package requires the data package. The separately versioned data

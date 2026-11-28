@@ -208,9 +208,12 @@ The output is atomically published, and can be copied to multiple MAP servers.
 Install it with read permission for the MAP service user (for example,
 `install -m 0644 global-overview-v1.aowpack <offline package directory>/`).
 Preserve the source attribution and source file alongside your provisioning records.
-This is an overview derived from a separate source, not native GLO-30. Native
-source-statistics and geometric-error fields are intentionally absent in these
-coarse tiles. The native GLO-30 generation range and existing caches are unchanged.
+This is an overview derived from a separate source, not native GLO-30.
+Source statistics and geometric error at z0–7 describe the ETOPO reference
+(with the same visual sea-level clamp), sampled at source pixel centres against
+the quantized NE–SW triangular surface. They are not GLO-30 errors or certified
+continuous bounds. Replace any manually installed older overview with the rebuilt
+pack to enable SSE at these levels. Native GLO-30 generation and caches are unchanged.
 Point elevation queries for GLO-30 do not fall back to these visual-only levels;
 analysis-grid APIs are unchanged. Polar areas beyond Web Mercator are not covered.
 
