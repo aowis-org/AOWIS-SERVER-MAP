@@ -521,6 +521,9 @@ SourceLoadResult downloadSourceTile(const QString &provider_cache_directory,
                                                                  &downloaded_bytes,
                                                                  &stage_bytes]()
     {
+        // An abort can close the QIODevice before a queued read is handled.
+        if (!reply->isReadable())
+            return;
         if (write_failed)
         {
             reply->readAll();
@@ -554,7 +557,8 @@ SourceLoadResult downloadSourceTile(const QString &provider_cache_directory,
             *upstream_cancel_generation != request_cancel_generation);
     }
 
-    if (!write_failed)
+    // Finished does not imply readable: aborted replies may be closed.
+    if (!write_failed && reply->isReadable())
     {
         const QByteArray trailing = reply->readAll();
         downloaded_bytes += trailing.size();

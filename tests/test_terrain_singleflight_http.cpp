@@ -904,6 +904,8 @@ int main(int argc, char **argv)
         isolation_config.terrain_cache_directory = isolated_cache.path() + "/terrain";
         isolation_config.map_remote_fetch_enabled = false;
         isolation_config.terrain_remote_fetch_enabled = true;
+        // Even a broken admission policy must not contact a third-party server.
+        isolation_config.terrain_integration_source_url = QUrl(QStringLiteral("http://127.0.0.1:1"));
         isolation_config.maximum_terrain_workers = 1;
         isolation_config.maximum_terrain_jobs = 4;
         isolation_config.maximum_terrain_remote_workers = 2;
@@ -917,9 +919,10 @@ int main(int argc, char **argv)
 
         Aowis::Map::TerrainTile cached_tile;
         cached_tile.dataset = QStringLiteral("copernicus-glo30");
-        cached_tile.address.zoom = 5;
-        cached_tile.address.x = 11;
-        cached_tile.address.y = 12;
+        // Zooms 0–7 belong to the local global overview, not remote acquisition.
+        cached_tile.address.zoom = 8;
+        cached_tile.address.x = 133;
+        cached_tile.address.y = 90;
         cached_tile.nominal_resolution_m = 30.0;
         cached_tile.vertical_datum = Aowis::Map::TerrainVerticalDatum::Egm96;
         cached_tile.elevations_m.fill(42.0f, Aowis::Map::TerrainTileSampleCount);
@@ -971,7 +974,7 @@ int main(int argc, char **argv)
 
         QNetworkAccessManager remote_probe_network;
         const QUrl remote_url(QStringLiteral(
-            "http://127.0.0.1:%1/terrain/v2/copernicus-glo30/5/11/13.aowterrain")
+            "http://127.0.0.1:%1/terrain/v2/copernicus-glo30/8/133/91.aowterrain")
             .arg(TerrainSingleFlightTestAccess::port(isolated_server)));
         QNetworkReply *remote_reply =
             remote_probe_network.get(QNetworkRequest(remote_url));
@@ -981,13 +984,14 @@ int main(int argc, char **argv)
             app.processEvents(QEventLoop::AllEvents, 20);
             QThread::msleep(1);
         }
-        const bool remote_rejected = remote_reply->isFinished() &&
-            remote_reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() == 503;
+        const int remote_status = remote_reply->isFinished()
+            ? remote_reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() : 0;
+        const bool remote_rejected = remote_status == 503;
         remote_reply->deleteLater();
 
         QNetworkAccessManager isolation_network;
         const QUrl cached_url(QStringLiteral(
-            "http://127.0.0.1:%1/terrain/v2/copernicus-glo30/5/11/12.aowterrain")
+            "http://127.0.0.1:%1/terrain/v2/copernicus-glo30/8/133/90.aowterrain")
             .arg(TerrainSingleFlightTestAccess::port(isolated_server)));
         QNetworkReply *cached_reply = isolation_network.get(QNetworkRequest(cached_url));
         timer.restart();
@@ -999,17 +1003,33 @@ int main(int argc, char **argv)
         const bool isolation_passed = cached_reply->isFinished() &&
             cached_reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() == 200 &&
             cached_reply->readAll() == encoded;
+        // With no overview installed and no upstream MAP, a coarse miss is
+        // local-only. It must return not-found, not a remote overload error.
+        const QUrl coarse_url(QStringLiteral(
+            "http://127.0.0.1:%1/terrain/v2/copernicus-glo30/5/11/13.aowterrain")
+            .arg(TerrainSingleFlightTestAccess::port(isolated_server)));
+        QNetworkReply *coarse_reply = isolation_network.get(QNetworkRequest(coarse_url));
+        timer.restart();
+        while (!coarse_reply->isFinished() && timer.elapsed() < 3000)
+        {
+            app.processEvents(QEventLoop::AllEvents, 20);
+            QThread::msleep(1);
+        }
+        const int coarse_status = coarse_reply->isFinished()
+            ? coarse_reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() : 0;
+        coarse_reply->deleteLater();
         // Always unblock before server destruction, even if the HTTP probe failed.
         remote_release.release(2);
         TerrainSingleFlightTestAccess::releaseRemoteJob(isolated_server);
         TerrainSingleFlightTestAccess::releaseRemoteJob(isolated_server);
         cached_reply->deleteLater();
-        if (!isolation_passed || !remote_rejected ||
+        if (!isolation_passed || !remote_rejected || coarse_status != 404 ||
             TerrainSingleFlightTestAccess::admittedJobs(isolated_server) != 0)
         {
             std::cerr << "Remote overload did not preserve cached terrain admission: "
                       << "cached=" << isolation_passed
-                      << " rejected=" << remote_rejected << '\n';
+                      << " remote_status=" << remote_status
+                      << " coarse_status=" << coarse_status << '\n';
             return 1;
         }
     }
