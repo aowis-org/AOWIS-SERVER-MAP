@@ -168,7 +168,10 @@ void ProviderCatalog::rebuild()
     {
         locally_defined.insert(provider.id);
         positions.insert(provider.id, combined.size());
-        combined.append({provider, false, {}});
+        AvailableMapProvider entry;
+        entry.provider = provider;
+        entry.inherited = false;
+        combined.append(entry);
     }
 
     for (const MapCascadeUpstream &upstream : this->cascade_.upstreams)

@@ -1837,6 +1837,11 @@ void Server::setupRoutes()
     this->http.route("/map/v1/providers", QHttpServerRequest::Method::Put,
                      [this](const QHttpServerRequest &request)
     {
+        // Same bound as an upstream-advertised catalog (provider_catalog.cpp).
+        constexpr qsizetype maximum_catalog_bytes = 512 * 1024;
+        if (request.body().size() > maximum_catalog_bytes)
+            return QHttpServerResponse("Provider catalog request too large",
+                                       QHttpServerResponse::StatusCode::BadRequest);
         QVector<Aowis::Map::MapProvider> proposed;
         QString error_message;
         // Share the exact provider schema and URL-template validation with the
@@ -1984,6 +1989,18 @@ void Server::setupRoutes()
             invalid_result.status = Aowis::Map::TerrainElevationLookupStatus::InvalidCoordinate;
             invalid_result.error_message = QStringLiteral(
                 "Terrain elevation requests require numeric latitude and longitude query parameters");
+            return makeReadyResponse(makeTerrainElevationErrorResponse(invalid_result));
+        }
+        // Reject NaN, infinities and out-of-range values here: they would
+        // otherwise take a remote acquisition slot only to fail as invalid.
+        if (!std::isfinite(latitude_deg) || !std::isfinite(longitude_deg) ||
+            latitude_deg < -90.0 || latitude_deg > 90.0 ||
+            longitude_deg < -180.0 || longitude_deg > 180.0)
+        {
+            Aowis::Map::TerrainElevationLookupResult invalid_result;
+            invalid_result.status = Aowis::Map::TerrainElevationLookupStatus::InvalidCoordinate;
+            invalid_result.error_message = QStringLiteral(
+                "Terrain coordinate must be finite WGS84 latitude/longitude");
             return makeReadyResponse(makeTerrainElevationErrorResponse(invalid_result));
         }
 

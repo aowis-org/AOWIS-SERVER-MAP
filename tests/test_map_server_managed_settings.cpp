@@ -175,7 +175,7 @@ int main(int argc, char **argv)
     cascade.poor_internet_mode = true;
     cascade.upstreams.append({QStringLiteral("central"),
                               QUrl(QStringLiteral("https://central.example")),
-                              QByteArrayLiteral("central-key")});
+                              QByteArrayLiteral("central-key"), QString(), QNetworkProxy()});
     if (!check(store->saveCascade(cascade, QString(), nullptr, &error),
                "Write managed cascade", error)) return 1;
     Server::Config admin_authoritative;

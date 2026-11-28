@@ -414,6 +414,8 @@ SourceLoadResult downloadSourceTile(const QString &provider_cache_directory,
         QMutexLocker locker(upstream_mutex);
         if (*upstream_cancel_generation != request_cancel_generation)
         {
+            output.close();
+            QFile::remove(incoming_path);
             result.status = SourceLoadStatus::Cancelled;
             result.error_message = QStringLiteral("Copernicus upstream download canceled");
             return result;

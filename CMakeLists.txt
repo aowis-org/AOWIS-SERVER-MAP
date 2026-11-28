@@ -28,6 +28,18 @@ option(
     ON
 )
 
+# Compiler warnings for MAP's own targets only: CONFIG was added above and
+# keeps its own flags. On by default for a standalone build, off when MAP is
+# embedded in another AOWIS project (enable there explicitly if wanted).
+option(
+    AOWIS_SERVER_MAP_WARNINGS
+    "Enable -Wall -Wextra for AOWIS map targets"
+    ${PROJECT_IS_TOP_LEVEL}
+)
+if(AOWIS_SERVER_MAP_WARNINGS AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    add_compile_options(-Wall -Wextra)
+endif()
+
 find_package(Qt6 REQUIRED COMPONENTS Core Network Concurrent)
 find_package(TIFF REQUIRED)
 find_package(PNG REQUIRED)

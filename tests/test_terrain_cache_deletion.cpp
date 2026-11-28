@@ -247,8 +247,10 @@ int main()
         const QString recent_path = limited.normalizedTilePath(dataset, recent.address);
         const std::uint64_t recent_size = std::uint64_t(QFileInfo(recent_path).size());
         const std::string protection_namespace = limited.cacheProtectionNamespace(dataset);
+        const CacheProtectionGroup offline_group{
+            "offline", {{protection_namespace, zoom, 500, 500, 302, 302}}};
         if (!require(!protection_namespace.empty() &&
-                     limited.replaceCacheProtectionGroup({"offline", {{protection_namespace, zoom, 500, 500, 302, 302}}}) &&
+                     limited.replaceCacheProtectionGroup(offline_group) &&
                      limited.cacheProtectionGroups().value_or(std::vector<CacheProtectionGroup>()).size() == 1,
                      "Cannot protect normalized terrain through TerrainData API")) return 1;
         if (!require(limited.terrainTile(dataset, recent.address, false).status == TerrainTileLookupStatus::Ready &&

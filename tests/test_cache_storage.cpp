@@ -331,14 +331,21 @@ int main()
         // First migrate an existing access-only database, then save protection.
         index.recordAccess("provider/12/1/1");
         require(index.flush(), "Cannot establish pre-protection index");
-        require(index.replaceProtectionGroup(CacheStorageKind::Raster, {"region A", {{"provider", 12, 1, 1, 1, 2}}}) &&
-                index.replaceProtectionGroup(CacheStorageKind::Raster, {"region B", {{"provider", 12, 1, 1, 1, 1},
-                    {"provider", 12, 1, 1, 3, 3}}}), "Cannot save overlapping regions");
-        require(!index.replaceProtectionGroup(CacheStorageKind::Raster, {"region A", {{"provider", 12, 1, 1, 1, 1},
-                    {"../invalid", 12, 1, 1, 1, 1}}}) &&
-                !index.replaceProtectionGroup(CacheStorageKind::Raster, {"region A", {}}) &&
-                !index.replaceProtectionGroup(CacheStorageKind::Raster, {"bad", {{"provider", 1, 0, 2, 0, 0}}}) &&
-                !index.replaceProtectionGroup(CacheStorageKind::TerrainSources, {"bad", {{"provider", 1, 0, 0, 0, 0}}}),
+        const CacheProtectionGroup region_a{"region A", {{"provider", 12, 1, 1, 1, 2}}};
+        const CacheProtectionGroup region_b{"region B", {{"provider", 12, 1, 1, 1, 1},
+                                                         {"provider", 12, 1, 1, 3, 3}}};
+        require(index.replaceProtectionGroup(CacheStorageKind::Raster, region_a) &&
+                index.replaceProtectionGroup(CacheStorageKind::Raster, region_b),
+                "Cannot save overlapping regions");
+        const CacheProtectionGroup invalid_namespace{"region A", {{"provider", 12, 1, 1, 1, 1},
+                                                                  {"../invalid", 12, 1, 1, 1, 1}}};
+        const CacheProtectionGroup empty_group{"region A", {}};
+        const CacheProtectionGroup out_of_range{"bad", {{"provider", 1, 0, 2, 0, 0}}};
+        const CacheProtectionGroup source_kind{"bad", {{"provider", 1, 0, 0, 0, 0}}};
+        require(!index.replaceProtectionGroup(CacheStorageKind::Raster, invalid_namespace) &&
+                !index.replaceProtectionGroup(CacheStorageKind::Raster, empty_group) &&
+                !index.replaceProtectionGroup(CacheStorageKind::Raster, out_of_range) &&
+                !index.replaceProtectionGroup(CacheStorageKind::TerrainSources, source_kind),
                 "Invalid group replacement must be rejected");
         const std::optional<std::vector<CacheProtectionGroup>> groups = index.protectionGroups(CacheStorageKind::Raster);
         require(groups && groups->size() == 2 && groups->front().ranges.front().max_y == 2,
@@ -399,7 +406,8 @@ int main()
     writeFile(protected_terrain / "v1/r2/other/12/1/1.aowterrain", 100);
     {
         CacheAccessIndex index(protected_terrain);
-        require(index.replaceProtectionGroup(CacheStorageKind::NormalizedTerrain, {"DEM", {{"v1/r2/dataset", 12, 1, 1, 1, 1}}}) &&
+        const CacheProtectionGroup dem_group{"DEM", {{"v1/r2/dataset", 12, 1, 1, 1, 1}}};
+        require(index.replaceProtectionGroup(CacheStorageKind::NormalizedTerrain, dem_group) &&
                 index.setStoragePolicy(CacheStorageKind::NormalizedTerrain, {110, 85, false}), "Cannot pin terrain");
         index.cleanupNow();
         require(fs::exists(protected_terrain / "v1/r2/dataset/12/1/1.aowterrain") &&

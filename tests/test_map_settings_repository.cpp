@@ -48,9 +48,9 @@ int main(int argc, char **argv)
                  config.upstreams.isEmpty(), "Empty repository uses MAP defaults"))
         return 1;
     config.upstreams.append({QStringLiteral("primary"), QUrl(QStringLiteral("https://primary.example:8443")),
-                             QByteArray("key-1")});
+                             QByteArray("key-1"), QString(), QNetworkProxy()});
     config.upstreams.append({QStringLiteral("backup"), QUrl(QStringLiteral("https://secondary.example")),
-                             QByteArray("key-2")});
+                             QByteArray("key-2"), QString(), QNetworkProxy()});
     config.allow_direct_fetch = false;
     config.poor_internet_mode = true;
     config.jpeg_quality = 65;

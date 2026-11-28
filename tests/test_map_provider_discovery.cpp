@@ -232,8 +232,10 @@ int main(int argc, char **argv)
     config.cache_directory = QDir(storage.path()).filePath(QStringLiteral("cache"));
     config.map_providers.clear();
     config.cascade.allow_direct_fetch = true; // Must NEVER apply to inherited sources.
-    config.cascade.upstreams.append({QStringLiteral("root"), root.origin(), root.api_key});
-    config.cascade.upstreams.append({QStringLiteral("backup"), backup.origin(), backup.api_key});
+    config.cascade.upstreams.append({QStringLiteral("root"), root.origin(), root.api_key,
+                                     QString(), QNetworkProxy()});
+    config.cascade.upstreams.append({QStringLiteral("backup"), backup.origin(), backup.api_key,
+                                     QString(), QNetworkProxy()});
     config.managed_settings_root = QDir(storage.path()).filePath(QStringLiteral("map-config"));
 
     QNetworkAccessManager network;

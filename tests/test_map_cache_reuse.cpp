@@ -454,8 +454,10 @@ int main(int argc, char **argv)
         require(limited.getTile(provider_id, 12, 1, 2, QStringLiteral("recent")).data == QByteArray(100, 'b'),
                 "Failed to establish recent cache hit");
         const std::string protection_namespace = limited.cacheProtectionNamespace(provider_id);
+        const Aowis::Map::CacheProtectionGroup offline_group{
+            "offline", {{protection_namespace, 12, 1, 1, 4, 4}}};
         require(protection_namespace == provider_id.toUtf8().toStdString() &&
-                limited.replaceCacheProtectionGroup({"offline", {{protection_namespace, 12, 1, 1, 4, 4}}}) &&
+                limited.replaceCacheProtectionGroup(offline_group) &&
                 limited.cacheProtectionGroups().value_or(std::vector<Aowis::Map::CacheProtectionGroup>()).size() == 1,
                 "Cannot protect ordinary raster tile through MapTiles API");
         require(limited.setCacheStoragePolicy({240, 85, false}), "Failed to enable ordinary raster eviction");
